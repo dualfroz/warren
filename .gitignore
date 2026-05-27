@@ -1,0 +1,13 @@
+# compiled lua
+*.luac
+
+# coverage
+luacov.*
+
+# run / save output
+*.out
+
+# os / logs / env
+.DS_Store
+*.log
+.env
