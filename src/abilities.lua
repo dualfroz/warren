@@ -151,3 +151,113 @@ local function tryShriek(game, monster)
   return true, string.format("%s's wail blinds you", monster.name)
 end
 
+-- Cleric-style ability: mends the neediest hurt ally within range and line of
+-- sight instead of attacking. Ties break on the lowest hp fraction. Filtered
+-- to other.kind == "monster" - the same "hostile" tag every other module
+-- (companions.lua/mercenaries.lua/reanimation.lua's own nearestHostile,
+-- commands.lua's isVisibleHostile) already keys off of - so a dark cleric
+-- mends a fellow monster, never the player's own wounded companion, hireling
+-- or thrall sharing the same entities list.
+local function tryHeal(game, monster)
+  local best, bestRatio = nil, 1
+  for _, other in ipairs(game.level.entities) do
+    if other ~= monster and other.kind == "monster" and other:isAlive() and other.hp < other.maxHp then
+      local dist = math.max(math.abs(other.x - monster.x), math.abs(other.y - monster.y))
+      if dist <= RANGE.heal and Los.clear(game.level.map, monster.x, monster.y, other.x, other.y) then
+        local ratio = other.hp / other.maxHp
+        if ratio < bestRatio then bestRatio, best = ratio, other end
+      end
+    end
+  end
+  if not best then return false end
+  local amount = 6
+  local before = best.hp
+  best.hp = math.min(best.maxHp, best.hp + amount)
+  monster.cooldown = COOLDOWN.heal
+  return true, string.format("%s mends %s for %d", monster.name, best.name, best.hp - before)
+end
+
+-- Chieftain-style ability: grants every adjacent, not-yet-buffed ally (and
+-- itself) a temporary attack boost. No-op once the whole knot is already lit.
+-- Filtered to other.kind == "monster" for the same reason tryHeal above is:
+-- without it a chieftain standing next to the player's companion, hireling
+-- or thrall would rally that ally of the PLAYER's instead of one of its own.
+local function tryRally(game, monster)
+  local buffed = {}
+  for _, other in ipairs(game.level.entities) do
+    if other ~= monster and other.kind == "monster" and other:isAlive() and not Status.has(other, Status.STRENGTH)
+      and math.abs(other.x - monster.x) <= 1 and math.abs(other.y - monster.y) <= 1 then
+      Status.apply(other, Status.STRENGTH, 10, 2)
+      buffed[#buffed + 1] = other.name
+    end
+  end
+  if #buffed == 0 then return false end
+  Status.apply(monster, Status.STRENGTH, 10, 2)
+  monster.cooldown = COOLDOWN.rally
+  return true, string.format("%s rallies %s", monster.name, table.concat(buffed, ", "))
+end
+
+-- Footpad-style ability: not cooldown-gated. Once adjacent it lifts a single
+-- non-essential item (never an equipped key or the amulet, since those never
+-- sit unequipped in inventory) and flees for the rest of the encounter; a
+-- fleeing footpad just keeps running rather than trying again.
+local function trySteal(game, monster)
+  if monster.fleeing then
+    game:stepMonsterAway(monster, game.player.x, game.player.y)
+    return true
+  end
+  if not game:playerAdjacent(monster) then return false end
+  local idx = game:findInInventory(function(item)
+    return item.kind ~= Items.KEY and item.kind ~= Items.AMULET
+  end)
+  if not idx then
+    monster.fleeing = true
+    return true, string.format("%s finds nothing worth stealing and flees", monster.name)
+  end
+  local item = table.remove(game.player.inventory, idx)
+  monster.stolen = item
+  monster.fleeing = true
+  return true, string.format("%s steals your %s and flees", monster.name, item.name)
+end
+
+local dispatch = { summon = trySummon, curse = tryCurse, heal = tryHeal, rally = tryRally, shriek = tryShriek }
+
+-- Called once per monster turn, after status ticks and regen but before
+-- ai.lua. Returns true when the ability consumed the turn.
+function Abilities.tryAct(game, monster)
+  if not monster.ability then return false end
+  if monster.ability == "steal" then
+    local acted, line = trySteal(game, monster)
+    if acted and line then game.log:add(line) end
+    return acted == true
+  end
+  local handler = dispatch[monster.ability]
+  if not handler or (monster.cooldown and monster.cooldown > 0) then return false end
+  local acted, line = handler(game, monster)
+  if not acted then return false end
+  if line then game.log:add(line) end
+  return true
+end
+
+-- Slime-style reaction: fired from Game:playerAttack when a hit lands but
+-- does not kill. Halves the victim's max hp and spawns a clone at the other
+-- half, capped at two splits total (`splitGen`) so a slime cannot be farmed
+-- into an unbounded swarm.
+function Abilities.onHit(game, target)
+  if target.ability ~= "split" then return nil end
+  if not target:isAlive() or target.maxHp < 4 then return nil end
+  if (target.splitGen or 0) >= 2 then return nil end
+  local x, y = freeAdjacent(game, target.x, target.y)
+  if not x then return nil end
+  local newMax = target.maxHp // 2
+  target.maxHp = newMax
+  target.hp = math.min(target.hp, newMax)
+  target.splitGen = (target.splitGen or 0) + 1
+  local clone = game:spawnMinion(target.species, x, y)
+  clone.maxHp = newMax
+  clone.hp = newMax
+  clone.splitGen = target.splitGen
+  return string.format("the %s splits in two", target.name)
+end
+
+return Abilities
