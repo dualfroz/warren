@@ -9,11 +9,50 @@ local Gen = require("gen.init")
 local Monsters = require("monsters")
 local Items = require("items")
 local Affixes = require("affixes")
+local Shop = require("shop")
+local Shrines = require("shrines")
+local Companions = require("companions")
+local Artifacts = require("artifacts")
+local Bosses = require("bosses")
+local Quests = require("quests")
+local Alchemy = require("alchemy")
+local Elites = require("elites")
+local Vaults = require("vaults")
+local Runewords = require("runewords")
+local Atmosphere = require("atmosphere")
+local Stealth = require("stealth")
+local Crafting = require("crafting")
+local Nodes = require("nodes")
+local Sets = require("sets")
+local Mimics = require("mimics")
+local Curses = require("curses")
+local Graves = require("graves")
+local Chests = require("chests")
+local Biomes = require("biomes")
+local Hazards = require("hazards")
+local Blocks = require("blocks")
+local Prefab = require("gen.prefab")
 local Level = require("level")
 
 local Builder = {}
 
 local WIDTH, HEIGHT = 60, 24
+
+-- The dungeon bottoms out here: the Amulet of Warren is guaranteed to be
+-- somewhere on this floor, and there is no way to descend past it. Tests
+-- override it via options.maxDepth to exercise a full fetch-and-return
+-- playthrough without generating nine intervening floors.
+Builder.MAX_DEPTH = 10
+
+-- The effects a random floor trap, or a trap kit rolled as loot, can carry -
+-- shared by the two draws below and exposed here so tests can assert against
+-- the authoritative list instead of a copy that would go stale the next time
+-- a new effect is appended.
+Builder.TRAP_EFFECTS = { "dart", "poison", "teleport", "confuse", "blind", "stun" }
+
+function Builder.maxDepth(options)
+  return (options and options.maxDepth) or Builder.MAX_DEPTH
+end
 
 local weaponBases = {
   { name = "dagger", power = 2 }, { name = "mace", power = 3 },
@@ -23,13 +62,21 @@ local armorBases = {
   { name = "leather armor", power = 1 }, { name = "chain mail", power = 2 },
   { name = "plate armor", power = 3 },
 }
+local bowBases = {
+  { name = "short bow", power = 2, range = 5 },
+  { name = "long bow", power = 3, range = 7 },
+  { name = "crossbow", power = 4, range = 6 },
+}
 
 local NEIGHBOURS = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }
 
 -- Cells reachable from (sx, sy) through walkable terrain and closed doors, and -
 -- when allowLocked is true - locked doors too. Used to guarantee the descent is
 -- never sealed behind a locked door and that keys always sit on an openable side.
-local function reachSet(map, sx, sy, allowLocked)
+-- When allowVault is also true, a sealed vault door or a closed gate (see
+-- below) counts as passable too, so the far side of an unopened vault or
+-- gate puzzle can still be found for its treasure's placement.
+local function reachSet(map, sx, sy, allowLocked, allowVault)
   local seen = { [map:index(sx, sy)] = true }
   local stack = { { sx, sy } }
   while #stack > 0 do
@@ -37,11 +84,15 @@ local function reachSet(map, sx, sy, allowLocked)
     stack[#stack] = nil
     for _, step in ipairs(NEIGHBOURS) do
       local nx, ny = cell[1] + step[1], cell[2] + step[2]
-      if map:inBounds(nx, ny) and map:isPassable(nx, ny, allowLocked) then
-        local idx = map:index(nx, ny)
-        if not seen[idx] then
-          seen[idx] = true
-          stack[#stack + 1] = { nx, ny }
+      if map:inBounds(nx, ny) then
+        local passable = map:isPassable(nx, ny, allowLocked)
+          or (allowVault and (Tiles.isVaultDoor(map:get(nx, ny)) or Tiles.isGate(map:get(nx, ny))))
+        if passable then
+          local idx = map:index(nx, ny)
+          if not seen[idx] then
+            seen[idx] = true
+            stack[#stack + 1] = { nx, ny }
+          end
         end
       end
     end
@@ -81,24 +132,41 @@ end
 
 local function rollItem(rng, depth)
   local roll = rng:range(1, 100)
-  if roll <= 24 then
-    local effects = { "heal", "heal", "strength", "haste", "poison" }
+  if roll <= 22 then
+    local effects = { "heal", "heal", "strength", "haste", "poison", "clarity", "cure", "confuse", "blind", "levitate" }
     return Items.potionOf(effects[rng:range(1, #effects)])
-  elseif roll <= 40 then
+  elseif roll <= 36 then
     local effects = { "teleport", "identify", "mapping", "fireball" }
     return Items.scroll(effects[rng:range(1, #effects)])
-  elseif roll <= 60 then
+  elseif roll <= 54 then
     local base = weaponBases[rng:range(1, #weaponBases)]
     return Affixes.decorate(Items.weapon(base.name, base.power), Affixes.rollWeapon(rng))
-  elseif roll <= 76 then
+  elseif roll <= 68 then
     local base = armorBases[rng:range(1, #armorBases)]
     return Affixes.decorate(Items.armor(base.name, base.power), Affixes.rollArmor(rng))
-  elseif roll <= 86 then
+  elseif roll <= 76 then
     return Items.ring("ring of power", rng:range(0, 1), rng:range(0, 1))
+  elseif roll <= 80 then
+    local learnable = { "heal", "shield", "blink", "shock", "discord", "polymorph", "confuse", "blind", "levitate", "weaken", "cleanse" }
+    return Items.tome(learnable[rng:range(1, #learnable)])
+  elseif roll <= 84 then
+    local base = bowBases[rng:range(1, #bowBases)]
+    return Items.bow(base.name, base.power, base.range)
+  elseif roll <= 92 then
+    return Items.ammo("arrow", rng:range(4, 8))
   else
     return Items.food("ration", 400)
   end
 end
+
+-- Maps a floor item's kind to the wearable slot curses.lua knows how to
+-- afflict, so the dead-last curse pass below can find every eligible piece
+-- regardless of which earlier system placed it (a plain drop, a set piece,
+-- vault treasure, ...).
+local slotForCursableItem = {
+  [Items.WEAPON] = "weapon", [Items.ARMOR] = "armor",
+  [Items.RING] = "ring", [Items.BOW] = "bow",
+}
 
 local function chosenGenerator(depth, options)
   if options and options.generator and Gen.has(options.generator) then
@@ -175,7 +243,11 @@ function Builder.build(depth, rng, options)
     end)
     if x then
       local spec = eligible[rng:range(1, #eligible)]
-      entities[#entities + 1] = Monsters.create(spec, #entities + 1, x, y, depth)
+      local monster = Monsters.create(spec, #entities + 1, x, y, depth)
+      -- A wild monster starts asleep (see stealth.lua): a plain field set,
+      -- never an rng draw, so it cannot perturb any placement roll below.
+      monster.awareness = Stealth.DORMANT
+      entities[#entities + 1] = monster
       mark(x, y)
     end
   end
@@ -189,12 +261,69 @@ function Builder.build(depth, rng, options)
     end
   end
 
-  local trapEffects = { "dart", "poison", "teleport" }
+  -- Loose gold piles and the shopkeeper (below) are both gated to depth 4+:
+  -- the shopkeeper joins Monsters.forDepth's eligible array from that depth
+  -- on, and any new rng draw here would otherwise reshuffle the trap/light/
+  -- amulet placement the fixed-maxDepth win-condition tests rely on for the
+  -- shallow floors they actually exercise.
+  if depth >= 4 then
+    local goldCount = rng:range(1, 3)
+    for _ = 1, goldCount do
+      local x, y = pickFree(reachable, rng, freeFloor)
+      if x then
+        floorItems[#floorItems + 1] = { x = x, y = y, item = Items.gold(rng:range(8, 20) + depth * 4) }
+        mark(x, y)
+      end
+    end
+  end
+
+  -- A shopkeeper occasionally sets up on a floor, guarding a handful of
+  -- priced wares. Gold to spend there comes from the loose piles above.
+  if depth >= 4 and rng:chance(1, 3) then
+    local sx, sy = pickFree(reachable, rng, freeFloor)
+    if sx then
+      local keeper = Monsters.create(Monsters.byKey.shopkeeper, #entities + 1, sx, sy, depth)
+      entities[#entities + 1] = keeper
+      mark(sx, sy)
+      for _, item in ipairs(Shop.stock(rng)) do
+        local x, y = pickFree(reachable, rng, freeFloor)
+        if x then
+          floorItems[#floorItems + 1] = {
+            x = x, y = y, item = item, price = Shop.priceOf(item), shopId = keeper.id,
+          }
+          mark(x, y)
+        end
+      end
+    end
+  end
+
+  -- Shrines join the shop above at depth 4+, for the same reason: an earlier
+  -- rng draw would reshuffle the trap/light/amulet placement the fixed-
+  -- maxDepth win-condition tests rely on for the shallow floors they exercise.
+  local shrines = {}
+  if depth >= 4 and rng:chance(1, 4) then
+    local x, y = pickFree(reachable, rng, freeFloor)
+    if x then
+      local kind = Shrines.order[rng:range(1, #Shrines.order)]
+      shrines[#shrines + 1] = { x = x, y = y, kind = kind, uses = 0 }
+      mark(x, y)
+    end
+  end
+
+  local trapEffects = Builder.TRAP_EFFECTS
   local trapCount = rng:range(1, 3) + depth // 3
   for _ = 1, trapCount do
     local x, y = pickFree(reachable, rng, freeFloor)
     if x then
       traps[#traps + 1] = { x = x, y = y, effect = trapEffects[rng:range(1, #trapEffects)], revealed = false }
+      mark(x, y)
+    end
+  end
+
+  if depth == Builder.maxDepth(options) then
+    local x, y = pickFree(reachable, rng, freeFloor)
+    if x then
+      floorItems[#floorItems + 1] = { x = x, y = y, item = Items.amulet() }
       mark(x, y)
     end
   end
