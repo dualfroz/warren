@@ -336,6 +336,352 @@ function Builder.build(depth, rng, options)
     end
   end
 
+  -- A companion's bonding charm is the rarest of the depth-gated placements
+  -- and, unlike the others, drawn last so it can never perturb the rng
+  -- sequence any earlier system (traps, shrines, the shop, the amulet) relies
+  -- on for its own placement.
+  if depth >= 3 and rng:chance(1, 5) then
+    local x, y = pickFree(reachable, rng, freeFloor)
+    if x then
+      local key = Companions.order[rng:range(1, #Companions.order)]
+      floorItems[#floorItems + 1] = { x = x, y = y, item = Items.charm(key) }
+      mark(x, y)
+    end
+  end
+
+  -- Rarer still, and drawn last of all for the same rng-ordering reason as
+  -- the charm above: a named artifact with a fixed, always-on mechanic.
+  if depth >= 5 and rng:chance(1, 6) then
+    local x, y = pickFree(reachable, rng, freeFloor)
+    if x then
+      local key = Artifacts.order[rng:range(1, #Artifacts.order)]
+      floorItems[#floorItems + 1] = { x = x, y = y, item = Artifacts.create(key) }
+      mark(x, y)
+    end
+  end
+
+  -- A trap kit lets the player plant one of these same effects
+  -- themselves (see Game:useItem's KIT branch and Game:checkTrapFor, which
+  -- springs a planted trap on a monster exactly as a builder-placed one
+  -- springs on the player). Drawn last of all so it can never perturb any
+  -- earlier system's rng sequence, the charm and artifact included.
+  if depth >= 2 and rng:chance(1, 4) then
+    local x, y = pickFree(reachable, rng, freeFloor)
+    if x then
+      floorItems[#floorItems + 1] = { x = x, y = y, item = Items.kit(trapEffects[rng:range(1, #trapEffects)]) }
+      mark(x, y)
+    end
+  end
+
+  -- A named boss rarer still guards the deepest floors, drawn dead last of
+  -- all for the same rng-ordering reason as the kit above: it can never
+  -- perturb any earlier system's placement, artifacts included.
+  if depth >= 6 and rng:chance(1, 5) then
+    local eligible = Bosses.forDepth(depth)
+    if #eligible > 0 then
+      local x, y = pickFree(reachable, rng, freeFloor)
+      if x then
+        local spec = eligible[rng:range(1, #eligible)]
+        entities[#entities + 1] = Bosses.create(spec, #entities + 1, x, y)
+        mark(x, y)
+      end
+    end
+  end
+
+  -- A bounty board rarer than a trap kit but commoner than an artifact,
+  -- offering a single fixed pact the moment the player steps onto it (see
+  -- Game:tryAcceptQuest). Drawn dead last of all for the same rng-ordering
+  -- reason as the boss above: it can never perturb any earlier system's
+  -- placement, the boss included.
+  local questBoards = {}
+  if depth >= 2 and rng:chance(1, 4) then
+    local x, y = pickFree(reachable, rng, freeFloor)
+    if x then
+      questBoards[#questBoards + 1] = {
+        x = x, y = y, claimed = false,
+        quest = Quests.generate(rng, depth, Builder.maxDepth(options)),
+      }
+    end
+  end
+
+  -- Herbs dot every floor from the first, foraging material rather than a
+  -- depth-gated reward. Drawn dead last of all, after the quest board, so
+  -- they can never perturb any earlier system's rng sequence.
+  local herbCount = rng:range(2, 4)
+  for _ = 1, herbCount do
+    local x, y = pickFree(reachable, rng, freeFloor)
+    if x then
+      local key = Alchemy.order[rng:range(1, #Alchemy.order)]
+      floorItems[#floorItems + 1] = { x = x, y = y, item = Alchemy.herb(key) }
+      mark(x, y)
+    end
+  end
+
+  -- A cauldron to brew those herbs at, rarer than the herbs themselves and
+  -- gated to depth 2+ so the entrance floor is foraging-only. Drawn last of
+  -- all for the same rng-ordering reason as the herbs above.
+  local cauldrons = {}
+  if depth >= 2 and rng:chance(1, 4) then
+    local x, y = pickFree(reachable, rng, freeFloor)
+    if x then
+      cauldrons[#cauldrons + 1] = { x = x, y = y }
+      mark(x, y)
+    end
+  end
+
+  -- Volatile terrain rarer than a cauldron, gated to depth 4+ so the entry
+  -- floors are always safe: a lava pool of two to four adjoining cells that
+  -- burns anyone standing on it (see Game:checkTerrainFor), a single chasm
+  -- pit that drops the player to the floor below and swallows a monster
+  -- whole (capped to floors that still have one to fall onto), and a patch
+  -- of ice that sends a traveller sliding. Drawn dead last of all for the
+  -- same rng-ordering reason as the cauldron above.
+  if depth >= 4 and rng:chance(1, 4) then
+    local x, y = pickFree(reachable, rng, freeFloor)
+    if x then
+      map:set(x, y, Tiles.LAVA)
+      mark(x, y)
+      for _ = 1, rng:range(1, 3) do
+        local dir = NEIGHBOURS[rng:range(1, #NEIGHBOURS)]
+        local nx, ny = x + dir[1], y + dir[2]
+        if freeFloor(nx, ny) then
+          map:set(nx, ny, Tiles.LAVA)
+          mark(nx, ny)
+        end
+      end
+    end
+  end
+
+  if depth >= 4 and depth < Builder.maxDepth(options) and rng:chance(1, 5) then
+    local x, y = pickFree(reachable, rng, freeFloor)
+    if x then
+      map:set(x, y, Tiles.CHASM)
+      mark(x, y)
+    end
+  end
+
+  if depth >= 4 and rng:chance(1, 4) then
+    local x, y = pickFree(reachable, rng, freeFloor)
+    if x then
+      map:set(x, y, Tiles.ICE)
+      mark(x, y)
+      for _ = 1, rng:range(1, 4) do
+        local dir = NEIGHBOURS[rng:range(1, #NEIGHBOURS)]
+        local nx, ny = x + dir[1], y + dir[2]
+        if freeFloor(nx, ny) then
+          map:set(nx, ny, Tiles.ICE)
+          mark(nx, ny)
+        end
+      end
+    end
+  end
+
+  -- Elite promotion rolls last of all, dead after the ice above: it only
+  -- edits stats already-placed entities carry, never a position, so it
+  -- cannot desync reachability - but rng-ordering discipline still applies,
+  -- since it draws from the same stream every earlier placement in this
+  -- floor already relied on.
+  for _, entity in ipairs(entities) do
+    Elites.maybePromote(rng, entity, depth)
+  end
+
+  -- A vault seals a treasure behind a lever puzzle instead of a key: a door
+  -- set on an unused doorway pinch point that only swings open once every
+  -- lever scattered on the side already reachable without it has been
+  -- pulled (see vaults.lua). Rarer than a boss and drawn dead last of all so
+  -- it can never perturb any earlier system's rng sequence, the boss and
+  -- quest board included. Falls back to an ordinary closed door whenever the
+  -- floor's geometry cannot host a genuine puzzle (no free doorway, no room
+  -- for its levers, or no cell the door actually gates), so a vault never
+  -- seals content behind an unsolvable or pointless door.
+  local vaultLevers, vaultDoors = {}, {}
+  if depth >= 5 and rng:chance(1, 6) then
+    local doorCandidates = doorwayCandidates(map)
+    for i = #doorCandidates, 1, -1 do
+      if taken(doorCandidates[i].x, doorCandidates[i].y) then
+        table.remove(doorCandidates, i)
+      end
+    end
+    if #doorCandidates > 0 then
+      local cell = doorCandidates[rng:range(1, #doorCandidates)]
+      map:set(cell.x, cell.y, Tiles.VAULT_DOOR)
+      mark(cell.x, cell.y)
+      local vaultId = "vault" .. depth
+      local openSide = reachSet(map, upX, upY, false, false)
+      local leverCount = rng:range(2, 3)
+      for _ = 1, leverCount do
+        local x, y = pickFree(reachable, rng, function(cx, cy)
+          return freeFloor(cx, cy) and openSide[map:index(cx, cy)] == true
+        end)
+        if x then
+          map:set(x, y, Tiles.LEVER)
+          vaultLevers[#vaultLevers + 1] = { x = x, y = y, id = vaultId, pulled = false }
+          mark(x, y)
+        end
+      end
+      local farSide = reachSet(map, upX, upY, false, true)
+      local tx, ty
+      if #vaultLevers > 0 then
+        tx, ty = pickFree(reachable, rng, function(cx, cy)
+          return freeFloor(cx, cy) and farSide[map:index(cx, cy)] == true
+            and openSide[map:index(cx, cy)] ~= true
+        end)
+      end
+      if tx then
+        vaultDoors[#vaultDoors + 1] = { x = cell.x, y = cell.y, id = vaultId, opened = false }
+        floorItems[#floorItems + 1] = { x = tx, y = ty, item = Vaults.treasure(rng, depth) }
+        mark(tx, ty)
+      else
+        -- No lever site or no cell the door actually gates: back out to a
+        -- plain closed door so the puzzle is never unsolvable or hollow, and
+        -- free the lever tiles this attempt already claimed.
+        map:set(cell.x, cell.y, Tiles.DOOR_CLOSED)
+        for _, lever in ipairs(vaultLevers) do
+          map:set(lever.x, lever.y, Tiles.FLOOR)
+        end
+        vaultLevers = {}
+      end
+    end
+  end
+
+  -- Rune stones dot the dungeon from depth three on, rarer than a herb but
+  -- commoner than a trap kit: raw components for runewords.lua's
+  -- socket-and-match combo system, found rather than crafted so a build is
+  -- bounded by what the floor actually offers. Drawn dead last of all,
+  -- after the vault above, so it can never perturb any earlier system's
+  -- rng sequence.
+  if depth >= 3 and rng:chance(1, 2) then
+    local x, y = pickFree(reachable, rng, freeFloor)
+    if x then
+      local key = Runewords.RUNES[rng:range(1, #Runewords.RUNES)]
+      floorItems[#floorItems + 1] = { x = x, y = y, item = Runewords.rune(key) }
+      mark(x, y)
+    end
+  end
+
+  -- A floor-wide weather condition, drawn dead last of all so it can never
+  -- perturb any earlier system's rng sequence: an infested reading retroactively
+  -- bumps every monster already placed on this floor (exactly like Elites.
+  -- maybePromote's own retroactive stat edit above), since only a stat and
+  -- never a position is at stake.
+  local weather
+  if depth >= 2 and rng:chance(1, 3) then
+    weather = Atmosphere.order[rng:range(1, #Atmosphere.order)]
+    local attackBonus = Atmosphere.monsterAttackBonus(weather)
+    if attackBonus > 0 then
+      for _, entity in ipairs(entities) do
+        entity.attack = entity.attack + attackBonus
+        entity.baseAttack = entity.baseAttack + attackBonus
+      end
+    end
+  end
+
+  -- Ore veins and gem seams dot the dungeon from the second floor on, dead
+  -- last of all so they can never perturb any earlier system's rng sequence:
+  -- unlike the herbs above, a single visit does not spend a node outright -
+  -- it holds a few charges and slowly reopens (see nodes.lua) - so a floor
+  -- already cleared of monsters still rewards a return trip.
+  local nodes = {}
+  if depth >= 2 then
+    local veinCount = rng:range(1, 2)
+    for _ = 1, veinCount do
+      local x, y = pickFree(reachable, rng, freeFloor)
+      if x then
+        local kind = rng:chance(1, 2) and Nodes.ORE or Nodes.GEM
+        local element = kind == Nodes.GEM and Crafting.elements[rng:range(1, #Crafting.elements)] or nil
+        local node = Nodes.new(kind, element)
+        node.x, node.y = x, y
+        nodes[#nodes + 1] = node
+        mark(x, y)
+      end
+    end
+  end
+
+  -- A single item-set piece dots the dungeon from depth three on, rarer
+  -- than a rune but commoner than an artifact: unlike an artifact's fixed
+  -- always-on mechanic, a set piece is inert alone and only pays off once
+  -- its match turns up too (see sets.lua). Drawn dead last of all, after
+  -- the nodes above, so it can never perturb any earlier system's rng
+  -- sequence.
+  if depth >= 3 and rng:chance(1, 5) then
+    local x, y = pickFree(reachable, rng, freeFloor)
+    if x then
+      local entry = Sets.order[rng:range(1, #Sets.order)]
+      floorItems[#floorItems + 1] = { x = x, y = y, item = Sets.create(entry.set, entry.slot) }
+      mark(x, y)
+    end
+  end
+
+  -- A single mimic disguises itself as loot from depth two on, rarer than
+  -- a trap kit: unlike every item placed above, it is inert to look at and
+  -- only bites once the player actually reaches for it (see mimics.lua).
+  -- Drawn dead last of all, after the set piece above, so it can never
+  -- perturb any earlier system's rng sequence.
+  if depth >= 2 and rng:chance(1, 6) then
+    local x, y = pickFree(reachable, rng, freeFloor)
+    if x then
+      floorItems[#floorItems + 1] = { x = x, y = y, item = Mimics.floorItem(rng) }
+      mark(x, y)
+    end
+  end
+
+  -- A scroll of remove curse turns up rarer than a mimic, the one dedicated
+  -- remedy for the curse pass below that a run can actually find rather than
+  -- having to gamble on a shrine of fortune. Drawn dead last of all, after
+  -- the mimic above, so it can never perturb any earlier system's rng
+  -- sequence.
+  if depth >= 2 and rng:chance(1, 8) then
+    local x, y = pickFree(reachable, rng, freeFloor)
+    if x then
+      floorItems[#floorItems + 1] = { x = x, y = y, item = Items.scroll("removecurse") }
+      mark(x, y)
+    end
+  end
+
+  -- Curses.lua's dark mirror of affixes.lua rolls dead last of all, after
+  -- every item above has already been placed: it only edits the stats of
+  -- weapons, armor, rings and bows already sitting in floorItems, never a
+  -- position, so it cannot desync reachability - but rng-ordering discipline
+  -- still applies, since it draws from the same stream every earlier
+  -- placement in this floor already relied on. Skips anything that already
+  -- landed a beneficial affix or names its own set/artifact, so a single
+  -- drop is never simultaneously a blessing and a curse.
+  for _, ground in ipairs(floorItems) do
+    local slot = slotForCursableItem[ground.item.kind]
+    if slot and not ground.price and not ground.item.affix and not ground.item.set and not ground.item.artifact then
+      local curse = Curses.roll(rng, slot)
+      if curse then Curses.afflict(ground.item, curse) end
+    end
+  end
+
+  -- A miner's pick turns up rarer than the remove-curse scroll above, the
+  -- one way a run can find its own way into a rock burrower's tunnel or dig
+  -- a shortcut through a dead-end wall (see digging.lua). Drawn dead last
+  -- of all, after the curse pass above, so it can never perturb any
+  -- earlier system's rng sequence.
+  if depth >= 2 and rng:chance(1, 10) then
+    local x, y = pickFree(reachable, rng, freeFloor)
+    if x then
+      floorItems[#floorItems + 1] = { x = x, y = y, item = Items.pick() }
+      mark(x, y)
+    end
+  end
+
+  -- A lockpick turns up commoner than the miner's pick above, drawn dead
+  -- last of all so it can never perturb any earlier system's rng sequence:
+  -- the one way a run can gamble past a locked chest's lock without ever
+  -- finding its key (see chests.lua's Chests.pick).
+  if rng:chance(1, 4) then
+    local x, y = pickFree(reachable, rng, freeFloor)
+    if x then
+      floorItems[#floorItems + 1] = { x = x, y = y, item = Items.lockpick() }
+      mark(x, y)
+    end
+  end
+
+  -- A single lootable chest dots the dungeon from the first floor on, rarer
+  -- than a lockpick, drawn dead last of all so it can never perturb any
+  -- earlier system's rng sequence: a locked one may also be trapped (see
   return Level.new({
     depth = depth,
     generator = generator,
