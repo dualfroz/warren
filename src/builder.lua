@@ -682,14 +682,318 @@ function Builder.build(depth, rng, options)
   -- A single lootable chest dots the dungeon from the first floor on, rarer
   -- than a lockpick, drawn dead last of all so it can never perturb any
   -- earlier system's rng sequence: a locked one may also be trapped (see
+  -- Chests.new), so a run either finds a key, gambles a lockpick, or leaves
+  -- it be.
+  local chests = {}
+  if rng:chance(1, 3) then
+    local x, y = pickFree(reachable, rng, freeFloor)
+    if x then
+      local chest = Chests.new(rng, depth)
+      chest.x, chest.y = x, y
+      chests[#chests + 1] = chest
+      mark(x, y)
+    end
+  end
+
+  -- A secret door hides a single alcove of bonus loot behind an otherwise
+  -- ordinary stretch of wall, found only by lingering beside it long enough
+  -- (see secrets.lua's passive sweep). Drawn dead last of all before the
+  -- grave below - which must stay the true last word, since it is the one
+  -- block whose own rng draw count depends on what the caller passed in
+  -- (see its own comment) - so this can never perturb any earlier system's
+  -- rng sequence either: picks an already-reachable floor cell and a
+  -- direction whose neighbour and whose cell two further along are both
+  -- still untouched solid rock, then carves that far cell into a one-tile
+  -- room holding a single roll of loot. The door itself stays a plain wall
+  -- tile until secrets.lua's sweep discovers it - this list only remembers
+  -- where to look. Skipped outright whenever 40 random reachable cells in a
+  -- row turn up no such spot, so a cramped floor's own geometry never
+  -- forces the roll to place nothing.
+  local secretDoors = {}
+  if depth >= 2 and rng:chance(1, 4) then
+    for _ = 1, 40 do
+      local cell = reachable[rng:range(1, #reachable)]
+      local dir = NEIGHBOURS[rng:range(1, #NEIGHBOURS)]
+      local doorX, doorY = cell.x + dir[1], cell.y + dir[2]
+      local roomX, roomY = cell.x + dir[1] * 2, cell.y + dir[2] * 2
+      if roomX >= 2 and roomY >= 2 and roomX <= map.width - 1 and roomY <= map.height - 1
+        and map:get(doorX, doorY) == Tiles.WALL and map:get(roomX, roomY) == Tiles.WALL then
+        -- The room's only walkable neighbour may be the door itself: if any
+        -- of its other three sides already happens to border open floor
+        -- somewhere else in the layout, that side would let the player
+        -- wander straight into the alcove without ever finding the door,
+        -- so a candidate site with any such back way in is rejected outright.
+        local isolated = true
+        for _, side in ipairs(NEIGHBOURS) do
+          local ax, ay = roomX + side[1], roomY + side[2]
+          if not (ax == doorX and ay == doorY) and map:isWalkable(ax, ay) then
+            isolated = false
+            break
+          end
+        end
+        if isolated then
+          map:set(roomX, roomY, Tiles.FLOOR)
+          secretDoors[#secretDoors + 1] = { x = doorX, y = doorY, discovered = false }
+          floorItems[#floorItems + 1] = { x = roomX, y = roomY, item = rollItem(rng, depth) }
+          break
+        end
+      end
+    end
+  end
+
+  -- A biome reinforcement and hazard bloom, drawn dead last of all before
+  -- the grave below - which must stay the true last word, since it is the
+  -- one block whose own rng draw count depends on what the caller passed in
+  -- (see its own comment) - so this can never perturb any earlier system's
+  -- rng sequence either: see biomes.lua for why a floor's biome is a fixed
+  -- function of depth rather than another dice roll like weather. The
+  -- reinforcement draws only from natives of the eligible roster already
+  -- computed above, so it can never plant a monster too deep for its own
+  -- minDepth, and starts dormant exactly like every other wild monster
+  -- placed above (see Stealth.DORMANT); the bloom seeds level.hazards the
+  -- same way a fire spell or a trap would mid-game, just already
+  -- smouldering the moment the floor is first entered.
+  local biome = Biomes.forDepth(depth)
+  local natives = Biomes.nativesAmong(biome, eligible)
+  if #natives > 0 and rng:chance(1, 3) then
+    local x, y = pickFree(reachable, rng, freeFloor)
+    if x then
+      local spec = natives[rng:range(1, #natives)]
+      local monster = Monsters.create(spec, #entities + 1, x, y, depth)
+      monster.awareness = Stealth.DORMANT
+      entities[#entities + 1] = monster
+      mark(x, y)
+    end
+  end
+
+  local hazards = {}
+  if rng:chance(1, 4) then
+    local x, y = pickFree(reachable, rng, freeFloor)
+    if x then
+      hazards[#hazards + 1] = { x = x, y = y, kind = biome.hazardKind, duration = 4, potency = 2 }
+    end
+  end
+
+  -- A pressure gate seals a second stash behind a shove puzzle instead of a
+  -- lever pull: a gate set on an unused doorway pinch point that only stays
+  -- open while a block's weight rests on its linked plate (see blocks.lua),
+  -- rather than a lever's one-way, permanently-spent pull. The block always
+  -- sits exactly two cells from its plate along a single cardinal direction,
+  -- with the cell behind the block itself also free, so a single shove from
+  -- that approach cell always lands it on the plate - the puzzle is never a
+  -- multi-step arrangement a floor's own cramped geometry might make
+  -- unsolvable. Also verifies, after sealing the gate shut, that the stairs
+  -- down are still reachable without ever crossing it - exactly the same
+  -- guarantee the locked-door pass above gives a key - so a gate can only
+  -- ever seal optional treasure, never the one path through the floor.
+  -- Falls back to an ordinary closed door whenever the floor's geometry
+  -- cannot host a genuine puzzle (no free doorway, no straight three-cell
+  -- run for the plate/block/approach, or the gate would seal the only route
+  -- to the stairs), so a gate never seals content behind an unsolvable or
+  -- pointless door. Drawn dead last of all before the grave below - which
+  -- must stay the true last word (see its own comment) - so this can never
+  -- perturb any earlier system's rng sequence either.
+  local blocks, plates, gates = {}, {}, {}
+  if depth >= 3 and rng:chance(1, 5) then
+    local doorCandidates = doorwayCandidates(map)
+    for i = #doorCandidates, 1, -1 do
+      if taken(doorCandidates[i].x, doorCandidates[i].y) then
+        table.remove(doorCandidates, i)
+      end
+    end
+    if #doorCandidates > 0 then
+      local cell = doorCandidates[rng:range(1, #doorCandidates)]
+      map:set(cell.x, cell.y, Tiles.GATE_CLOSED)
+      mark(cell.x, cell.y)
+      local sealsTheOnlyRoute = not reachSet(map, upX, upY, false)[map:index(downX, downY)]
+      local openSide = reachSet(map, upX, upY, false, false)
+      local function onOpenSide(cx, cy)
+        return freeFloor(cx, cy) and openSide[map:index(cx, cy)] == true
+      end
+      local px, py = pickFree(reachable, rng, onOpenSide)
+      local siteDirs = {}
+      if px then
+        for _, dir in ipairs(NEIGHBOURS) do
+          local bx, by = px - dir[1], py - dir[2]
+          local ax, ay = bx - dir[1], by - dir[2]
+          if onOpenSide(bx, by) and onOpenSide(ax, ay) then
+            siteDirs[#siteDirs + 1] = { bx = bx, by = by }
+          end
+        end
+      end
+      local tx, ty
+      if not sealsTheOnlyRoute and #siteDirs > 0 then
+        local farSide = reachSet(map, upX, upY, false, true)
+        tx, ty = pickFree(reachable, rng, function(cx, cy)
+          return freeFloor(cx, cy) and farSide[map:index(cx, cy)] == true
+            and openSide[map:index(cx, cy)] ~= true
+        end)
+      end
+      if tx then
+        local site = siteDirs[rng:range(1, #siteDirs)]
+        plates[#plates + 1] = { x = px, y = py, gateX = cell.x, gateY = cell.y }
+        blocks[#blocks + 1] = { x = site.bx, y = site.by }
+        gates[#gates + 1] = { x = cell.x, y = cell.y, open = false }
+        mark(px, py)
+        mark(site.bx, site.by)
+        floorItems[#floorItems + 1] = { x = tx, y = ty, item = Blocks.treasure(rng, depth) }
+        mark(tx, ty)
+      else
+        map:set(cell.x, cell.y, Tiles.DOOR_CLOSED)
+      end
+    end
+  end
+
+  -- A hand-authored prefab vault dots the deep dungeon from depth three on,
+  -- sealed behind solid rock rather than gated by a key or a lever: the one
+  -- way in is digging.lua's pick (or a burrower's own claws), swung from
+  -- whichever reachable cell happens to border its outer wall. Anchored only
+  -- over untouched rock - every cell of its footprint still the generator's
+  -- own default fill - so it can never overwrite a corridor or room this
+  -- floor's own generator already carved, and only accepted once at least
+  -- one of its wall cells actually borders the reachable area, so a vault
+  -- can never end up sealed unreachably deep inside solid rock no digger
+  -- could ever find. Its monster and loot markers (see gen/prefab.lua) draw
+  -- from the same eligible roster and item tables every earlier pass in this
+  -- floor already used. Drawn dead last of all before the grave below -
+  -- which must stay the true last word (see its own comment) - so this can
+  -- never perturb any earlier system's rng sequence either.
+  local prefabVaults = {}
+  if depth >= 3 and rng:chance(1, 5) then
+    local vault = Prefab.vaults[rng:range(1, #Prefab.vaults)]
+    local w, h = Prefab.size(vault)
+    local vaultReach = reachSet(map, upX, upY, false)
+    for _ = 1, 40 do
+      local ox = rng:range(2, map.width - w)
+      local oy = rng:range(2, map.height - h)
+      if Prefab.fits(map, vault, ox, oy) then
+        local untouched = true
+        for y = oy, oy + h - 1 do
+          for x = ox, ox + w - 1 do
+            if map:get(x, y) ~= Tiles.WALL then untouched = false end
+          end
+        end
+        local bordersReachable = false
+        for y = oy - 1, oy + h do
+          for x = ox - 1, ox + w do
+            local onPerimeter = x < ox or x > ox + w - 1 or y < oy or y > oy + h - 1
+            if onPerimeter and map:inBounds(x, y) and vaultReach[map:index(x, y)] then
+              bordersReachable = true
+            end
+          end
+        end
+        if untouched and bordersReachable then
+          local stamp = Prefab.stamp(map, vault, ox, oy)
+          for _, spot in ipairs(stamp.treasure) do
+            floorItems[#floorItems + 1] = { x = spot.x, y = spot.y, item = Vaults.treasure(rng, depth) }
+            mark(spot.x, spot.y)
+          end
+          for _, spot in ipairs(stamp.loot) do
+            floorItems[#floorItems + 1] = { x = spot.x, y = spot.y, item = rollItem(rng, depth) }
+            mark(spot.x, spot.y)
+          end
+          for _, spot in ipairs(stamp.monsters) do
+            local spec = eligible[rng:range(1, #eligible)]
+            local monster = Monsters.create(spec, #entities + 1, spot.x, spot.y, depth)
+            monster.awareness = Stealth.DORMANT
+            entities[#entities + 1] = monster
+            mark(spot.x, spot.y)
+          end
+          prefabVaults[#prefabVaults + 1] = { name = stamp.name, x = ox, y = oy, w = w, h = h }
+          break
+        end
+      end
+    end
+  end
+
+  -- A net turns up from depth five on, rarer than a miner's pick, drawn dead
+  -- last of all - after even the prefab vault pass above - so it can never
+  -- perturb any earlier system's rng sequence: the one way a run carries the
+  -- means to subdue a battered monster alive instead of finishing it off
+  -- (see captives.lua), rather than a strictly worse copy of an ordinary
+  -- weapon. Gated this deep so it can never turn up in the fixed shallow
+  -- worlds the win-condition tests build with a low --maxDepth.
+  if depth >= 5 and rng:chance(1, 6) then
+    local x, y = pickFree(reachable, rng, freeFloor)
+    if x then
+      floorItems[#floorItems + 1] = { x = x, y = y, item = Items.net() }
+      mark(x, y)
+    end
+  end
+
+  -- A rift shard turns up from depth four on, rarer than a net, drawn dead
+  -- last of all - after the net above - so it can never perturb any earlier
+  -- system's rng sequence: fuel for the one crossing a rift (below) actually
+  -- costs (see branches.lua), found a couple of floors ahead of where a rift
+  -- can itself first appear so a run always has a real chance to be carrying
+  -- one the day it matters.
+  if depth >= 4 and rng:chance(1, 6) then
+    local x, y = pickFree(reachable, rng, freeFloor)
+    if x then
+      floorItems[#floorItems + 1] = { x = x, y = y, item = Items.riftstone() }
+      mark(x, y)
+    end
+  end
+
+  -- A rift tears open rarer still, only from depth six on, drawn dead last
+  -- of all - after the shard above - so it can never perturb any earlier
+  -- system's rng sequence: a shimmering, unstable seam in the floor a
+  -- carried rift shard alone can stabilize into a crossing onto a short,
+  -- harsher pocket floor (see branches.lua and Game:enterRift). Plain
+  -- position-keyed level data exactly like a shrine or a node, never a tile
+  -- of its own, so it needs no new entry in tiles.lua.
+  local rifts = {}
+  if depth >= 6 and rng:chance(1, 8) then
+    local x, y = pickFree(reachable, rng, freeFloor)
+    if x then
+      rifts[#rifts + 1] = { x = x, y = y }
+      mark(x, y)
+    end
+  end
+
+  -- A previous run's grave turns up rarer than a pick, dead last of all -
+  -- after the lockpick, chest, secret door, biome, gate and net pass above -
+  -- so it can never perturb any earlier system's rng sequence: cross-run
+  -- bones (see graves.lua), rolled only when the caller actually supplies
+  -- any - a run without --meta, or a fresh meta with no recorded deaths
+  -- yet, makes no extra rng draw here at all, so its floors stay
+  -- byte-identical to a build with no graves system in play.
+  if options and options.graves and #options.graves > 0 then
+    local eligibleGraves = Graves.eligibleFor(options.graves, depth)
+    if #eligibleGraves > 0 and rng:chance(1, 5) then
+      local x, y = pickFree(reachable, rng, freeFloor)
+      if x then
+        local grave = eligibleGraves[rng:range(1, #eligibleGraves)]
+        floorItems[#floorItems + 1] = { x = x, y = y, item = Graves.floorItem(grave) }
+        mark(x, y)
+      end
+    end
+  end
+
   return Level.new({
     depth = depth,
     generator = generator,
+    weather = weather,
+    biome = biome.key,
     map = map,
     entities = entities,
     floorItems = floorItems,
     traps = traps,
     lights = lights,
+    hazards = hazards,
+    shrines = shrines,
+    questBoards = questBoards,
+    cauldrons = cauldrons,
+    nodes = nodes,
+    chests = chests,
+    vaultLevers = vaultLevers,
+    vaultDoors = vaultDoors,
+    secretDoors = secretDoors,
+    blocks = blocks,
+    plates = plates,
+    gates = gates,
+    prefabVaults = prefabVaults,
+    rifts = rifts,
     dark = dark,
     explored = {},
     upX = upX, upY = upY,
