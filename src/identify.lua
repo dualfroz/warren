@@ -8,7 +8,7 @@ local Items = require("items")
 local Identify = {}
 
 local potionLooks = {
-  "ruby", "azure", "cloudy", "fizzy", "smoky", "golden", "murky", "viscous",
+  "ruby", "azure", "cloudy", "fizzy", "smoky", "golden", "murky", "viscous", "inky", "frothy",
 }
 local scrollLooks = {
   "XYZZY", "ELBERETH", "ZELGO KAI", "JUYED AWK", "VE FORBRYDERNE",
