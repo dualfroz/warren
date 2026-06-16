@@ -10,49 +10,230 @@ local Los = require("los")
 local Light = require("light")
 local Combat = require("combat")
 local Items = require("items")
+local Shop = require("shop")
 local Effects = require("effects")
 local Status = require("status")
 local Identify = require("identify")
+local Builder = require("builder")
 local Dungeon = require("dungeon")
 local Entity = require("entity")
 local MessageLog = require("messagelog")
 local Scheduler = require("scheduler")
 local Ai = require("ai")
-local Serialize = require("serialize")
+local SaveGame = require("savegame")
 local Render = require("render")
+local Progression = require("progression")
+local Monsters = require("monsters")
+local Spells = require("spells")
+local Throwing = require("throwing")
+local Ranged = require("ranged")
+local Abilities = require("abilities")
+local Hazards = require("hazards")
+local Terrain = require("terrain")
+local Shrines = require("shrines")
+local Classes = require("classes")
+local Skills = require("skills")
+local Crafting = require("crafting")
+local Companions = require("companions")
+local Mercenaries = require("mercenaries")
+local Artifacts = require("artifacts")
+local Sets = require("sets")
+local Hunger = require("hunger")
+local Mimics = require("mimics")
+local Bosses = require("bosses")
+local Phases = require("phases")
+local Quests = require("quests")
+local Meta = require("meta")
+local Alchemy = require("alchemy")
+local Resistances = require("resistances")
+local Factions = require("factions")
+local Encumbrance = require("encumbrance")
+local Elites = require("elites")
+local Vaults = require("vaults")
+local Runewords = require("runewords")
+local Atmosphere = require("atmosphere")
+local Events = require("events")
+local Stealth = require("stealth")
+local Compendium = require("compendium")
+local Nodes = require("nodes")
+local Curses = require("curses")
+local Momentum = require("momentum")
+local Corpses = require("corpses")
+local Digging = require("digging")
+local Sanity = require("sanity")
+local Graves = require("graves")
+local Proficiency = require("proficiency")
+local Ascension = require("ascension")
+local Durability = require("durability")
+local Conductivity = require("conductivity")
+local Disarm = require("disarm")
+local Reanimation = require("reanimation")
+local Secrets = require("secrets")
+local Chests = require("chests")
+local Nemesis = require("nemesis")
+local Scavenging = require("scavenging")
+local Infighting = require("infighting")
+local Blocks = require("blocks")
+local Noise = require("noise")
+local Disease = require("disease")
+local Captives = require("captives")
+local Level = require("level")
+local Horde = require("horde")
+local Branches = require("branches")
+local Commands = require("commands")
+
+-- Real feature history, oldest first, matching the fields Game.fromData
+-- below has always had to guard with "or" because they arrived after the
+-- original snapshot shape: essence and the vault/set-piece tallies, then the
+-- skill tree and reputation, then sanity. A run save from before any of
+-- those landed is missing exactly the fields each step below fills in.
+local GameSave = SaveGame.new({
+  [1] = function(data)
+    data.playerExtra.essence = data.playerExtra.essence or 0
+    data.stats = data.stats or { kills = 0, bossKills = 0, questsCompleted = 0, artifactsFound = 0 }
+    data.stats.vaultsOpened = data.stats.vaultsOpened or 0
+    data.stats.setPiecesFound = data.stats.setPiecesFound or 0
+    return data
+  end,
+  [2] = function(data)
+    data.playerExtra.skills = data.playerExtra.skills or {}
+    data.playerExtra.skillPoints = data.playerExtra.skillPoints or 0
+    data.playerExtra.skillCooldowns = data.playerExtra.skillCooldowns or {}
+    data.playerExtra.reputation = data.playerExtra.reputation or {}
+    return data
+  end,
+  [3] = function(data)
+    data.playerExtra.sanity = data.playerExtra.sanity or Sanity.MAX
+    return data
+  end,
+})
 
 local Game = {}
 Game.__index = Game
 
 local FOV_RADIUS = 8
 
+-- Which equip slot each wearable item kind occupies, used to check a slot
+-- for a bound curse before letting a new piece take its place.
+local slotByItemKind = {
+  [Items.WEAPON] = "weapon", [Items.ARMOR] = "armor",
+  [Items.RING] = "ring", [Items.BOW] = "bow",
+}
+
 local function sign(n)
   if n > 0 then return 1 elseif n < 0 then return -1 else return 0 end
 end
 
-function Game.new(seed)
+function Game.new(seed, options)
   local game = setmetatable({}, Game)
   game.seed = seed
   game.rng = Rng.new(seed)
   game.depth = 1
   game.turn = 0
+  game.won = false
   game.log = MessageLog.new(32)
   game.identify = Identify.new(game.rng)
-  game.dungeon = Dungeon.new(seed)
+  game.dungeon = Dungeon.new(seed, options)
+  game.maxDepth = Builder.maxDepth(options)
   game.level = game.dungeon:get(1)
   game.player = Entity.new({
     id = 0, x = game.level.upX, y = game.level.upY,
     glyph = "@", name = "you", kind = "player",
     hp = 30, maxHp = 30, attack = 5, defense = 1, speed = 100,
   })
-  game.player.satiation = 1000
+  game.player.satiation = Hunger.START
+  game.player.sanity = Sanity.MAX
+  game.player.gold = 20
+  game.player.essence = 0
   game.player.light = { fuel = 400, radius = 8 }
+  game.player.level = 1
+  game.player.xp = 0
+  game.player.xpNext = Progression.xpToNext(1)
+  game.player.mana = 10
+  game.player.maxMana = 10
+  game.player.spellsKnown = { "missile" }
   game.player.inventory = {
     Items.potion(10), Items.potion(10), Items.food("ration", 400), Items.scroll("mapping"),
   }
+  game.player.skills = {}
+  game.player.skillPoints = 1
+  game.player.skillCooldowns = {}
+  game.player.reputation = {}
+  game.deepestDepth = 1
+  game.stats = {
+    kills = 0, bossKills = 0, questsCompleted = 0, artifactsFound = 0, vaultsOpened = 0,
+    setPiecesFound = 0, chestsOpened = 0,
+  }
+  if options and options.meta then
+    Meta.applyAll(options.meta, game.player)
+    -- Reuses options.meta's own table (rather than copying it) so every
+    -- sighting/kill recorded mid-run is already sitting in the table
+    -- warren.lua writes back out with Meta.save at the end of the run.
+    options.meta.compendium = options.meta.compendium or Compendium.new()
+    game.compendium = options.meta.compendium
+  else
+    game.compendium = Compendium.new()
+  end
+  if options and options.class and Classes.isValid(options.class) then
+    Classes.apply(game.player, options.class)
+  end
+  game.ascension = Ascension.resolve(options and options.meta, options and options.mutators)
+  Ascension.applyToPlayer(game.ascension, game.player)
   game.visible = {}
+  game.monsterSeq = 0
+  game.nemesis = nil
   game:computeVisible()
   return game
+end
+
+-- Snapshot fed to meta.lua at the end of a run (see warren.lua's --meta
+-- flag): everything Meta.renownFor and every achievement condition read,
+-- gathered in one place so neither has to know Game's own field names.
+function Game:metaStats()
+  return {
+    deepestDepth = self.deepestDepth,
+    kills = self.stats.kills,
+    bossKills = self.stats.bossKills,
+    questsCompleted = self.stats.questsCompleted,
+    artifactsFound = self.stats.artifactsFound,
+    vaultsOpened = self.stats.vaultsOpened,
+    setPiecesFound = self.stats.setPiecesFound,
+    chestsOpened = self.stats.chestsOpened,
+    won = self.won,
+    mutators = self.ascension,
+  }
+end
+
+-- The grave this run leaves behind for a future one to stumble across (see
+-- graves.lua and Builder's options.graves): only warren.lua's --meta path
+-- ever calls this, and only once a run has actually ended in death -
+-- winning walks out with the Amulet, not a grave. className falls back to
+-- "wanderer" for a run that never picked a class at all.
+function Game:graveEntry()
+  return {
+    className = self.player.class or "wanderer",
+    depth = self.deepestDepth,
+    gold = self.player.gold,
+    essence = self.player.essence,
+    turn = self.turn,
+  }
+end
+
+-- Fresh id for a monster spawned mid-game (summon, split), disjoint from the
+-- small sequential ids the builder hands out at level generation.
+function Game:nextMonsterId()
+  self.monsterSeq = self.monsterSeq + 1
+  return 100000 + self.monsterSeq
+end
+
+function Game:spawnMinion(speciesKey, x, y)
+  local spec = Monsters.byKey[speciesKey]
+  local minion = Monsters.create(spec, self:nextMonsterId(), x, y, self.depth)
+  -- Summoned or split mid-fight, so it is already aware rather than asleep -
+  -- see stealth.lua's header for why builder-placed wild monsters differ.
+  minion.awareness = Stealth.HUNTING
+  self.level.entities[#self.level.entities + 1] = minion
+  return minion
 end
 
 function Game:currentEntities()
