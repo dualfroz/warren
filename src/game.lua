@@ -930,6 +930,234 @@ function Game:captureAt(index, target)
     self:emitNoise(self.player.x, self.player.y, Noise.THROW)
     self:cleanupDead()
   end
+  self.log:addAll(lines)
+  return success
+end
+
+-- Looses an arrow from the player's equipped bow at a monster. The arrow
+-- always leaves the quiver on a successful shot, whatever it did on arrival.
+function Game:fireAt(target)
+  self:provoke(target)
+  local success, lines = Ranged.fire(self, self.player, target)
+  self.log:addAll(lines)
+  if success then self:emitNoise(self.player.x, self.player.y, Noise.RANGED) end
+  return success
+end
+
+-- Spends gold to smooth over the player's standing with `faction` (see
+-- factions.lua): cools a grudge, or pads an existing friendship, by a fixed
+-- amount. The asking price climbs the deeper the relationship has soured.
+function Game:appeaseFaction(faction)
+  local success, cost = Factions.appease(self.player, faction)
+  if success then
+    self.log:add(string.format("your tribute smooths things over with the %s (%d gold)", faction, cost))
+  elseif cost == 0 then
+    self.log:add(string.format("the %s already think as well of you as they're going to", faction))
+  else
+    self.log:add(string.format("you need %d gold to make peace with the %s", cost, faction))
+  end
+  return success
+end
+
+-- Prays at the shrine standing under the player, spending its gold price for
+-- a shot at a permanent blessing (or, with rising odds the more this altar
+-- has already been used, a curse instead). Returns false without any state
+-- change when there is no shrine here or its price cannot be met.
+function Game:prayAt(shrine)
+  local success, lines = Shrines.pray(self, shrine)
+  self.log:addAll(lines)
+  return success
+end
+
+-- Swings the player's equipped pick at whatever lies one step away in
+-- (dx, dy): a plain wall or the rubble left by an earlier swing. Returns
+-- false without spending the swing when there is no pick readied or the
+-- target cell has nothing left to dig (open floor, a vault door, out of
+-- bounds); otherwise always spends one use of the pick's durability, even on
+-- an unlucky cave-in that costs hp instead of progress (see digging.lua).
+function Game:dig(dx, dy)
+  if not self.player.pick then
+    self.log:add("you have nothing to dig with")
+    return false
+  end
+  local nx, ny = self.player.x + dx, self.player.y + dy
+  if not Digging.canDig(self.level.map, nx, ny) then
+    self.log:add("there is nothing here to dig")
+    return false
+  end
+  self.log:add(Digging.swing(self, self.player, nx, ny))
+  local brokenLine = Digging.wearPick(self.player)
+  if brokenLine then self.log:add(brokenLine) end
+  self:emitNoise(nx, ny, Noise.DIG)
+  return true
+end
+
+-- Harvests whatever resource node stands under the player: an ore vein pays
+-- out essence, a gem seam yields a raw gem, both free of any gold cost -
+-- unlike a shrine's prayer, the only thing rationing this is the node's own
+-- charges (see nodes.lua). Returns false without state change when there is
+-- no node here or it has already been picked dry this trip.
+function Game:harvestNode()
+  local node = self.level:nodeAt(self.player.x, self.player.y)
+  if not node then
+    self.log:add("there is nothing here to harvest")
+    return false
+  end
+  local success, line = Nodes.harvest(self, node)
+  self.log:add(line)
+  return success
+end
+
+-- Butchers whatever corpse lies under the player into raw meat (Items.FOOD),
+-- eaten later exactly like a found ration - unless the corpse has already
+-- gone past its rot threshold (corpses.lua), in which case it poisons the
+-- player instead. Either way the corpse itself is spent in one stroke.
+-- Returns false without state change when there is nothing here to carve.
+function Game:butcherCorpse()
+  local corpse = self.level:corpseAt(self.player.x, self.player.y)
+  if not corpse then
+    self.log:add("there is nothing here to butcher")
+    return false
+  end
+  self.log:add(Corpses.butcher(self, corpse))
+  return true
+end
+
+-- Raises whatever fresh corpse lies under the player into a temporary
+-- skeletal thrall (see reanimation.lua), spending both the corpse and a
+-- bite of sanity in one stroke - a deliberate trade the autopilot never
+-- makes on its own, unlike Game:butcherCorpse's free meal, so this is only
+-- ever called directly. Returns false without state change when there is
+-- no corpse here or Reanimation.raise itself refuses the attempt.
+function Game:raiseCorpse()
+  local corpse = self.level:corpseAt(self.player.x, self.player.y)
+  if not corpse then
+    self.log:add("there is nothing here to raise")
+    return false
+  end
+  local thrall, failMsg = Reanimation.raise(self, corpse)
+  if not thrall then
+    self.log:add(failMsg)
+    return false
+  end
+  self.log:add("bones knit and rise - your " .. thrall.name .. " answers the call")
+  return true
+end
+
+-- Carves whatever fresh corpse lies under the player for the herb its own
+-- kind carries (see scavenging.lua) instead of a meal or a thrall - a third
+-- deliberate trade for the same tile, only ever called directly like
+-- Game:raiseCorpse, never by the autopilot. Returns false without state
+-- change when there is no corpse here or Scavenging.harvest itself refuses.
+function Game:scavengeCorpse()
+  local corpse = self.level:corpseAt(self.player.x, self.player.y)
+  if not corpse then
+    self.log:add("there is nothing here to scavenge")
+    return false
+  end
+  local harvested, message = Scavenging.harvest(self, corpse)
+  self.log:add(message)
+  return harvested
+end
+
+-- Opens whatever chest stands under the player. An unlocked one (or one
+-- already forced open) yields its hoard outright; a locked one first tries
+-- a carried key, exactly like Game:openDoor's own certain trade, and only
+-- falls back to a lockpick gamble (Chests.pick, which risks springing a
+-- trapped lock) once no key can be found. Returns false without state
+-- change when there is nothing here to open, it is already empty, or it is
+-- locked with neither a key nor a lockpick on hand.
+function Game:openChest()
+  local chest = self.level:chestAt(self.player.x, self.player.y)
+  if not chest then
+    self.log:add("there is nothing here to open")
+    return false
+  end
+  if chest.opened then
+    self.log:add("this chest is already empty")
+    return false
+  end
+  local success, line
+  if not Chests.isLocked(chest) then
+    success, line = Chests.open(self.player, chest)
+  else
+    success, line = Chests.unlockWithKey(self.player, chest)
+    if not success then success, line = Chests.pick(self, chest) end
+  end
+  self.log:add(line)
+  if success then self.stats.chestsOpened = self.stats.chestsOpened + 1 end
+  return success
+end
+
+-- Frees whatever captive stands under the player back to its own kind for
+-- nothing but goodwill (see Captives.ransom) - the one resolution that can
+-- pull a wary tribal faction (factions.lua's neutralFactions) back out of
+-- open hostility rather than deepening it further. Returns false without
+-- state change when there is no captive here.
+function Game:ransomCaptive()
+  local captive = self.level:captiveAt(self.player.x, self.player.y)
+  if not captive then
+    self.log:add("there is nothing here to ransom")
+    return false
+  end
+  Captives.ransom(self.level, self.player, captive)
+  self.log:add(string.format("you release %s - the %s think a little better of you for it", captive.name, captive.faction))
+  return true
+end
+
+-- Sells whatever captive stands under the player for gold at its own
+-- faction's expense (see Captives.sell). Returns false without state change
+-- when there is no captive here.
+function Game:sellCaptive()
+  local captive = self.level:captiveAt(self.player.x, self.player.y)
+  if not captive then
+    self.log:add("there is nothing here to sell")
+    return false
+  end
+  local paid = Captives.sell(self.level, self.player, captive)
+  self.log:add(string.format("you trade %s away for %d gold", captive.name, paid))
+  return true
+end
+
+-- Interrogates whatever captive stands under the player instead of ransoming
+-- or selling it (see Captives.interrogate): no gold, no reputation swing,
+-- just every currently-hidden secret door on this floor found outright plus
+-- a trickle of essence. Returns false without state change when there is no
+-- captive here.
+function Game:interrogateCaptive()
+  local captive = self.level:captiveAt(self.player.x, self.player.y)
+  if not captive then
+    self.log:add("there is nothing here to interrogate")
+    return false
+  end
+  local revealed = Captives.interrogate(self.level, self.player, captive)
+  self.log:add(string.format("%s breaks - %d hidden door%s in this floor give themselves away",
+    captive.name, #revealed, #revealed == 1 and "" or "s"))
+  return true
+end
+
+-- Binds the player to `board`'s bounty for free, logging the pact struck or
+-- the reason it could not be. See Quests.accept for the acceptance rules.
+function Game:tryAcceptQuest(board)
+  local success, line = Quests.accept(self.player, board)
+  self.log:add(line)
+  return success
+end
+
+-- Pays out the player's active bounty the moment it is fulfilled, granting
+-- gold, xp and essence in one stroke and freeing the player to bind another.
+-- A no-op with no active bounty or one still unmet.
+function Game:resolveQuest()
+  local bounty = self.player.quest
+  if not bounty or not Quests.resolved(self.player, self.depth) then return false end
+  self.player.gold = self.player.gold + bounty.rewardGold
+  self.log:addAll(Progression.grantXp(self.player, bounty.rewardXp))
+  self.player.essence = self.player.essence + Crafting.essenceFor(bounty.rewardXp)
+  self.player.quest = nil
+  self.stats.questsCompleted = self.stats.questsCompleted + 1
+  Factions.adjust(self.player, Factions.MERCHANT, 3)
+  self.log:add(string.format("the bounty resolves: %d gold and %d xp", bounty.rewardGold, bounty.rewardXp))
+  return true
 end
 
 function Game:openDoor(x, y)
@@ -951,32 +1179,148 @@ function Game:openDoor(x, y)
   return true
 end
 
-function Game:triggerTrap(trap)
+-- Springs `trap` on `victim`, whoever that is: reveals it on the map and
+-- resolves its effect against that entity's own stats and position. Kept
+-- generic so a player-planted trap kit (Game:useItem's Items.KIT branch)
+-- harms a monster exactly as a builder-placed one harms the player.
+function Game:springTrap(trap, victim)
   trap.revealed = true
   self.level.map:set(trap.x, trap.y, Tiles.TRAP)
+  local isPlayer = victim == self.player
+  local name = isPlayer and "you" or victim.name
   if trap.effect == "dart" then
     local dmg = 3 + self.depth // 2
-    self.player.hp = self.player.hp - dmg
-    self.log:add(string.format("a dart trap hits you for %d", dmg))
+    victim.hp = victim.hp - dmg
+    self.log:add(isPlayer and string.format("a dart trap hits you for %d", dmg)
+      or string.format("a dart trap hits %s for %d", name, dmg))
   elseif trap.effect == "poison" then
-    Status.apply(self.player, Status.POISON, 5, 2)
-    self.log:add("you stumble into a poison trap")
+    Status.apply(victim, Status.POISON, 5, 2)
+    self.log:add(isPlayer and "you stumble into a poison trap"
+      or string.format("%s stumbles into a poison trap", name))
+  elseif trap.effect == "confuse" then
+    Status.apply(victim, Status.CONFUSE, 6, 1)
+    self.log:add(isPlayer and "a cloud of disorienting spores bursts around you"
+      or string.format("a cloud of disorienting spores bursts around %s", name))
+  elseif trap.effect == "blind" then
+    Status.apply(victim, Status.BLIND, 6, 1)
+    self.log:add(isPlayer and "a flash of searing light leaves you blind"
+      or string.format("a flash of searing light leaves %s blind", name))
+  elseif trap.effect == "stun" then
+    Status.apply(victim, Status.STUN, 2, 1)
+    self.log:add(isPlayer and "a jolt of current locks up your muscles"
+      or string.format("a jolt of current locks up %s's muscles", name))
   else
     local x, y = self:randomFloorCell()
     if x then
-      self.player.x, self.player.y = x, y
-      self.log:add("a trap flings you across the level")
+      victim.x, victim.y = x, y
+      self.log:add(isPlayer and "a trap flings you across the level"
+        or string.format("a trap flings %s across the level", name))
     end
   end
 end
 
+function Game:triggerTrap(trap)
+  self:springTrap(trap, self.player)
+end
+
+-- Attempts to disarm `trap`, already noticed (see disarm.lua's Disarm.sweep,
+-- rolled once per turn in Game:endPlayerTurn) but not yet sprung. Refuses
+-- outright, without even risking a spring, against a trap never detected or
+-- one already triggered - there is nothing left here to disarm.
+function Game:disarmTrap(trap)
+  if not trap or not trap.detected or trap.revealed then
+    self.log:add("there is nothing here you have noticed to disarm")
+    return false
+  end
+  local success, line = Disarm.attempt(self, trap)
+  if success then self.log:add(line) end
+  return success
+end
+
+-- Throws `lever`, a no-op once it has already been thrown. The instant this
+-- pull completes every lever sharing its vault id, the shared door swings
+-- open (its tile flips to a plain open door - see Vaults.pull) and the run's
+-- vault tally advances for meta scoring; otherwise the lever just clunks
+-- into its pulled state.
+function Game:pullLever(lever)
+  local pulled, door = Vaults.pull(self.level, lever)
+  if not pulled then return false end
+  self.level.map:set(lever.x, lever.y, Tiles.LEVER_PULLED)
+  if door then
+    door.opened = true
+    self.level.map:set(door.x, door.y, Tiles.DOOR_OPEN)
+    self.stats.vaultsOpened = self.stats.vaultsOpened + 1
+    self.log:add("the vault door grinds open")
+  else
+    self.log:add("you pull the lever - it clunks into place")
+  end
+  return true
+end
+
+-- A priced ware is only free for the taking once its shopkeeper is dead;
+-- otherwise it charges the stamped price and is left on the ground when the
+-- player cannot afford it yet (they simply walk past it).
+function Game:wardedByLiveKeeper(ground)
+  if not ground.price then return false end
+  local keeper = self.level:entityById(ground.shopId)
+  return keeper ~= nil and keeper:isAlive()
+end
+
+-- Player-facing wrapper so callers never need to know encumbrance.lua works
+-- entirely off entity.inventory/entity.level rather than any saved field.
+function Game:encumbranceTier()
+  return Encumbrance.tierFor(self.player)
+end
+
 function Game:pickupHere()
+  local tierBefore = self:encumbranceTier()
   for i = #self.level.floorItems, 1, -1 do
     local ground = self.level.floorItems[i]
     if ground.x == self.player.x and ground.y == self.player.y then
-      self.player.inventory[#self.player.inventory + 1] = ground.item
-      self.log:add("you pick up " .. Identify.label(self.identify, ground.item))
-      table.remove(self.level.floorItems, i)
+      local item = ground.item
+      if item.mimic then
+        table.remove(self.level.floorItems, i)
+        self:triggerMimic(ground)
+      elseif item.grave then
+        table.remove(self.level.floorItems, i)
+        self:triggerGrave(ground)
+      elseif item.kind == Items.GOLD then
+        self.player.gold = self.player.gold + item.amount
+        self.log:add("you find " .. item.amount .. " gold")
+        table.remove(self.level.floorItems, i)
+      elseif self:wardedByLiveKeeper(ground) then
+        local paid = Shop.buy(self, ground)
+        if paid then
+          self.log:add(string.format("you buy %s for %d gold",
+            Identify.label(self.identify, item), paid))
+          table.remove(self.level.floorItems, i)
+        end
+      elseif item.kind == Items.AMMO then
+        local stack = self:findInInventory(function(existing)
+          return existing.kind == Items.AMMO and existing.name == item.name
+        end)
+        if stack then
+          self.player.inventory[stack].count = self.player.inventory[stack].count + item.count
+        else
+          self.player.inventory[#self.player.inventory + 1] = item
+        end
+        self.log:add(string.format("you pick up %d %s", item.count, item.name))
+        table.remove(self.level.floorItems, i)
+      else
+        if item.artifact then self.stats.artifactsFound = self.stats.artifactsFound + 1 end
+        if item.set then self.stats.setPiecesFound = self.stats.setPiecesFound + 1 end
+        self.player.inventory[#self.player.inventory + 1] = item
+        self.log:add("you pick up " .. Identify.label(self.identify, item))
+        table.remove(self.level.floorItems, i)
+      end
+    end
+  end
+  local tierAfter = self:encumbranceTier()
+  if tierAfter ~= tierBefore and tierAfter ~= Encumbrance.LIGHT then
+    if tierAfter == Encumbrance.OVERLOADED then
+      self.log:add("you are overloaded and moving sluggishly")
+    else
+      self.log:add("your pack grows heavy")
     end
   end
 end
