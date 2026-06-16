@@ -241,9 +241,34 @@ function Game:currentEntities()
 end
 
 function Game:effectiveRadius()
-  if not self.level.dark then return FOV_RADIUS end
-  if self.player.light.fuel > 0 then return self.player.light.radius end
-  return 2
+  local radius = FOV_RADIUS
+  if self.level.dark then
+    radius = self.player.light.fuel > 0 and self.player.light.radius or 2
+  end
+  radius = radius - Atmosphere.sightPenalty(self.level.weather) - Events.sightPenalty(self.level.event)
+    - Ascension.sightPenalty(self.ascension)
+  if radius < 1 then radius = 1 end
+  -- Blindness overrides every other light/weather/mutator term rather than
+  -- stacking with them: a blinded player run through with a full lantern in
+  -- clear weather still can't see past their own hand.
+  if Status.has(self.player, Status.BLIND) then radius = 1 end
+  return radius
+end
+
+-- Folds events.lua's level-scoped monster damage swing together with
+-- whatever ascension.lua mutators the player opted into for this run, read
+-- live at the point a monster actually lands a hit (Game:monsterMelee,
+-- Game:monsterShoot, Game:triggerMimic and Game:triggerGrave's ambush
+-- swings) rather than baked into any monster's own stats.
+function Game:monsterDamageMultiplier()
+  return Events.monsterDamageMultiplier(self.level.event) * Ascension.damageMultiplier(self.ascension)
+end
+
+-- Folds events.lua's rich-veins swing together with ascension.lua's own
+-- essence mutators, read live wherever essence is actually credited
+-- (Game:awardKill, Nodes.harvest).
+function Game:essenceMultiplier()
+  return Events.essenceMultiplier(self.level.event) * Ascension.essenceMultiplier(self.ascension)
 end
 
 function Game:computeVisible()
@@ -251,6 +276,19 @@ function Game:computeVisible()
     self:effectiveRadius(), self.level.lights)
   for idx in pairs(self.visible) do
     self.level:markExplored(idx)
+  end
+  self:noteSightings()
+end
+
+-- Records every currently-visible living monster's species into the
+-- compendium (see compendium.lua) - silent bookkeeping, never touches the
+-- message log, so it cannot perturb anything that reads recent log lines.
+function Game:noteSightings()
+  local map = self.level.map
+  for _, entity in ipairs(self.level.entities) do
+    if entity.kind == "monster" and entity:isAlive() and self.visible[map:index(entity.x, entity.y)] then
+      Compendium.noteSighting(self.compendium, entity.species)
+    end
   end
 end
 
@@ -261,6 +299,13 @@ end
 function Game:hasKey()
   for _, item in ipairs(self.player.inventory) do
     if item.kind == Items.KEY then return true end
+  end
+  return false
+end
+
+function Game:hasAmulet()
+  for _, item in ipairs(self.player.inventory) do
+    if item.kind == Items.AMULET then return true end
   end
   return false
 end
@@ -294,9 +339,39 @@ function Game:playerAdjacent(monster)
   return math.abs(monster.x - self.player.x) + math.abs(monster.y - self.player.y) == 1
 end
 
+-- The player-aligned companion, hireling, or thrall standing right next to
+-- `monster` (Manhattan-1, the same cardinal-only adjacency Game:playerAdjacent
+-- itself uses), or nil if none is that close. A hostile monster whose only
+-- route toward the player runs through a one-wide corridor an ally is
+-- standing in cannot path around it (Game:stepMonsterToward's own
+-- blockedForMonster treats any occupied non-goal cell as a wall), so without
+-- this check every ai.lua pursuit behaviour just holds position forever once
+-- it reaches that ally's doorstep - the ally becomes an unkillable, un-
+-- fightable roadblock rather than the combatant Game:onActorDeath and the
+-- companion/mercenary/thrall noise-emission work already treat it as. Ties
+-- break toward the lower entity id, matching Game:nearestAlly's own rule.
+function Game:adjacentAlly(monster)
+  local best
+  for _, other in ipairs(self.level.entities) do
+    if other ~= monster and other:isAlive()
+      and (other.kind == "companion" or other.kind == "hireling" or other.kind == "thrall")
+      and math.abs(other.x - monster.x) + math.abs(other.y - monster.y) == 1
+      and (not best or other.id < best.id) then
+      best = other
+    end
+  end
+  return best
+end
+
 function Game:canSeePlayer(monster, range)
+  local penalty = Skills.detectionPenalty(self.player, self.level.dark)
+  local effectiveRange = math.max(range - penalty, 0)
+  -- A blinded monster can still feel the player out at melee range but loses
+  -- every longer-ranged aggro/pack/flee/ranged check in ai.lua - the same
+  -- clamp Game:effectiveRadius applies to a blinded player's own sight.
+  if Status.has(monster, Status.BLIND) then effectiveRange = math.min(effectiveRange, 1) end
   local cheb = math.max(math.abs(monster.x - self.player.x), math.abs(monster.y - self.player.y))
-  if cheb > range then return false end
+  if cheb > effectiveRange then return false end
   return Los.clear(self.level.map, monster.x, monster.y, self.player.x, self.player.y)
 end
 
@@ -305,23 +380,165 @@ function Game:hasClearShot(monster)
 end
 
 function Game:monsterMelee(monster)
-  local outcome = Combat.attack(monster, self.player)
+  if Skills.evades(self, self.player) then
+    self.log:add(string.format("you evade %s's attack", monster.name))
+    return
+  end
+  local outcome = Combat.attack(monster, self.player, self:monsterDamageMultiplier())
+  Momentum.onDamaged(self.player)
   self.log:add(string.format("%s hits you for %d", monster.name, outcome.damage))
+  local broke = Durability.wearArmor(self.player)
+  if broke then self.log:add(broke) end
+  self:applyEliteOnHit(monster, outcome.damage, self.player)
+  local thorns = Artifacts.thornsAmount(self.player, outcome.damage)
+  if thorns > 0 then
+    -- Aegis of Embers "sears" its attacker by name and by log line, so this
+    -- reflect is fire damage, not a bare stat subtraction - a fire-immune
+    -- dragon (bestiary-real, reachable from depth 6) shrugs it off entirely,
+    -- exactly like every other fire source in the engine already does.
+    local dealt = Resistances.apply(monster, thorns, Resistances.FIRE)
+    if dealt > 0 then
+      monster.hp = monster.hp - dealt
+      self.log:add(string.format("your armor sears %s for %d", monster.name, dealt))
+      if not monster:isAlive() then self:awardKill(monster) end
+    else
+      self.log:add(string.format("your armor's embers wash harmlessly over %s", monster.name))
+    end
+  end
+  if monster.biteDisease and self.player:isAlive() and self.rng:chance(1, 4) then
+    if Disease.infect(self.player, monster.biteDisease) then
+      self.log:add(string.format("%s's bite leaves you feeling ill", monster.name))
+    end
+  end
+  self:emitNoise(monster.x, monster.y, Noise.MELEE)
+end
+
+-- A vampiric elite heals a portion of the damage it just dealt; a chilling
+-- one leaves its status rider on the victim. Shared by melee and a ranged
+-- shot so either delivery route triggers the same elite hooks - and, since
+-- Infighting.strike resolves an elite fighting a rival monster or the
+-- player's own companion/hireling/thrall through this same method, the log
+-- line names the actual victim instead of always assuming it is the player.
+function Game:applyEliteOnHit(attacker, dealt, victim)
+  local lifesteal = Elites.lifestealFraction(attacker)
+  if lifesteal > 0 then
+    local healed = math.floor(dealt * lifesteal)
+    if healed > 0 and attacker:isAlive() then
+      attacker.hp = math.min(attacker.maxHp, attacker.hp + healed)
+      local from = victim == self.player and "you" or victim.name
+      self.log:add(string.format("%s drains %d hp from %s", attacker.name, healed, from))
+    end
+  end
+  local rider = Elites.onHitRider(attacker)
+  if rider and victim:isAlive() then
+    Status.apply(victim, rider.status, rider.duration, rider.potency)
+    local who = victim == self.player and "you" or victim.name
+    self.log:add(string.format("%s's touch leaves %s %s", attacker.name, who, rider.status))
+  end
 end
 
 function Game:monsterShoot(monster)
-  local dealt = Combat.damage(monster, self.player)
+  local damageType = monster.breath == "fire" and Resistances.FIRE or Resistances.PHYSICAL
+  local dealt = Combat.damage(monster, self.player, self:monsterDamageMultiplier(), damageType)
   self.player.hp = self.player.hp - dealt
+  Momentum.onDamaged(self.player)
   self.log:add(string.format("%s shoots you for %d", monster.name, dealt))
+  local broke = Durability.wearArmor(self.player)
+  if broke then self.log:add(broke) end
+  self:applyEliteOnHit(monster, dealt, self.player)
+  if monster.breath == "fire" then
+    if Resistances.tierOf(self.player, Resistances.FIRE) == Resistances.IMMUNE then
+      self.log:add("the flames wash over you harmlessly")
+    else
+      Status.apply(self.player, Status.BURNING, 3, 2)
+      self.log:add("the flames catch you alight")
+    end
+  end
 end
 
 local function blockedForMonster(game, self, goalX, goalY)
   return function(x, y)
     if x == goalX and y == goalY then return false end
     if not game.level.map:isWalkable(x, y) then return true end
+    if game.level:blockAt(x, y) then return true end
     if x == game.player.x and y == game.player.y then return true end
     local occupant = game.level:entityAt(x, y)
     return occupant ~= nil and occupant ~= self
+  end
+end
+
+-- Springs whatever untouched trap sits under `entity` after it has just
+-- moved there - a player-planted trap kit harms a monster or companion
+-- exactly as a builder-placed one harms the player, since both live in the
+-- same level.traps list and share springTrap's resolution. A levitating
+-- entity (Status.LEVITATE) drifts clear of the pressure plate entirely -
+-- deliberately silent and without marking the trap revealed, unlike the
+-- lava/chasm skip in checkTerrainFor: a hidden trap is information the
+-- player never earned just by floating over it, so levitation buys safety
+-- without also buying detection.
+function Game:checkTrapFor(entity)
+  if Status.has(entity, Status.LEVITATE) then return end
+  local trap = self.level:trapAt(entity.x, entity.y)
+  if trap and not trap.revealed then
+    self:springTrap(trap, entity)
+    if not entity:isAlive() then self:onActorDeath(entity) end
+  end
+end
+
+-- A pit with no floor below it: the player falls to the next depth and
+-- takes fall damage, a monster that blunders in is simply gone. Builder
+-- never seeds a chasm on the final floor, so there is always a level below
+-- to land on.
+function Game:fallIntoChasm(entity)
+  if entity == self.player then
+    local dealt = 6 + self.rng:range(0, 6)
+    self.player.hp = self.player.hp - dealt
+    self.log:add(string.format("the floor gives way - you plunge into the dark for %d", dealt))
+    if not self.player:isAlive() then return end
+    self.depth = self.depth + 1
+    self.level = self.dungeon:get(self.depth)
+    local x, y = self:randomFloorCell()
+    if not x then x, y = self.level.upX, self.level.upY end
+    self.player.x, self.player.y = x, y
+    if self.depth > self.deepestDepth then self.deepestDepth = self.depth end
+    self:computeVisible()
+  else
+    entity.hp = 0
+    self.log:add(string.format("%s plunges into the chasm and is gone", entity.name))
+    self:onActorDeath(entity)
+  end
+end
+
+-- Runs after entity has just come to rest on (dx, dy) from its previous
+-- cell: ice keeps sliding it onward, lava burns it in place, and a chasm
+-- ends the move altogether. Order matters - a slide can carry a traveller
+-- straight off the ice and into whatever waits beyond it. A levitating
+-- entity (Status.LEVITATE) never touches the ground at all, so it short
+-- circuits every branch below - no slide, no burn, no fall - though it
+-- still gets a log line when that skip actually mattered (standing over
+-- lava or a chasm), since both are visible on the map and worth calling out.
+function Game:checkTerrainFor(entity, dx, dy)
+  if not entity:isAlive() then return end
+  if Status.has(entity, Status.LEVITATE) then
+    if self.level.map:get(entity.x, entity.y) == Tiles.LAVA or Terrain.isChasm(self.level, entity) then
+      self.log:add(entity == self.player and "you drift safely over the hazard below"
+        or string.format("%s drifts safely over the hazard below", entity.name))
+    end
+    return
+  end
+  if self.level.map:get(entity.x, entity.y) == Tiles.ICE then
+    Terrain.slide(self.level, entity, dx, dy)
+  end
+  local line = Terrain.afflictLava(self.level, entity)
+  if line then
+    self.log:add(line)
+    if not entity:isAlive() then
+      if entity ~= self.player then self:onActorDeath(entity) end
+      return
+    end
+  end
+  if Terrain.isChasm(self.level, entity) then
+    self:fallIntoChasm(entity)
   end
 end
 
@@ -332,7 +549,10 @@ function Game:stepMonsterToward(monster, tx, ty)
     local step = path[2]
     if self.level.map:isWalkable(step.x, step.y) and not self.level:entityAt(step.x, step.y)
       and not (step.x == self.player.x and step.y == self.player.y) then
+      local dx, dy = step.x - monster.x, step.y - monster.y
       monster.x, monster.y = step.x, step.y
+      self:checkTrapFor(monster)
+      self:checkTerrainFor(monster, dx, dy)
     end
   end
 end
@@ -352,15 +572,89 @@ function Game:stepMonsterAway(monster, tx, ty)
       end
     end
   end
-  if bx then monster.x, monster.y = bx, by end
+  if bx then
+    local dx, dy = bx - monster.x, by - monster.y
+    monster.x, monster.y = bx, by
+    self:checkTrapFor(monster)
+    self:checkTerrainFor(monster, dx, dy)
+  end
 end
 
+-- An erratic wanderer's random step or a confused chaser's overridden one
+-- (Ai.act, both routed here) can land on an ally's cell exactly as easily as
+-- the player's - Infighting.strike resolves that the same generic way
+-- Game:adjacentAlly's own callers do, rather than the bump silently doing
+-- nothing the way it would against an impassable wall.
 function Game:moveMonster(monster, dx, dy)
   local nx, ny = monster.x + dx, monster.y + dy
   if nx == self.player.x and ny == self.player.y then
     self:monsterMelee(monster)
-  elseif self.level.map:isWalkable(nx, ny) and not self.level:entityAt(nx, ny) then
+    return
+  end
+  local occupant = self.level:entityAt(nx, ny)
+  if occupant and (occupant.kind == "companion" or occupant.kind == "hireling" or occupant.kind == "thrall") then
+    Infighting.strike(self, monster, occupant)
+    return
+  end
+  if self.level.map:isWalkable(nx, ny) and not occupant then
     monster.x, monster.y = nx, ny
+    self:checkTrapFor(monster)
+    self:checkTerrainFor(monster, dx, dy)
+  end
+end
+
+-- Mirrors ai.lua's own Ai.act confusion stumble for the three player-aligned
+-- actor kinds (companion/hireling/thrall). None of those ever dispatch
+-- through Ai.act, so without this they would leave Status.CONFUSE completely
+-- inert on them despite Game:springTrap and friends already applying it to
+-- "any victim" regardless of kind. Returns true whenever the roll actually
+-- fires (whether or not the stumble itself finds anywhere to go), so each
+-- caller can `if game:allyActsConfused(ally) then return end` first thing,
+-- exactly the precedence Ai.act gives the same roll over chase/pack/etc.
+-- Unlike a confused monster's stumble (moveMonster above, which treats a
+-- step onto the player's cell as an attack), a confused ally's stumble onto
+-- its own master's cell is harmless - an ally never attacks the player it is
+-- bonded or hired to protect, so that one direction is simply blocked like a
+-- wall rather than routed into any melee helper.
+function Game:allyActsConfused(ally)
+  if not Status.has(ally, Status.CONFUSE) then return false end
+  if not self.rng:chance(Status.CONFUSE_NUMERATOR, Status.CONFUSE_DENOMINATOR) then return false end
+  local dir = MONSTER_DIRS[self.rng:range(1, #MONSTER_DIRS)]
+  local nx, ny = ally.x + dir[1], ally.y + dir[2]
+  if not (nx == self.player.x and ny == self.player.y)
+    and self.level.map:isWalkable(nx, ny) and not self.level:entityAt(nx, ny) then
+    ally.x, ally.y = nx, ny
+    self:checkTrapFor(ally)
+    self:checkTerrainFor(ally, dir[1], dir[2])
+  end
+  return true
+end
+
+-- A burrower's turn when it can neither reach nor see the player through
+-- open floor: senses the player's general direction through solid rock out
+-- to Digging.SENSE_RANGE away and, of the two candidate cells toward them
+-- (longer axis first - see Digging.directionsToward), either claws one
+-- swing into the first one that is still diggable, exactly like Game:dig
+-- but toolless and self-directed, or - if open floor already leads that
+-- way - simply steps there so it closes the distance before it ever needs
+-- to swing at all. Idles once out of range or once neither candidate cell
+-- is diggable nor walkable, the same way "flee" idles once it loses sight.
+function Game:monsterDig(monster, tx, ty)
+  local cheb = math.max(math.abs(monster.x - tx), math.abs(monster.y - ty))
+  if cheb == 0 or cheb > Digging.SENSE_RANGE then return end
+  for _, dir in ipairs(Digging.directionsToward(monster.x, monster.y, tx, ty)) do
+    local nx, ny = monster.x + dir[1], monster.y + dir[2]
+    if Digging.canDig(self.level.map, nx, ny) then
+      self.log:add(Digging.swing(self, monster, nx, ny))
+      if not monster:isAlive() then self:onActorDeath(monster) end
+      return
+    elseif self.level.map:isWalkable(nx, ny) and not self.level:entityAt(nx, ny)
+      and not (nx == self.player.x and ny == self.player.y) then
+      monster.x, monster.y = nx, ny
+      self:checkTrapFor(monster)
+      self:checkTerrainFor(monster, dir[1], dir[2])
+      return
+    end
   end
 end
 
@@ -377,14 +671,77 @@ function Game:nearestAlly(monster)
   return ally
 end
 
+-- A monster's death sweeps xp and essence to the player; a companion fights
+-- for the player rather than yielding a reward for dying, so its death is
+-- only logged and swept.
+function Game:onActorDeath(actor)
+  if actor.kind == "companion" then
+    self.log:add("your " .. actor.name .. " falls")
+    self:cleanupDead()
+  elseif actor.kind == "hireling" then
+    self.log:add("your " .. actor.name .. " falls")
+    self:cleanupDead()
+  elseif actor.kind == "thrall" then
+    self.log:add("your " .. actor.name .. " crumbles back to bones")
+    self:cleanupDead()
+  else
+    self:awardKill(actor)
+  end
+end
+
 function Game:takeMonsterTurn(monster)
   self.log:addAll(Status.tick(monster))
   if not monster:isAlive() then
-    self:cleanupDead()
+    self:onActorDeath(monster)
     return
   end
-  if not Status.skipsTurn(monster) then
-    Ai.act(self, monster)
+  Conductivity.tick(self.level, monster)
+  local hazardLine = Hazards.afflict(self.level, monster)
+  if hazardLine then self.log:add(hazardLine) end
+  if not monster:isAlive() then
+    self:onActorDeath(monster)
+    return
+  end
+  -- Mirrors Game:hungerTorchTick's own Disease.tick(self.player) call - a
+  -- disease is plain generic entity state (see disease.lua), and since
+  -- Infighting.strike can now infect a rival monster or the player's own
+  -- companion/hireling/thrall (not just the player), every non-player actor
+  -- needs its own infection to actually progress on its turn too, or an
+  -- infected ally would sit permanently incubating with no way to ever
+  -- erupt, escalate, or be noticed.
+  local diseaseLine = Disease.tick(monster)
+  if diseaseLine then self.log:add(diseaseLine) end
+  if not monster:isAlive() then
+    self:onActorDeath(monster)
+    return
+  end
+  local regenLine = Abilities.regenTick(monster)
+  if regenLine then self.log:add(regenLine) end
+  local enrageLine = Bosses.tryEnrage(monster)
+  if enrageLine then self.log:add(enrageLine) end
+  local phaseLine, phaseConsumedTurn = Phases.tick(self, monster)
+  if phaseLine then self.log:add(phaseLine) end
+  if not phaseConsumedTurn and not Status.skipsTurn(monster) then
+    if monster.kind == "companion" then
+      Companions.act(self, monster)
+    elseif monster.kind == "hireling" then
+      Mercenaries.act(self, monster)
+    elseif monster.kind == "thrall" then
+      Reanimation.act(self, monster)
+    elseif Infighting.tryAct(self, monster) then
+      -- A rivalry or a discorded mind has nothing to do with how this
+      -- monster currently feels about the player: it fights regardless of
+      -- wariness or - unlike Stealth.tick's own gating - whether it has
+      -- otherwise noticed the player at all this turn.
+    elseif Factions.isWary(self.player, monster) then
+      -- A wary tribe member holds its ground: neither provoked nor hated
+      -- into open hostility yet, it leaves the player be this turn.
+    elseif Stealth.tick(self, monster) then
+      Abilities.tickCooldown(monster)
+      if not Abilities.tryAct(self, monster) then
+        Ai.act(self, monster)
+      end
+    end
   end
   Scheduler.spend(monster)
   self:cleanupDead()
@@ -401,17 +758,176 @@ end
 
 -- Player actions.
 
-function Game:playerAttack(target)
-  local outcome = Combat.attack(self.player, target)
-  self.log:add(string.format("you hit %s for %d", target.name, outcome.damage))
-  local weapon = self.player.weapon
-  if weapon and weapon.affix and weapon.affix.onHit and target:isAlive() then
-    local rider = weapon.affix.onHit
+-- Common tail of any player-caused kill: log it, grant the xp it was worth,
+-- and sweep it off the level. Shared by melee and offensive spells so xp
+-- always tracks a felled monster regardless of what felled it.
+function Game:awardKill(target)
+  self.log:add(target.name .. " dies")
+  local burst = Abilities.onDeath(self, target)
+  if burst then self.log:add(burst) end
+  local eliteBurst = Elites.onDeath(self, target)
+  if eliteBurst then self.log:add(eliteBurst) end
+  self.stats.kills = self.stats.kills + 1
+  if target.isBoss then self.stats.bossKills = self.stats.bossKills + 1 end
+  Factions.registerKill(self.player, target)
+  local xp = target.isBoss and Bosses.xpFor(target) or target.mimic and Mimics.xpFor()
+    or target.grave and Graves.xpFor() or Monsters.xpFor(target)
+  xp = xp + Elites.xpBonus(target, xp)
+  if target.nemesis then xp = xp + Nemesis.xpBonus(target.nemesisGrudge or 1) end
+  self.log:addAll(Progression.grantXp(self.player, xp))
+  self.player.essence = self.player.essence + math.floor(Crafting.essenceFor(xp) * self:essenceMultiplier())
+  Quests.registerKill(self.player, target.species)
+  Compendium.noteKill(self.compendium, target.species)
+  Corpses.spawn(self.level, target)
+  self:resolveQuest()
+  if target.isBoss then
+    local loot = Bosses.lootFor(target)
+    if loot then
+      self.level.floorItems[#self.level.floorItems + 1] = { x = target.x, y = target.y, item = loot }
+      self.log:add(string.format("%s drops %s", target.name, loot.name))
+    end
+  end
+  if target.grave then
+    local gold, essence = Graves.lootFor(target)
+    if gold > 0 then
+      self.player.gold = self.player.gold + gold
+      self.log:add(string.format("the shade scatters %d gold as it fades", gold))
+    end
+    if essence > 0 then
+      self.player.essence = self.player.essence + essence
+    end
+  end
+  if target.nemesis then
+    local bounty = Nemesis.bountyGold(target.nemesisGrudge or 1)
+    self.player.gold = self.player.gold + bounty
+    self.log:add(string.format("the hunt is over - you claim %d gold from %s", bounty, target.name))
+    self.nemesis = nil
+  end
+  self:cleanupDead()
+end
+
+-- Applies a weapon's on-hit rider - rolled affix or socketed gem, or both -
+-- to a still-living target, logging each status it lands.
+function Game:applyWeaponRiders(weapon, target)
+  if not (weapon and target:isAlive()) then return end
+  local riders = {}
+  if weapon.affix and weapon.affix.onHit then riders[#riders + 1] = weapon.affix.onHit end
+  if weapon.socket and weapon.socket.onHit then riders[#riders + 1] = weapon.socket.onHit end
+  for _, rider in ipairs(riders) do
     Status.apply(target, rider.status, rider.duration, rider.potency)
     self.log:add(string.format("%s is %s", target.name, rider.status))
   end
+end
+
+-- Marks a monster as no longer wary (see factions.lua): once the player has
+-- aimed any offensive action at it, a tribal target that used to hold back
+-- fights (or flees) like any other monster from then on, hit or miss. Any
+-- offensive action also wakes a dormant target outright (see stealth.lua) -
+-- an arrow or a spell that misses still gives away exactly where you are.
+function Game:provoke(target)
+  if target and target.kind == "monster" then
+    target.provoked = true
+    Stealth.alert(target, self.player.x, self.player.y)
+  end
+end
+
+-- Floods a burst of noise.lua sound out from (x, y) and gives every other
+-- still-dormant monster the flood actually reaches a chance to stir - a
+-- clash of steel three rooms over does not single out whichever target
+-- Game:provoke already woke outright, it startles whatever else is close
+-- enough to hear it too. A monster startled this way only ever starts
+-- searching the noise's origin (see Stealth.hear), never snaps straight to
+-- hunting the way a direct hit does.
+function Game:emitNoise(x, y, loudness)
+  local field = Noise.propagate(self.level.map, x, y, loudness)
+  for _, entity in ipairs(self.level.entities) do
+    if entity.kind == "monster" and Stealth.isUnaware(entity) then
+      local intensity = Noise.intensityAt(field, self.level.map, entity.x, entity.y)
+      if intensity > 0 and self.rng:chance(intensity, loudness) then
+        Stealth.hear(entity, x, y)
+        self.log:add(string.format("%s stirs at the noise", entity.name))
+      end
+    end
+  end
+end
+
+function Game:playerAttack(target)
+  -- Read before provoke() wakes the target below, so the bonus reflects
+  -- whatever it actually was the instant the blow landed.
+  local sneak = Stealth.sneakMultiplier(target)
+  self:provoke(target)
+  self:emitNoise(self.player.x, self.player.y, Noise.MELEE)
+  local multiplier = Skills.meleeDamageMultiplier(self.player, target) * sneak
+  local outcome = Combat.attack(self.player, target, multiplier)
+  Momentum.onMeleeHit(self.player)
+  if sneak > 1 then
+    self.log:add(string.format("you catch %s completely unaware", target.name))
+  end
+  self.log:add(string.format("you hit %s for %d", target.name, outcome.damage))
+  local broke = Durability.wearWeapon(self.player)
+  if broke then self.log:add(broke) end
+  local lifesteal = Artifacts.lifestealAmount(self.player, outcome.damage)
+  if lifesteal > 0 then
+    self.player.hp = math.min(self.player.maxHp, self.player.hp + lifesteal)
+    self.log:add(string.format("your %s drinks %d hp from %s", self.player.weapon.name, lifesteal, target.name))
+  end
+  self:applyWeaponRiders(self.player.weapon, target)
+  if Skills.consumePoisonBlade(self.player) and target:isAlive() then
+    Status.apply(target, Status.POISON, 5, 2)
+    self.log:add(string.format("%s is envenomed", target.name))
+  end
+  local masteredKey, masteredBonus = Proficiency.onMeleeHit(self.player)
+  if masteredKey then
+    self.log:add(string.format("you grow more skilled with your %s (+%d attack)", masteredKey, masteredBonus))
+  end
   if outcome.killed then
-    self.log:add(target.name .. " dies")
+    self:awardKill(target)
+  else
+    local splitLine = Abilities.onHit(self, target)
+    if splitLine then self.log:add(splitLine) end
+  end
+end
+
+-- Attempts to cast a known spell, optionally at a target monster. Returns
+-- true and logs its effect on success; on failure logs why and leaves all
+-- state - mana included - untouched.
+function Game:castSpell(key, target)
+  self:provoke(target)
+  local success, lines = Spells.cast(self, self.player, key, target)
+  self.log:addAll(lines)
+  if success then self:emitNoise(self.player.x, self.player.y, Noise.SPELL) end
+  return success
+end
+
+-- Hurls the inventory item at `index` at a monster. The item always leaves
+-- the inventory on a successful throw, whatever it did on arrival.
+function Game:throwAt(index, target)
+  local item = self.player.inventory[index]
+  if not item then return false end
+  self:provoke(target)
+  local success, lines = Throwing.resolve(self, self.player, item, target)
+  if success then
+    table.remove(self.player.inventory, index)
+    self:emitNoise(self.player.x, self.player.y, Noise.THROW)
+  end
+  self.log:addAll(lines)
+  return success
+end
+
+-- Throws a net from the inventory at `index` at a battered monster instead
+-- of finishing it off in melee (see captives.lua). The net always leaves
+-- the inventory once thrown, whether it actually holds the target or not;
+-- a genuine catch removes the target from level.entities without ever
+-- routing through Game:awardKill, so it earns no xp, essence, quest credit
+-- or faction kill penalty - only a captive left standing on the floor.
+function Game:captureAt(index, target)
+  local item = self.player.inventory[index]
+  if not item then return false end
+  self:provoke(target)
+  local success, lines = Captives.resolve(self, self.player, item, target)
+  if success then
+    table.remove(self.player.inventory, index)
+    self:emitNoise(self.player.x, self.player.y, Noise.THROW)
     self:cleanupDead()
   end
 end
