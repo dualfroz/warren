@@ -3,6 +3,11 @@
 -- and speed drive the turn scheduler; statuses layer temporary modifiers on top.
 
 local Status = require("status")
+local Encumbrance = require("encumbrance")
+local Momentum = require("momentum")
+local Sanity = require("sanity")
+local Proficiency = require("proficiency")
+local Hunger = require("hunger")
 
 local Entity = {}
 Entity.__index = Entity
@@ -30,6 +35,8 @@ function Entity.new(spec)
     weapon = nil,
     armor = nil,
     ring = nil,
+    bow = nil,
+    pick = nil,
   }, Entity)
 end
 
@@ -38,17 +45,23 @@ function Entity:isAlive()
 end
 
 function Entity:effectiveAttack()
-  return self.attack + Status.attackModifier(self)
+  return self.attack + Status.attackModifier(self) + Momentum.attackBonus(self) + Sanity.attackPenalty(self)
+    + Proficiency.attackBonus(self) + Hunger.attackPenalty(self)
 end
 
 function Entity:effectiveDefense()
-  return self.defense
+  return self.defense + Status.defenseModifier(self) + Encumbrance.defensePenalty(self) + Sanity.defensePenalty(self)
+    + Hunger.defensePenalty(self)
 end
 
 function Entity:effectiveSpeed()
-  local speed = self.speed + Status.speedModifier(self)
+  local speed = self.speed + Status.speedModifier(self) + Encumbrance.speedPenalty(self)
   if speed < 10 then speed = 10 end
   return speed
+end
+
+function Entity:encumbranceTier()
+  return Encumbrance.tierFor(self)
 end
 
 function Entity:toData()
@@ -66,6 +79,54 @@ function Entity:toData()
     weapon = self.weapon,
     armor = self.armor,
     ring = self.ring,
+    bow = self.bow,
+    pick = self.pick,
+    regen = self.regen,
+    onDeath = self.onDeath,
+    breath = self.breath,
+    ability = self.ability,
+    summonSpecies = self.summonSpecies,
+    summonedBy = self.summonedBy,
+    cooldown = self.cooldown,
+    fleeing = self.fleeing,
+    stolen = self.stolen,
+    splitGen = self.splitGen,
+    hostile = self.hostile,
+    isBoss = self.isBoss,
+    bossKey = self.bossKey,
+    enraged = self.enraged,
+    desperate = self.desperate,
+    channeling = self.channeling,
+    novaSpent = self.novaSpent,
+    resist = self.resist,
+    faction = self.faction,
+    provoked = self.provoked,
+    elite = self.elite,
+    eliteAffixes = self.eliteAffixes,
+    eliteTier = self.eliteTier,
+    mimic = self.mimic,
+    grave = self.grave,
+    graveClass = self.graveClass,
+    graveGold = self.graveGold,
+    graveEssence = self.graveEssence,
+    proficiency = self.proficiency,
+    awareness = self.awareness,
+    lastKnownX = self.lastKnownX,
+    lastKnownY = self.lastKnownY,
+    lostTurns = self.lostTurns,
+    searchTurns = self.searchTurns,
+    combo = self.combo,
+    decay = self.decay,
+    wage = self.wage,
+    loyalty = self.loyalty,
+    wet = self.wet,
+    nemesis = self.nemesis,
+    nemesisGrudge = self.nemesisGrudge,
+    disease = self.disease,
+    biteDisease = self.biteDisease,
+    companionXp = self.companionXp,
+    companionLevel = self.companionLevel,
+    companionHealBonus = self.companionHealBonus,
   }
 end
 
