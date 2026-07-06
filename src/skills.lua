@@ -149,3 +149,133 @@ local function statDefense(entity)
   return entity.effectiveDefense and entity:effectiveDefense() or entity.defense
 end
 
+-- Fighter: strikes the primary target in full through the normal attack path
+-- (so backstab/riders/kill-xp all still apply) and every other monster
+-- standing next to the player for half that raw swing.
+function Skills.useCleave(game, target)
+  if not target or not target:isAlive() then return false, { "there is nothing there to cleave" } end
+  local player = game.player
+  local dist = math.max(math.abs(target.x - player.x), math.abs(target.y - player.y))
+  if dist > 1 then return false, { "cleave only reaches an adjacent foe" } end
+  player.skillCooldowns.cleave = Skills.active.cleave.cooldown
+  local lines = {}
+  game:playerAttack(target)
+  local damageType = (player.weapon and player.weapon.damageType) or Resistances.PHYSICAL
+  for _, dir in ipairs(EIGHT_DIRS) do
+    local other = game.level:entityAt(player.x + dir[1], player.y + dir[2])
+    if other and other ~= target and other:isAlive() then
+      local dealt = math.floor((statAttack(player) - statDefense(other)) * 0.5)
+      if dealt < 1 then dealt = 1 end
+      dealt = Resistances.apply(other, dealt, damageType)
+      other.hp = other.hp - dealt
+      lines[#lines + 1] = string.format("your cleave catches %s for %d", other.name, dealt)
+      if not other:isAlive() then game:awardKill(other) end
+    end
+  end
+  return true, lines
+end
+
+-- Fighter: an instant breather, restoring three tenths of max hp.
+function Skills.useSecondWind(game)
+  local player = game.player
+  player.skillCooldowns.secondWind = Skills.active.secondWind.cooldown
+  local amount = math.floor(player.maxHp * 0.3)
+  local before = player.hp
+  player.hp = math.min(player.maxHp, player.hp + amount)
+  return true, { string.format("you catch your breath and recover %d", player.hp - before) }
+end
+
+-- Rogue: readies venom on the next melee swing rather than dealing damage
+-- itself. Cooldown starts immediately so it cannot be re-readied before the
+-- swing that consumes it even lands.
+function Skills.usePoisonBlade(game)
+  local player = game.player
+  player.skillCooldowns.poisonBlade = Skills.active.poisonBlade.cooldown
+  player.pendingPoisonBlade = true
+  return true, { "your blade drips with venom" }
+end
+
+-- Consumes a readied poison blade, if any. Called from Game:playerAttack
+-- after every melee hit so the very next swing - and only that one - carries
+-- the venom.
+function Skills.consumePoisonBlade(player)
+  if player.pendingPoisonBlade then
+    player.pendingPoisonBlade = nil
+    return true
+  end
+  return false
+end
+
+-- Mage: trades the turn for a flat mana refill, cheaper than waiting out the
+-- passive one-per-turn regen from hungerTorchTick.
+function Skills.useMeditate(game)
+  local player = game.player
+  local before = player.mana
+  player.mana = math.min(player.maxMana, player.mana + 6)
+  return true, { string.format("you meditate and recover %d mana", player.mana - before) }
+end
+
+local function firstAmmoIndex(entity)
+  for i, item in ipairs(entity.inventory) do
+    if item.kind == Items.AMMO and item.count > 0 then return i end
+  end
+  return nil
+end
+
+local function canReach(game, x1, y1, x2, y2, range)
+  local dist = math.max(math.abs(x1 - x2), math.abs(y1 - y2))
+  return dist <= range and Los.clear(game.level.map, x1, y1, x2, y2)
+end
+
+-- Ranger: a single arrow splits to strike up to two targets - the first for
+-- a full shot, the second for half - and only ever costs one arrow.
+function Skills.useMultishot(game, t1, t2)
+  local shooter = game.player
+  local bow = shooter.bow
+  if not bow then return false, { "you have no bow readied" } end
+  local ammoIdx = firstAmmoIndex(shooter)
+  if not ammoIdx then return false, { "you have no arrows left" } end
+  local targets = {}
+  for _, t in ipairs({ t1, t2 }) do
+    if t and t:isAlive() and canReach(game, shooter.x, shooter.y, t.x, t.y, bow.range) then
+      targets[#targets + 1] = t
+    end
+  end
+  if #targets == 0 then return false, { "no target in range" } end
+  shooter.skillCooldowns.multishot = Skills.active.multishot.cooldown
+  local ammo = shooter.inventory[ammoIdx]
+  ammo.count = ammo.count - 1
+  if ammo.count <= 0 then table.remove(shooter.inventory, ammoIdx) end
+  local lines = {}
+  for i, t in ipairs(targets) do
+    local share = (i == 1) and 1 or 0.5
+    local dealt = math.floor((shooter.baseAttack + bow.power - t:effectiveDefense()) * share)
+    if dealt < 1 then dealt = 1 end
+    dealt = Resistances.apply(t, dealt, Resistances.PHYSICAL)
+    t.hp = t.hp - dealt
+    lines[#lines + 1] = string.format("your arrow splits and strikes %s for %d", t.name, dealt)
+    if not t:isAlive() then game:awardKill(t) end
+  end
+  return true, lines
+end
+
+-- Attempts to use the active skill `key` on behalf of the player. Returns
+-- (true, lines) on success or (false, lines) with an explanatory line and no
+-- state changed on failure - unknown skill, still on cooldown, or the
+-- specific skill's own preconditions.
+function Skills.use(game, key, ...)
+  local def = Skills.active[key]
+  if not def then return false, { "you have no such skill to use" } end
+  local player = game.player
+  if not Skills.has(player, key) then return false, { "you haven't learned that skill" } end
+  if (player.skillCooldowns[key] or 0) > 0 then return false, { "that skill is not ready yet" } end
+  if key == "cleave" then return Skills.useCleave(game, ...)
+  elseif key == "secondWind" then return Skills.useSecondWind(game)
+  elseif key == "poisonBlade" then return Skills.usePoisonBlade(game)
+  elseif key == "meditate" then return Skills.useMeditate(game)
+  elseif key == "multishot" then return Skills.useMultishot(game, ...)
+  end
+  return false, { "that skill does nothing yet" }
+end
+
+return Skills
