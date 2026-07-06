@@ -12,10 +12,15 @@ Gen.generators = {
   bsp = require("gen.bsp").generate,
   cellular = require("gen.cellular").generate,
   drunkard = require("gen.drunkard").generate,
+  maze = require("gen.maze").generate,
 }
 
 -- Deterministic ordering of names for callers that want to cycle generators by
--- depth without depending on hash iteration order.
+-- depth without depending on hash iteration order. gen.maze is deliberately
+-- absent: builder.lua's chosenGenerator indexes into this list by depth, and
+-- every existing seed-pinned test downstream of it already assumes today's
+-- four-way cycle. Reaching a maze floor is always explicit, via
+-- options.generator = "maze" (see Gen.has/Gen.build below).
 Gen.order = { "rooms", "bsp", "cellular", "drunkard" }
 
 function Gen.has(name)

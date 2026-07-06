@@ -15,6 +15,7 @@ local Entity = require("entity")
 local Combat = require("combat")
 local Items = require("items")
 local Affixes = require("affixes")
+local Shop = require("shop")
 local Identify = require("identify")
 local Effects = require("effects")
 local Status = require("status")
@@ -26,8 +27,78 @@ local Gen = require("gen.init")
 local Connect = require("gen.connect")
 local Level = require("level")
 local Dungeon = require("dungeon")
+local Builder = require("builder")
 local Serialize = require("serialize")
 local Game = require("game")
+local Progression = require("progression")
+local Spells = require("spells")
+local Abilities = require("abilities")
+local Hazards = require("hazards")
+local Shrines = require("shrines")
+local Classes = require("classes")
+local Skills = require("skills")
+local Crafting = require("crafting")
+local Companions = require("companions")
+local Artifacts = require("artifacts")
+local Bosses = require("bosses")
+local Elites = require("elites")
+local Quests = require("quests")
+local Meta = require("meta")
+local Alchemy = require("alchemy")
+local Resistances = require("resistances")
+local Factions = require("factions")
+local Encumbrance = require("encumbrance")
+local Render = require("render")
+local Terrain = require("terrain")
+local Vaults = require("vaults")
+local Runewords = require("runewords")
+local Atmosphere = require("atmosphere")
+local Stealth = require("stealth")
+local Compendium = require("compendium")
+local Nodes = require("nodes")
+local Sets = require("sets")
+local Mimics = require("mimics")
+local Curses = require("curses")
+local Momentum = require("momentum")
+local Conductivity = require("conductivity")
+local Corpses = require("corpses")
+local Digging = require("digging")
+local Sanity = require("sanity")
+local Hunger = require("hunger")
+local Events = require("events")
+local Graves = require("graves")
+local Proficiency = require("proficiency")
+local Ascension = require("ascension")
+local Durability = require("durability")
+local Disarm = require("disarm")
+local Chests = require("chests")
+local Reanimation = require("reanimation")
+local Secrets = require("secrets")
+local Mercenaries = require("mercenaries")
+local Morgue = require("morgue")
+local Leaderboard = require("leaderboard")
+local Replay = require("replay")
+local Challenges = require("challenges")
+local Analytics = require("analytics")
+local Titles = require("titles")
+local Export = require("export")
+local Streaks = require("streaks")
+local Nemesis = require("nemesis")
+local Biomes = require("biomes")
+local Scavenging = require("scavenging")
+local Infighting = require("infighting")
+local Blocks = require("blocks")
+local SaveGame = require("savegame")
+local Polymorph = require("polymorph")
+local Prefab = require("gen.prefab")
+local Noise = require("noise")
+local Disease = require("disease")
+local Captives = require("captives")
+local Horde = require("horde")
+local Branches = require("branches")
+local Phases = require("phases")
+local Commands = require("commands")
+local Examine = require("examine")
 
 local passed, failed = 0, 0
 local failures = {}
@@ -251,6 +322,123 @@ function tests.generators()
   end
 end
 
+function tests.mazeGeneratorIsDeterministicDiffersAcrossSeedsAndLeavesEveryFloorCellReachable()
+  local m1, reach1 = Gen.build("maze", 60, 24, Rng.new(2024))
+  local m2 = Gen.build("maze", 60, 24, Rng.new(2024))
+  eq(table.concat(m1.tiles), table.concat(m2.tiles), "maze is deterministic")
+  local other = Gen.build("maze", 60, 24, Rng.new(2025))
+  ok(table.concat(m1.tiles) ~= table.concat(other.tiles), "maze differs across seeds")
+  local walkable = 0
+  for y = 1, m1.height do for x = 1, m1.width do if m1:isWalkable(x, y) then walkable = walkable + 1 end end end
+  ok(walkable > 0, "maze carves open floor")
+  eq(#reach1, walkable, "maze leaves every floor cell reachable without gen.connect stitching anything extra")
+end
+
+function tests.mazeGeneratorIsRegisteredButExcludedFromTheDepthCycle()
+  ok(Gen.has("maze"), "maze is a selectable generator")
+  local found = false
+  for _, name in ipairs(Gen.order) do
+    if name == "maze" then found = true end
+  end
+  ok(not found, "maze is deliberately absent from the auto-cycled depth order")
+end
+
+function tests.mazeGeneratorProducesOneWideCorridorsRatherThanOpenRooms()
+  -- Braiding deliberately opens a handful of the diagonal cells a pure
+  -- backtracker never touches (see mazeGeneratorBraidingOpensSomeDeadEnds...
+  -- below), so this checks the unbraided core algorithm's own shape rather
+  -- than the default, braided output.
+  local map = Gen.generators.maze(60, 24, Rng.new(7), { braidNumerator = 0, braidDenominator = 1 })
+  local openTwoByTwoBlocks = 0
+  for y = 2, map.height - 2 do
+    for x = 2, map.width - 2 do
+      if map:isWalkable(x, y) and map:isWalkable(x + 1, y)
+        and map:isWalkable(x, y + 1) and map:isWalkable(x + 1, y + 1) then
+        openTwoByTwoBlocks = openTwoByTwoBlocks + 1
+      end
+    end
+  end
+  eq(openTwoByTwoBlocks, 0, "a maze never opens a 2x2 block of floor the way a room-based generator does")
+end
+
+function tests.mazeGeneratorBraidingOpensSomeDeadEndsWithoutTouchingConnectivity()
+  local braided = Gen.generators.maze(60, 24, Rng.new(3), { braidNumerator = 1, braidDenominator = 1 })
+  local unbraided = Gen.generators.maze(60, 24, Rng.new(3), { braidNumerator = 0, braidDenominator = 1 })
+  local function walkableCount(map)
+    local total = 0
+    for y = 1, map.height do for x = 1, map.width do if map:isWalkable(x, y) then total = total + 1 end end end
+    return total
+  end
+  ok(walkableCount(braided) > walkableCount(unbraided), "raising the braid odds opens strictly more floor")
+  local reachable = Connect.ensure(unbraided, Rng.new(3))
+  eq(#reachable, walkableCount(unbraided), "an unbraided perfect maze is already fully connected on its own")
+end
+
+function tests.prefabVaultSizeMatchesItsWidestRowAndItsRowCount()
+  local vault = { rows = { "####", "#..#", "####" } }
+  local w, h = Prefab.size(vault)
+  eq(w, 4, "size reports the width of a template row")
+  eq(h, 3, "size reports the number of template rows")
+end
+
+function tests.prefabVaultFitsAcceptsAnAnchorWithAWallGapToEveryBorderAndRejectsOneWithout()
+  local map = Map.new(20, 15)
+  local vault = { rows = { "###", "#.#", "###" } }
+  ok(Prefab.fits(map, vault, 2, 2), "an anchor two cells in on every side leaves a wall gap to the border")
+  ok(not Prefab.fits(map, vault, 1, 2), "an anchor flush against the west border is rejected")
+  ok(not Prefab.fits(map, vault, 2, 1), "an anchor flush against the north border is rejected")
+  local w, h = Prefab.size(vault)
+  ok(not Prefab.fits(map, vault, map.width - w + 2, 2), "an anchor that spills past the east border is rejected")
+  ok(not Prefab.fits(map, vault, 2, map.height - h + 2), "an anchor that spills past the south border is rejected")
+end
+
+function tests.prefabVaultStampWritesEveryGlyphAndCollectsTreasureMonsterAndLootMarkersInMapOrder()
+  local map = Map.new(20, 15)
+  local vault = {
+    name = "testVault",
+    rows = {
+      "#####",
+      "#*M+#",
+      "#.L.#",
+      "#####",
+    },
+  }
+  local result = Prefab.stamp(map, vault, 3, 4)
+  eq(result.name, "testVault", "the stamp result remembers the template's own name")
+  eq(map:get(3, 4), Tiles.WALL, "a '#' glyph becomes a wall tile")
+  eq(map:get(4, 5), Tiles.FLOOR, "a '*' treasure marker still becomes walkable floor")
+  eq(map:get(5, 5), Tiles.FLOOR, "an 'M' monster marker still becomes walkable floor")
+  eq(map:get(6, 5), Tiles.DOOR_CLOSED, "a '+' glyph becomes a closed door")
+  eq(map:get(5, 6), Tiles.FLOOR, "an 'L' loot marker still becomes walkable floor")
+  eq(#result.treasure, 1, "exactly one treasure anchor is collected")
+  eq(result.treasure[1].x, 4, "the treasure anchor's x is offset by the stamp's own anchor")
+  eq(result.treasure[1].y, 5, "the treasure anchor's y is offset by the stamp's own anchor")
+  eq(#result.monsters, 1, "exactly one monster anchor is collected")
+  eq(result.monsters[1].x, 5, "the monster anchor's x is offset by the stamp's own anchor")
+  eq(#result.loot, 1, "exactly one loot anchor is collected")
+  eq(result.loot[1].x, 5, "the loot anchor's x is offset by the stamp's own anchor")
+  eq(result.loot[1].y, 6, "the loot anchor's y is offset by the stamp's own anchor")
+end
+
+function tests.prefabVaultStampIsDeterministicForAFixedAnchor()
+  local vault = Prefab.vaults[1]
+  local m1, m2 = Map.new(20, 15), Map.new(20, 15)
+  Prefab.stamp(m1, vault, 3, 3)
+  Prefab.stamp(m2, vault, 3, 3)
+  eq(table.concat(m1.tiles), table.concat(m2.tiles), "stamping the same vault at the same anchor twice is byte-identical")
+end
+
+function tests.builderCanBeExplicitlySteeredToAMazeFloorAndStillYieldsAPlayableLevel()
+  local level = Builder.build(3, Rng.new(11), { generator = "maze" })
+  eq(level.generator, "maze", "the level remembers it was built with the maze generator")
+  eq(level.map:get(level.upX, level.upY), Tiles.STAIRS_UP, "a maze floor still gets its up stairs")
+  eq(level.map:get(level.downX, level.downY), Tiles.STAIRS_DOWN, "a maze floor still gets its down stairs")
+  local path = Astar.find(level.map, level.upX, level.upY, level.downX, level.downY, function(x, y)
+    return not level.map:isPassable(x, y, true)
+  end)
+  ok(path ~= nil, "the down stairs are reachable from the up stairs on a maze floor")
+end
+
 function tests.connectivityRepair()
   local map = Map.new(15, 7)
   for y = 2, 4 do for x = 2, 4 do map:set(x, y, Map.FLOOR) end end
@@ -350,6 +538,221 @@ function tests.monsterAiDeterministic()
   ok(x1 == x2 and y1 == y2, "erratic behaviour is deterministic per seed")
 end
 
+-- A confused chaser rolls the exact same override chance every turn that a
+-- confused player rolls in Game:movePlayer (see status.lua's shared
+-- CONFUSE_NUMERATOR/DENOMINATOR) - some seeds let its own chase behaviour
+-- through untouched, others send it stumbling in a random direction instead.
+function tests.aiActConfusedMonsterSometimesStumblesInsteadOfChasing()
+  local sawChase, sawStumble = false, false
+  for seed = 1, 200 do
+    local game = stagedGame(seed, arena(21, 11), 3, 6)
+    local orc = Monsters.create(Monsters.byKey.orc, 1, 12, 6, 1)
+    game.level.entities = { orc }
+    Status.apply(orc, Status.CONFUSE, 5, 1)
+    Ai.act(game, orc)
+    if orc.x == 11 and orc.y == 6 then
+      sawChase = true
+    else
+      sawStumble = true
+    end
+    if sawChase and sawStumble then break end
+  end
+  ok(sawChase, "a confused monster's roll sometimes lets its normal behaviour run")
+  ok(sawStumble, "a confused monster's roll sometimes overrides its normal behaviour")
+end
+
+-- Without the status at all, a chaser's step toward the player is exactly as
+-- deterministic and direct as tests.monsterAiChase already established -
+-- confusion introduces randomness only once Status.CONFUSE is actually
+-- present, never as a side effect of the roll/pick machinery merely existing.
+function tests.aiActWithoutConfusionAlwaysRunsTheNormalBehaviour()
+  for seed = 1, 20 do
+    local game = stagedGame(seed, arena(21, 11), 3, 6)
+    local orc = Monsters.create(Monsters.byKey.orc, 1, 12, 6, 1)
+    game.level.entities = { orc }
+    Ai.act(game, orc)
+    eq(orc.x, 11, "an unconfused chaser always steps straight toward the player")
+    eq(orc.y, 6, "an unconfused chaser never drifts off its own row")
+  end
+end
+
+-- Every ai.lua behaviour (chase/pack/ranged/flee/erratic/tunnel) resolves
+-- through Game:canSeePlayer, so blinding a monster is a single choke point
+-- that mutes every one of them at once - no per-behaviour special casing
+-- needed. An archer is the sharpest demonstration: with sight it holds its
+-- ground and snipes from range (tests.monsterAiRanged); blinded at the exact
+-- same distance it neither shoots nor closes in, it just idles in place.
+function tests.aiActBlindedArcherNeitherShootsNorChasesEvenWithAClearShot()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local archer = Monsters.create(Monsters.byKey.archer, 1, 8, 6, 1)
+  game.level.entities = { archer }
+  Status.apply(archer, Status.BLIND, 6, 1)
+  local hpBefore = game.player.hp
+  Ai.act(game, archer)
+  eq(game.player.hp, hpBefore, "a blinded archer with an otherwise clear shot does not fire")
+  eq(archer.x, 8, "a blinded archer does not close the distance either")
+  eq(archer.y, 6, "a blinded archer does not drift off its own row")
+end
+
+function tests.gameAdjacentAllyFindsACompanionStandingRightNextToAMonster()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local golem = Companions.summon(game, "golem")
+  local orc = Monsters.create(Monsters.byKey.orc, 10, golem.x + 1, golem.y, 5)
+  game.level.entities[#game.level.entities + 1] = orc
+  eq(game:adjacentAlly(orc), golem, "a companion standing right next to a monster is found")
+end
+
+function tests.gameAdjacentAllyIgnoresAHostileMonsterAndOnlyCountsCardinalAdjacency()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 10, 10, 6, 1)
+  local rat = Monsters.create(Monsters.byKey.rat, 5, 11, 6, 2)
+  game.level.entities = { orc, rat }
+  eq(game:adjacentAlly(orc), nil, "a hostile monster standing adjacent is never mistaken for an ally")
+
+  local golem = Companions.summon(game, "golem")
+  golem.x, golem.y = 9, 7
+  eq(game:adjacentAlly(orc), nil,
+    "a companion only diagonally adjacent does not count - cardinal-only, like Game:playerAdjacent")
+  golem.x, golem.y = 9, 6
+  eq(game:adjacentAlly(orc), golem, "moving the same companion to cardinal adjacency makes it found")
+end
+
+function tests.gameAdjacentAllyBreaksTiesByTheLowerEntityIdAndIgnoresADeadAlly()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 10, 10, 6, 999)
+  game.level.entities = { orc }
+  local golem = Companions.summon(game, "golem")
+  local hireling = Mercenaries.hire(game, "sellsword")
+  golem.x, golem.y = 9, 6
+  hireling.x, hireling.y = 11, 6
+  ok(golem.id < hireling.id, "sanity check: the companion summoned first has the lower entity id")
+  eq(game:adjacentAlly(orc), golem, "ties between two equally adjacent allies break toward the lower entity id")
+  golem.hp = 0
+  eq(game:adjacentAlly(orc), hireling, "a dead ally is skipped even though it is still standing adjacent")
+end
+
+-- Reproduces the exact shape Game:aStarNeverRoutesAMonsterThroughABlockedCell
+-- already proved for a pushable block: a wall spanning every row except one
+-- floor gap leaves stepMonsterToward with no route at all once something is
+-- standing in that gap. The difference is what stands there - a living
+-- companion, not an inert block - so where a block earns a permanent,
+-- correct stalemate, a companion should be fought, not stonewalled forever.
+function tests.aiChaseAttacksAnAllyBlockingTheOnlyCorridorToThePlayerInsteadOfIdlingForever()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  for y = 2, 10 do game.level.map:set(11, y, Tiles.WALL) end
+  game.level.map:set(11, 6, Tiles.FLOOR)
+  local golem = Companions.summon(game, "golem")
+  golem.x, golem.y = 11, 6
+  local orc = Monsters.create(Monsters.byKey.orc, 10, 12, 6, 5)
+  game.level.entities[#game.level.entities + 1] = orc
+  local hpBefore = golem.hp
+  Ai.act(game, orc)
+  ok(golem.hp < hpBefore, "a chaser with no route around a blocking ally fights it instead of idling")
+  eq(orc.x, 12, "the chaser never steps onto the ally's occupied cell")
+  eq(orc.y, 6, "the chaser's y is unchanged - it attacked in place rather than moving")
+end
+
+function tests.aiChasePrefersAnAdjacentPlayerOverAnAdjacentAllyWhenBothAreInMeleeRange()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 10, 4, 6, 1)
+  game.level.entities = { orc }
+  local golem = Companions.summon(game, "golem")
+  golem.x, golem.y = 4, 7
+  local playerHpBefore, golemHpBefore = game.player.hp, golem.hp
+  Ai.act(game, orc)
+  ok(game.player.hp < playerHpBefore, "a monster adjacent to both the player and an ally still attacks the player")
+  eq(golem.hp, golemHpBefore, "the ally adjacent to the same monster takes no damage when the player is also in range")
+end
+
+function tests.aiPackAttacksAnAllyBlockingTheOnlyCorridorToThePlayerInsteadOfIdlingForever()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  for y = 2, 10 do game.level.map:set(11, y, Tiles.WALL) end
+  game.level.map:set(11, 6, Tiles.FLOOR)
+  local golem = Companions.summon(game, "golem")
+  golem.x, golem.y = 11, 6
+  local kobold = Monsters.create(Monsters.byKey.kobold, 10, 12, 6, 5)
+  game.level.entities[#game.level.entities + 1] = kobold
+  local hpBefore = golem.hp
+  Ai.act(game, kobold)
+  ok(golem.hp < hpBefore, "a pack monster with no route around a blocking ally fights it instead of idling")
+end
+
+function tests.aiTunnelAttacksAnAllyBlockingItsOnlyGapInsteadOfIdling()
+  local level = arena(21, 11)
+  for y = 2, 10 do level.map:set(11, y, Tiles.WALL) end
+  level.map:set(11, 6, Tiles.FLOOR)
+  local game = stagedGame(1, level, 3, 6)
+  local golem = Companions.summon(game, "golem")
+  golem.x, golem.y = 11, 6
+  local burrower = Entity.new({
+    id = game:nextMonsterId(), x = 12, y = 6, glyph = "b", name = "rock burrower", kind = "monster",
+    ai = "tunnel", hp = 20, maxHp = 20, attack = 5, defense = 0, speed = 100,
+  })
+  game.level.entities[#game.level.entities + 1] = burrower
+  local hpBefore = golem.hp
+  Ai.act(game, burrower)
+  ok(golem.hp < hpBefore, "a burrower blocked by a living ally fights it rather than trying (and failing) to path around")
+  eq(burrower.x, 12, "the burrower stays put while it attacks - it never steps onto the ally's cell")
+end
+
+function tests.aiRangedAttacksABlockingAllyWhenItHasNoLineOfSightToThePlayerAtAll()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  for y = 2, 10 do game.level.map:set(8, y, Tiles.WALL) end
+  local golem = Companions.summon(game, "golem")
+  golem.x, golem.y = 11, 6
+  local archer = Monsters.create(Monsters.byKey.archer, 6, 12, 6, 5)
+  game.level.entities[#game.level.entities + 1] = archer
+  local hpBefore, playerHpBefore = golem.hp, game.player.hp
+  Ai.act(game, archer)
+  ok(golem.hp < hpBefore, "an archer with no line of sight to the player still fights an ally standing next to it")
+  eq(game.player.hp, playerHpBefore, "the archer never reaches or harms the player while its view is fully walled off")
+end
+
+function tests.gameMoveMonsterAttacksAnAllyItBumpsIntoInsteadOfDoingNothing()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local golem = Companions.summon(game, "golem")
+  local orc = Monsters.create(Monsters.byKey.orc, 10, golem.x + 1, golem.y, 5)
+  game.level.entities[#game.level.entities + 1] = orc
+  local hpBefore = golem.hp
+  game:moveMonster(orc, -1, 0)
+  ok(golem.hp < hpBefore, "bumping into an ally's cell fights it rather than silently doing nothing")
+  eq(orc.x, golem.x + 1, "the bumping monster does not step onto the ally's occupied cell")
+end
+
+-- Mirrors aiActConfusedMonsterSometimesStumblesInsteadOfChasing's own seed
+-- loop: a confused monster's random stumble (Ai.act -> Game:moveMonster) can
+-- land it squarely on a blocking ally's cell exactly as often as the
+-- player's, so the fix belongs in Game:moveMonster itself, not only in the
+-- deliberate per-behaviour pathing checks above.
+-- Isolates the stumble path from chase()'s own independent attackBlockingAlly
+-- check: Ai.behaviours.chase is swapped for a stub that only records whether
+-- it ran, so a turn where the confusion roll fails (falling through to real
+-- chase) is detectable and excluded - any hp drop counted here can only have
+-- come from the top-of-Ai.act stumble branch calling Game:moveMonster
+-- directly, never from chase's own fix a few lines below it.
+function tests.aiActConfusedMonsterCanStumbleIntoAttackingABlockingAllyInsteadOfIdling()
+  local sawAttack = false
+  local realChase = Ai.behaviours.chase
+  for seed = 1, 200 do
+    local game = stagedGame(seed, arena(21, 11), 3, 6)
+    local orc = Monsters.create(Monsters.byKey.orc, 10, 12, 6, 1)
+    local golem = Companions.summon(game, "golem")
+    golem.x, golem.y = 11, 6
+    game.level.entities[#game.level.entities + 1] = orc
+    Status.apply(orc, Status.CONFUSE, 5, 1)
+    local hpBefore = golem.hp
+    local behaviourRan = false
+    Ai.behaviours.chase = function() behaviourRan = true end
+    Ai.act(game, orc)
+    Ai.behaviours.chase = realChase
+    if not behaviourRan and golem.hp < hpBefore then
+      sawAttack = true
+      break
+    end
+  end
+  ok(sawAttack, "a confused monster's stumble (Ai.act's own branch, not chase's) can land an attack on a blocking ally via Game:moveMonster")
+end
+
 function tests.doorsAndKeys()
   local game = stagedGame(1, arena(21, 11), 3, 6)
   game.player.inventory = {}
@@ -382,6 +785,137 @@ function tests.traps()
   poisonGame.level.traps = { { x = 4, y = 6, effect = "poison", revealed = false } }
   poisonGame:movePlayer(1, 0)
   eq(Status.has(poisonGame.player, Status.POISON), true, "a poison trap poisons the stepper")
+
+  local confuseGame = stagedGame(1, arena(21, 11), 3, 6)
+  confuseGame.level.traps = { { x = 4, y = 6, effect = "confuse", revealed = false } }
+  confuseGame:movePlayer(1, 0)
+  eq(Status.has(confuseGame.player, Status.CONFUSE), true, "a confuse trap confuses the stepper")
+  eq(confuseGame.level.traps[1].revealed, true, "a sprung confuse trap becomes revealed too")
+
+  local blindGame = stagedGame(1, arena(21, 11), 3, 6)
+  blindGame.level.traps = { { x = 4, y = 6, effect = "blind", revealed = false } }
+  blindGame:movePlayer(1, 0)
+  eq(Status.has(blindGame.player, Status.BLIND), true, "a blind trap blinds the stepper")
+  eq(blindGame.level.traps[1].revealed, true, "a sprung blind trap becomes revealed too")
+  eq(blindGame:effectiveRadius(), 1, "the freshly blinded stepper's own sight radius is clamped straight away")
+
+  local stunGame = stagedGame(1, arena(21, 11), 3, 6)
+  stunGame.level.traps = { { x = 4, y = 6, effect = "stun", revealed = false } }
+  stunGame:movePlayer(1, 0)
+  eq(Status.has(stunGame.player, Status.STUN), true, "a stun trap stuns the stepper")
+  eq(stunGame.level.traps[1].revealed, true, "a sprung stun trap becomes revealed too")
+end
+
+-- Game:springTrap is written to work against whatever `victim` it is handed,
+-- not just self.player - the same generic shape a builder-placed trap needs
+-- to also harm a monster that blunders into a player-planted trap kit.
+function tests.gameSpringTrapConfuseEffectAppliesToAnyVictimNotJustThePlayer()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 10, 6, 1)
+  game.level.entities = { rat }
+  local trap = { x = 10, y = 6, effect = "confuse", revealed = false }
+  game:springTrap(trap, rat)
+  eq(Status.has(rat, Status.CONFUSE), true, "a confuse trap sprung on a monster confuses that monster")
+  eq(Status.has(game.player, Status.CONFUSE), false, "the player is untouched by a trap sprung on someone else")
+end
+
+function tests.gameSpringTrapBlindEffectAppliesToAnyVictimNotJustThePlayer()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 10, 6, 1)
+  game.level.entities = { rat }
+  local trap = { x = 10, y = 6, effect = "blind", revealed = false }
+  game:springTrap(trap, rat)
+  eq(Status.has(rat, Status.BLIND), true, "a blind trap sprung on a monster blinds that monster")
+  eq(Status.has(game.player, Status.BLIND), false, "the player is untouched by a trap sprung on someone else")
+end
+
+-- STUN previously had the opposite gap from BLIND (see abilities.lua's
+-- tryShriek comment): a player's crafted weapon could already stun a
+-- monster, but nothing on the environment/monster side could ever stun the
+-- player. A trap is a fitting, low-risk source for that missing direction -
+-- rare and avoidable/disarmable, unlike say an elite's on-hit rider firing
+-- on every single blow it lands.
+function tests.gameSpringTrapStunEffectAppliesToAnyVictimNotJustThePlayer()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 10, 6, 1)
+  game.level.entities = { rat }
+  local trap = { x = 10, y = 6, effect = "stun", revealed = false }
+  game:springTrap(trap, rat)
+  eq(Status.has(rat, Status.STUN), true, "a stun trap sprung on a monster stuns that monster")
+  eq(Status.has(game.player, Status.STUN), false, "the player is untouched by a trap sprung on someone else")
+end
+
+-- A confused player's every attempted move rolls the same override chance a
+-- confused monster's Ai.act does (status.lua's shared CONFUSE_NUMERATOR/
+-- DENOMINATOR): in the middle of an open arena every one of the 8 compass
+-- directions leads to open floor, so either outcome always still moves the
+-- player somewhere and always spends the turn.
+function tests.gameMovePlayerConfusionEitherFollowsTheChosenDirectionOrStumblesElsewhere()
+  local sawStraight, sawStumble = false, false
+  for seed = 1, 200 do
+    local game = stagedGame(seed, arena(21, 11), 10, 6)
+    Status.apply(game.player, Status.CONFUSE, 5, 1)
+    local consumesTurn = game:movePlayer(1, 0)
+    ok(consumesTurn, "a confused player's attempted move always spends the turn on open floor")
+    if game.player.x == 11 and game.player.y == 6 then
+      sawStraight = true
+    else
+      sawStumble = true
+    end
+    if sawStraight and sawStumble then break end
+  end
+  ok(sawStraight, "confusion sometimes lets the chosen direction through untouched")
+  ok(sawStumble, "confusion sometimes overrides the chosen direction")
+end
+
+-- The turn-spending contract that makes confusion different from an ordinary
+-- rejected move: bumping a wall on purpose spends nothing (see
+-- tests.doorsAndKeys's locked-door case and moveHandler's own "you cannot go
+-- that way"), but a confused player who stumbles into a wall instead of their
+-- own chosen direction still spent the turn on the stumble itself.
+function tests.gameMovePlayerConfusionStumbleIntoAWallStillSpendsTheTurn()
+  local level = arena(21, 11)
+  -- Wall off every neighbour of (10, 6) except due east, so any redirect
+  -- other than the player's own chosen direction bumps a wall in place.
+  for _, cell in ipairs({ { 9, 5 }, { 10, 5 }, { 11, 5 }, { 9, 6 }, { 9, 7 }, { 10, 7 }, { 11, 7 } }) do
+    level.map:set(cell[1], cell[2], Tiles.WALL)
+  end
+  local sawBlockedStumble = false
+  for seed = 1, 500 do
+    local game = stagedGame(seed, level, 10, 6)
+    Status.apply(game.player, Status.CONFUSE, 5, 1)
+    local consumesTurn = game:movePlayer(1, 0)
+    ok(consumesTurn, "a confused move, straight or stumbled into this walled-off pocket, always spends the turn")
+    if game.player.x == 10 and game.player.y == 6 then
+      sawBlockedStumble = true
+    end
+  end
+  ok(sawBlockedStumble, "at least one seed in range stumbled into a wall instead of moving east")
+end
+
+-- Without Status.CONFUSE present at all, Game:movePlayer never consults the
+-- rng for a redirect - the roll/pick machinery added for confusion must be a
+-- true no-op for every unconfused move the engine already relied on.
+function tests.gameMovePlayerWithoutConfusionNeverStumbles()
+  for seed = 1, 20 do
+    local game = stagedGame(seed, arena(21, 11), 10, 6)
+    game:movePlayer(1, 0)
+    eq(game.player.x, 11, "an unconfused move always lands exactly where it was aimed")
+    eq(game.player.y, 6, "an unconfused move never drifts off its own row")
+  end
+end
+
+-- Game:allyActsConfused is the companion/hireling/thrall counterpart of the
+-- confusion machinery above - unlike Game:movePlayer and Ai.act, it is never
+-- called at all unless a caller opts in, so an entity without Status.CONFUSE
+-- must bail out before it ever touches the rng (companionsAct*/mercenaryAct*/
+-- reanimationAct* below cover the roll actually firing).
+function tests.gameAllyActsConfusedReturnsFalseImmediatelyWithoutTheStatus()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local golem = Companions.summon(game, "golem")
+  local rollsBefore = game.rng.state
+  eq(game:allyActsConfused(golem), false, "an ally without Status.CONFUSE never triggers a stumble")
+  eq(game.rng.state, rollsBefore, "checking an unconfused ally never advances the rng")
 end
 
 function tests.lightAndDark()
@@ -413,6 +947,19 @@ function tests.identification()
   eq(Identify.label(a, healing), "potion of healing", "identifying reveals the true name")
 end
 
+function tests.identifyGivesEveryPotionTypeItsOwnDistinctUnidentifiedLook()
+  local state = Identify.new(Rng.new(3))
+  local seen = {}
+  for _, entry in ipairs(Items.potionTypes) do
+    local label = Identify.label(state, Items.potionOf(entry.effect))
+    ok(seen[label] == nil, "no two potion types share an unidentified look (collided on " .. label .. ")")
+    seen[label] = true
+  end
+  local count = 0
+  for _ in pairs(seen) do count = count + 1 end
+  eq(count, #Items.potionTypes, "every potion type, including confuse, got its own look")
+end
+
 function tests.effects()
   local game = Game.new(31)
   game.player.hp = 10
@@ -420,6 +967,12 @@ function tests.effects()
   eq(game.player.hp, 18, "heal effect restores hp")
   Effects.apply("poison", game, game.player, { power = 3 })
   eq(Status.has(game.player, Status.POISON), true, "poison effect afflicts the target")
+
+  Effects.apply("confuse", game, game.player, {})
+  eq(Status.has(game.player, Status.CONFUSE), true, "confuse effect afflicts the drinker just like poison")
+
+  Effects.apply("blind", game, game.player, {})
+  eq(Status.has(game.player, Status.BLIND), true, "blind effect afflicts the drinker just like confuse")
 
   Effects.apply("mapping", game, game.player, {})
   local map = game.level.map
