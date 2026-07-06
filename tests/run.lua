@@ -999,6 +999,306 @@ function tests.effects()
   Effects.apply("fireball", blastGame, blastGame.player, {})
   eq(orc.hp, 12, "fireball burns nearby monsters")
   eq(Status.has(orc, Status.BURNING), true, "fireball sets monsters alight")
+  ok(Hazards.at(blastGame.level, orc.x, orc.y, Hazards.FIRE) ~= nil,
+    "fireball leaves a lingering flame under a scorched monster")
+  ok(Hazards.at(blastGame.level, blastGame.player.x, blastGame.player.y, Hazards.FIRE) ~= nil,
+    "fireball also ignites the ground at its own point of origin")
+end
+
+-- Effects.apply's only real caller (Game:useItem) always hands it the
+-- player, whose entity.name is the pronoun "you" - a subject that takes the
+-- plain verb form English gives second person ("you heal"), not the
+-- third-person-singular form ("heals") a named monster like "orc" would take
+-- through the exact same handler. Before this fix every line below actually
+-- read "you heals 5", "you is poisoned", etc. on every real potion/scroll
+-- use in the game - these are the literal strings a real player sees.
+function tests.effectsMessagesAddressThePlayerInSecondPersonNotThirdPersonSingular()
+  local game = Game.new(31)
+  game.player.hp = 10
+  eq(Effects.apply("heal", game, game.player, { power = 5 })[1], "you heal 5",
+    "heal addresses the player correctly, not 'you heals 5'")
+  eq(Effects.apply("poison", game, game.player, { power = 3 })[1], "you are poisoned",
+    "poison addresses the player correctly, not 'you is poisoned'")
+  eq(Effects.apply("strength", game, game.player, {})[1], "you feel mightier",
+    "strength addresses the player correctly, not 'you feels mightier'")
+  eq(Effects.apply("haste", game, game.player, {})[1], "you speed up",
+    "haste addresses the player correctly, not 'you speeds up'")
+  eq(Effects.apply("fortify", game, game.player, {})[1], "you feel fortified",
+    "fortify addresses the player correctly, not 'you feels fortified'")
+  eq(Effects.apply("levitate", game, game.player, {})[1], "you rise off the ground",
+    "levitate addresses the player correctly, not 'you rises off the ground'")
+  eq(Effects.apply("confuse", game, game.player, {})[1], "your mind reels with confusion",
+    "confuse addresses the player possessively, not \"you's mind reels with confusion\"")
+  eq(Effects.apply("blind", game, game.player, {})[1], "you are struck blind",
+    "blind addresses the player correctly, not 'you is struck blind'")
+  eq(Effects.apply("teleport", game, game.player, {})[1], "you blink away",
+    "teleport addresses the player correctly, not 'you blinks away'")
+end
+
+function tests.effectsClarityMessageAddressesThePlayerPossessively()
+  local game = Game.new(31)
+  Sanity.adjust(game.player, -20)
+  local line = Effects.apply("clarity", game, game.player, { power = 10 })[1]
+  ok(contains(line, "your mind steadies"), "clarity addresses the player possessively, not \"you's mind steadies\"")
+end
+
+function tests.effectsCureMessagesAddressThePlayerPossessivelyForAllFourOutcomes()
+  local game = Game.new(31)
+  Disease.infect(game.player, Disease.ROT)
+  Status.apply(game.player, Status.POISON, 5, 2)
+  eq(Effects.apply("cure", game, game.player, {})[1], "your affliction is cleansed away, and the poison fades",
+    "curing both addresses the player possessively, not \"you's affliction ... you's poison\"")
+
+  Disease.infect(game.player, Disease.ROT)
+  eq(Effects.apply("cure", game, game.player, {})[1], "your affliction is cleansed away",
+    "curing disease alone addresses the player possessively, not \"you's affliction\"")
+
+  Status.apply(game.player, Status.POISON, 5, 2)
+  eq(Effects.apply("cure", game, game.player, {})[1], "your poison fades",
+    "curing a status alone addresses the player possessively, not \"you's poison fades\"")
+
+  eq(Effects.apply("cure", game, game.player, {})[1], "you feel a faint tingle, but had nothing to cleanse",
+    "curing nothing addresses the player correctly, not 'you feels a faint tingle'")
+end
+
+-- The exact same pronoun problem effects.lua had also lived in status.lua's
+-- own POISON/REGEN tick messages, disease.lua's tick messages, and
+-- terrain.lua's lava message - every one of them templated a
+-- third-person-singular verb onto entity.name with no branch at all for the
+-- player, whose name is "you". These four tests cover each of those sites
+-- directly against a real player entity.
+function tests.statusPoisonShrugAndRegenKnitMessagesAddressThePlayerInSecondPerson()
+  local immunePlayer = Entity.new({
+    x = 1, y = 1, glyph = "@", name = "you", kind = "player", hp = 10, maxHp = 10, attack = 1, defense = 0,
+  })
+  immunePlayer.resist = { poison = Resistances.IMMUNE }
+  Status.apply(immunePlayer, Status.POISON, 3, 4)
+  eq(Status.tick(immunePlayer)[1], "you shrug off the poison",
+    "an immune player shrugs off poison in second person, not 'you shrugs off the poison'")
+
+  local hurtPlayer = Entity.new({
+    x = 1, y = 1, glyph = "@", name = "you", kind = "player", hp = 5, maxHp = 10, attack = 1, defense = 0,
+  })
+  Status.apply(hurtPlayer, Status.REGEN, 2, 3)
+  eq(Status.tick(hurtPlayer)[1], "you knit flesh for 3",
+    "a regenerating player knits flesh in second person, not 'you knits flesh for 3'")
+end
+
+function tests.diseaseTickMessagesAddressThePlayerInSecondPersonForEruptionDamageAndEscalation()
+  local player = Entity.new({
+    x = 1, y = 1, glyph = "@", name = "you", kind = "player", hp = 1000, maxHp = 1000, attack = 1, defense = 0,
+  })
+  Disease.infect(player, Disease.PARASITES)
+  local incubation = Disease.defs[Disease.PARASITES].incubation
+  for _ = 1, incubation - 1 do Disease.tick(player) end
+  eq(Disease.tick(player), "you break out in gut parasites",
+    "eruption addresses the player in second person, not 'you breaks out in gut parasites'")
+  eq(Disease.tick(player), "you are wracked by gut parasites for 1",
+    "a damaging tick addresses the player in second person, not 'you is wracked by gut parasites for 1'")
+
+  local stageTurns = Disease.defs[Disease.PARASITES].stageTurns
+  for _ = 2, stageTurns - 1 do Disease.tick(player) end
+  eq(Disease.tick(player), "your gut parasites worsens",
+    "escalation addresses the player possessively, not \"you's gut parasites worsens\"")
+end
+
+function tests.terrainAfflictLavaUnharmedMessageAddressesThePlayerInSecondPerson()
+  local level = arena(21, 11)
+  level.map:set(5, 5, Tiles.LAVA)
+  local game = stagedGame(1, level, 5, 5)
+  game.player.resist = { fire = Resistances.IMMUNE }
+  eq(Terrain.afflictLava(level, game.player), "you wade through the lava unharmed",
+    "an immune player wading through lava is addressed in second person, not 'you wades through the lava unharmed'")
+end
+
+function tests.hazards()
+  local level = arena(21, 11)
+
+  local fire = Hazards.ignite(level, 5, 5, 3, 4)
+  eq(fire.kind, Hazards.FIRE, "ignite drops a fire hazard")
+  eq(Hazards.at(level, 5, 5, Hazards.FIRE), fire, "the hazard is found by its cell and kind")
+
+  Hazards.ignite(level, 5, 5, 5, 1)
+  eq(#level.hazards, 1, "re-igniting the same cell refreshes it instead of stacking a duplicate")
+  eq(fire.duration, 5, "refreshing a hazard keeps the stronger of the two durations")
+  eq(fire.potency, 4, "refreshing a hazard keeps the stronger of the two potencies")
+
+  local victim = Monsters.create(Monsters.byKey.rat, 1, 5, 5, 1)
+  local hpBefore = victim.hp
+  local line = Hazards.afflict(level, victim)
+  ok(contains(line, "flames"), "afflict describes a fire hazard as flames")
+  eq(victim.hp, hpBefore - fire.potency, "standing in fire deals its potency in damage")
+  eq(Status.has(victim, Status.BURNING), true, "fire afflict also lays down a burning status")
+
+  local elsewhere = Monsters.create(Monsters.byKey.rat, 2, 9, 9, 1)
+  eq(Hazards.afflict(level, elsewhere), nil, "afflict does nothing to an entity off any hazard cell")
+
+  local gas = Hazards.spawnGas(level, 12, 8, 4, 2)
+  eq(gas.kind, Hazards.GAS, "spawnGas drops a gas hazard")
+  local choker = Monsters.create(Monsters.byKey.rat, 3, 12, 8, 1)
+  local gasLine = Hazards.afflict(level, choker)
+  ok(contains(gasLine, "fumes"), "afflict describes a gas hazard as fumes")
+  eq(Status.has(choker, Status.POISON), true, "gas afflict lays down a poison status")
+
+  local wet = arena(21, 11)
+  wet.map:set(6, 6, Tiles.WATER)
+  Hazards.ignite(wet, 6, 6, 3, 2)
+  Hazards.step(wet, Rng.new(1))
+  eq(Hazards.at(wet, 6, 6, Hazards.FIRE), nil,
+    "fire sitting on water is doused on the very next environmental step")
+
+  local fading = arena(21, 11)
+  Hazards.spawn(fading, 15, 5, Hazards.FIRE, 1, 2)
+  Hazards.step(fading, Rng.new(1))
+  eq(Hazards.at(fading, 15, 5, Hazards.FIRE), nil, "a hazard is removed once its duration runs out")
+
+  local spread = false
+  for seed = 1, 200 do
+    local field = arena(21, 11)
+    Hazards.ignite(field, 10, 5, 3, 2)
+    Hazards.step(field, Rng.new(seed))
+    if Hazards.at(field, 11, 5) or Hazards.at(field, 9, 5)
+      or Hazards.at(field, 10, 4) or Hazards.at(field, 10, 6) then
+      spread = true
+      break
+    end
+  end
+  ok(spread, "fire eventually spreads into open neighbouring floor on some seed")
+
+  local rendered = stagedGame(1, arena(21, 11), 3, 6)
+  Hazards.ignite(rendered.level, 5, 6, 3, 2)
+  rendered:computeVisible()
+  ok(contains(rendered:render(), "`"), "a fire hazard on a visible cell renders as its glyph")
+end
+
+local function shrinePlayer(gold)
+  return { gold = gold, attack = 5, baseAttack = 5, maxHp = 30, hp = 30, maxMana = 10, mana = 10,
+    statuses = {} }
+end
+
+function tests.shrinePrayGrantsWarBlessingWhenFavorHolds()
+  local player = shrinePlayer(50)
+  local game = { player = player, rng = Rng.new(1) }
+  local shrine = { x = 1, y = 1, kind = Shrines.WAR, uses = 0 }
+  local success, lines = Shrines.pray(game, shrine)
+  eq(success, true, "a prayer with enough gold always resolves")
+  eq(player.gold, 30, "the shrine's base price is deducted from the wallet")
+  eq(player.attack, 6, "a war blessing raises attack")
+  eq(player.baseAttack, 6, "a war blessing raises base attack permanently")
+  eq(shrine.uses, 1, "a prayer advances the shrine's use count")
+  ok(contains(lines[2], "favor"), "the blessing is logged")
+end
+
+function tests.shrinePrayGrantsVitalityBlessing()
+  local player = shrinePlayer(50)
+  player.hp = 20
+  local game = { player = player, rng = Rng.new(1) }
+  local shrine = { x = 1, y = 1, kind = Shrines.VITALITY, uses = 0 }
+  Shrines.pray(game, shrine)
+  eq(player.maxHp, 35, "a vitality blessing raises max hp")
+  eq(player.hp, 25, "a vitality blessing heals by the same amount as the max hp gain")
+end
+
+function tests.shrinePrayGrantsWisdomBlessing()
+  local player = shrinePlayer(50)
+  player.mana = 2
+  local game = { player = player, rng = Rng.new(1) }
+  local shrine = { x = 1, y = 1, kind = Shrines.WISDOM, uses = 0 }
+  Shrines.pray(game, shrine)
+  eq(player.maxMana, 13, "a wisdom blessing raises max mana")
+  eq(player.mana, 13, "a wisdom blessing refills mana to the new max")
+end
+
+function tests.shrinePrayGrantsFortuneBlessingAndCleansesAilments()
+  local player = shrinePlayer(50)
+  Status.apply(player, Status.POISON, 5, 2)
+  local game = { player = player, rng = Rng.new(1) }
+  local shrine = { x = 1, y = 1, kind = Shrines.FORTUNE, uses = 0 }
+  Shrines.pray(game, shrine)
+  eq(Status.has(player, Status.POISON), false, "a fortune blessing cleanses poison")
+  eq(Status.has(player, Status.SHIELD), true, "a fortune blessing also wards the petitioner")
+end
+
+function tests.shrinePrayCanCurseInsteadOfBless()
+  local player = shrinePlayer(50)
+  local game = { player = player, rng = Rng.new(2) }
+  local shrine = { x = 1, y = 1, kind = Shrines.WAR, uses = 0 }
+  local success, lines = Shrines.pray(game, shrine)
+  eq(success, true, "a cursed prayer still resolves and spends its price")
+  eq(player.gold, 30, "a curse still costs the shrine's price")
+  eq(player.attack, 5, "a curse grants no blessing")
+  eq(Status.has(player, Status.WEAKEN), true, "a curse weakens the petitioner")
+  eq(Status.has(player, Status.SLOW), true, "a curse slows the petitioner")
+  ok(contains(lines[2], "against you"), "the curse is logged")
+end
+
+function tests.shrinePrayFailsWithoutEnoughGold()
+  local player = shrinePlayer(5)
+  local game = { player = player, rng = Rng.new(1) }
+  local shrine = { x = 1, y = 1, kind = Shrines.WAR, uses = 0 }
+  local success, lines = Shrines.pray(game, shrine)
+  eq(success, false, "a prayer the player cannot afford fails outright")
+  eq(player.gold, 5, "a failed prayer spends no gold")
+  eq(shrine.uses, 0, "a failed prayer does not advance the use count")
+  ok(contains(lines[1], "afford"), "the failure is logged")
+end
+
+function tests.shrineCostAndCurseOddsRiseWithUse()
+  eq(Shrines.costFor({ uses = 0 }), 20, "an untouched shrine charges its base price")
+  eq(Shrines.costFor({ uses = 3 }), 50, "the price climbs by a fixed step per prior use")
+  local n0, d0 = Shrines.curseChance({ uses = 0 })
+  eq(n0, 1, "an untouched shrine risks a curse on one face of the die")
+  eq(d0, 6, "curse odds are read against six faces")
+  local n5 = Shrines.curseChance({ uses = 10 })
+  eq(n5, 6, "curse odds cap out at a certainty rather than exceeding the die")
+end
+
+function tests.shrineFieldsSurviveSerialization()
+  local level = arena(21, 11)
+  level.shrines = { { x = 4, y = 4, kind = Shrines.FORTUNE, uses = 2 } }
+  local restored = Level.fromData(level:toData())
+  eq(#restored.shrines, 1, "the shrine list survives a round trip")
+  eq(restored.shrines[1].kind, Shrines.FORTUNE, "a shrine's kind survives a round trip")
+  eq(restored.shrines[1].uses, 2, "a shrine's use count survives a round trip")
+end
+
+function tests.builderOccasionallyPlacesAShrineFromDepthFour()
+  local level = Builder.build(4, Rng.new(1), {})
+  ok(#level.shrines >= 1, "this seed's depth-4 floor places a shrine")
+  eq(level.shrines[1].uses, 0, "a freshly built shrine starts unused")
+end
+
+function tests.shrinesStayOffTheShallowFloors()
+  for seed = 1, 5 do
+    for depth = 1, 3 do
+      local level = Builder.build(depth, Rng.new(seed), {})
+      eq(#level.shrines, 0, "no shrine appears above depth 4")
+    end
+  end
+end
+
+function tests.autopilotPraysAtAnUnspentShrineWhenAffordable()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.player.gold = 50
+  game.level.shrines = { { x = 5, y = 5, kind = Shrines.WAR, uses = 0 } }
+  game:choosePlayerAction()
+  eq(game.level.shrines[1].uses, 1, "the autopilot prays at an unspent shrine it stands on")
+  ok(game.player.gold < 50, "the autopilot's prayer spends the shrine's price")
+end
+
+function tests.autopilotSkipsAnAlreadyUsedShrine()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.player.gold = 50
+  game.level.shrines = { { x = 5, y = 5, kind = Shrines.WAR, uses = 1 } }
+  game:choosePlayerAction()
+  eq(game.level.shrines[1].uses, 1, "the autopilot never re-prays at a shrine it has already used")
+end
+
+function tests.shrineRendersItsGlyphWhenVisible()
+  local rendered = stagedGame(1, arena(21, 11), 3, 6)
+  rendered.level.shrines = { { x = 5, y = 6, kind = Shrines.WAR, uses = 0 } }
+  rendered:computeVisible()
+  ok(contains(rendered:render(), "_"), "a shrine on a visible cell renders as its glyph")
 end
 
 function tests.messageLog()
