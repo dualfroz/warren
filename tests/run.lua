@@ -1321,6 +1321,179 @@ function tests.weaponAffixOnHit()
   eq(Status.has(orc, Status.BURNING), true, "a flaming weapon ignites what it hits")
 end
 
+function tests.progressionLeveling()
+  local player = {
+    level = 1, xp = 0, xpNext = Progression.xpToNext(1),
+    hp = 20, maxHp = 20, attack = 5, baseAttack = 5, defense = 1, baseDefense = 1,
+  }
+  local lines = Progression.grantXp(player, 5)
+  eq(#lines, 0, "an xp gain under the threshold produces no level-up")
+  eq(player.xp, 5, "xp accumulates")
+
+  lines = Progression.grantXp(player, 100)
+  eq(player.level > 1, true, "a large xp gain levels the player up")
+  eq(#lines, player.level - 1, "one log line is produced per level gained")
+  eq(player.maxHp > 20, true, "leveling raises max hp")
+  eq(player.hp, player.maxHp, "leveling tops up hp by the same amount as the max hp gain")
+  eq(player.attack > 5, true, "leveling raises attack")
+  ok(player.xp < player.xpNext, "leftover xp after leveling stays below the new threshold")
+end
+
+function tests.progressionMonsterKillGrantsXp()
+  local game = stagedGame(9, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 4, 6, 1)
+  rat.hp = 1
+  game.level.entities = { rat }
+  local xpBefore = game.player.xp
+  game:playerAttack(rat)
+  eq(game.player.xp, xpBefore + Monsters.xpFor(rat), "felling a monster in melee grants its xp")
+  eq(#game.level.entities, 0, "the dead monster is swept from the level")
+end
+
+function tests.spellCastMissileKillsAndGrantsXp()
+  local game = stagedGame(5, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 6, 6, 1)
+  game.level.entities = { rat }
+  local manaBefore = game.player.mana
+  local success = game:castSpell("missile", rat)
+  eq(success, true, "a known spell in range with a clear shot casts successfully")
+  eq(game.player.mana, manaBefore - Spells.catalog.missile.cost, "casting spends mana")
+  eq(#game.level.entities, 0, "the missile kills the rat and sweeps it from the level")
+  eq(game.player.xp, Monsters.xpFor(rat), "a spell kill grants xp same as a melee kill")
+end
+
+function tests.spellCastFailsWithoutSpendingState()
+  local game = stagedGame(5, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 6, 6, 1)
+  game.level.entities = { rat }
+  game.player.mana = 0
+  local success = game:castSpell("missile", rat)
+  eq(success, false, "casting without enough mana fails")
+  eq(game.player.mana, 0, "a failed cast does not touch mana")
+  eq(rat.hp, rat.maxHp, "a failed cast deals no damage")
+
+  game.player.mana = 10
+  local success2 = game:castSpell("heal")
+  eq(success2, false, "casting a spell that exists but was never learned fails")
+  eq(game.player.mana, 10, "an unlearned spell cast spends no mana")
+
+  local success3 = game:castSpell("fireball", rat)
+  eq(success3, false, "casting a key that matches no spell in the catalog fails")
+end
+
+function tests.spellLearnFromTome()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  eq(Spells.knows(game.player, "heal"), false, "the starting kit does not know heal")
+  game.player.inventory[#game.player.inventory + 1] = Items.tome("heal")
+  game:useItem(#game.player.inventory)
+  eq(Spells.knows(game.player, "heal"), true, "reading a tome permanently learns its spell")
+
+  local before = #game.player.inventory
+  game.player.inventory[#game.player.inventory + 1] = Items.tome("heal")
+  game:useItem(#game.player.inventory)
+  eq(#game.player.inventory, before, "the tome is consumed whether or not the spell was new")
+end
+
+function tests.spellHealAndShield()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Spells.learn(game.player, "heal")
+  Spells.learn(game.player, "shield")
+  game.player.hp = 10
+  local manaBefore = game.player.mana
+  game:castSpell("heal")
+  eq(game.player.hp > 10, true, "the heal spell restores hp")
+  eq(game.player.mana, manaBefore - Spells.catalog.heal.cost, "casting heal spends its mana cost")
+
+  local defenseBefore = game.player:effectiveDefense()
+  game:castSpell("shield")
+  eq(game.player:effectiveDefense() > defenseBefore, true, "the shield spell raises effective defense")
+  ok(Status.has(game.player, Status.SHIELD), "shield applies the shield status")
+end
+
+function tests.spellBlinkMovesWithinRadius()
+  local game = stagedGame(3, arena(21, 11), 10, 6)
+  Spells.learn(game.player, "blink")
+  local startX, startY = game.player.x, game.player.y
+  local success = game:castSpell("blink")
+  eq(success, true, "blink casts when mana and known")
+  local moved = game.player.x ~= startX or game.player.y ~= startY
+  ok(moved, "blink relocates the caster")
+  local dist = math.max(math.abs(game.player.x - startX), math.abs(game.player.y - startY))
+  ok(dist <= 5, "blink lands within its radius")
+  eq(game.level.map:isWalkable(game.player.x, game.player.y), true, "blink lands on walkable ground")
+end
+
+function tests.manaRegeneratesEachTurn()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.mana = 0
+  game.level.entities = {}
+  game:endPlayerTurn()
+  eq(game.player.mana, 1, "mana regenerates by one per player turn")
+  game.player.mana = game.player.maxMana
+  game:endPlayerTurn()
+  eq(game.player.mana, game.player.maxMana, "mana regeneration is capped at max mana")
+end
+
+function tests.throwWeaponHitsAndLands()
+  local game = stagedGame(4, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 6, 6, 1)
+  game.level.entities = { rat }
+  local dagger = Items.weapon("dagger", 2)
+  game.player.inventory[#game.player.inventory + 1] = dagger
+  local index = #game.player.inventory
+  local before = #game.player.inventory
+  local success = game:throwAt(index, rat)
+  eq(success, true, "a weapon throw with a clear line succeeds")
+  eq(#game.player.inventory, before - 1, "the thrown weapon leaves the inventory")
+  eq(rat.hp, rat.maxHp - dagger.power * 2, "a thrown weapon deals double its melee power")
+  local landed = game.level:itemsAt(rat.x, rat.y)
+  eq(#landed, 1, "the thrown weapon lands on the ground at the target")
+  eq(landed[1].item, dagger, "the landed item is the same weapon that was thrown")
+end
+
+function tests.throwWeaponKillGrantsXp()
+  local game = stagedGame(4, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 6, 6, 1)
+  rat.hp = 1
+  game.level.entities = { rat }
+  game.player.inventory[#game.player.inventory + 1] = Items.weapon("battle axe", 5)
+  local xpBefore = game.player.xp
+  game:throwAt(#game.player.inventory, rat)
+  eq(#game.level.entities, 0, "a lethal throw sweeps the monster from the level")
+  eq(game.player.xp, xpBefore + Monsters.xpFor(rat), "a thrown-weapon kill grants xp")
+end
+
+function tests.throwPotionAppliesHostileEffect()
+  local game = stagedGame(4, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 6, 6, 1)
+  game.level.entities = { rat }
+  game.player.inventory[#game.player.inventory + 1] = Items.potionOf("poison", 3)
+  local success = game:throwAt(#game.player.inventory, rat)
+  eq(success, true, "a potion throw with a clear line succeeds")
+  eq(Status.has(rat, Status.POISON), true, "a thrown poison potion poisons the target instead of the thrower")
+  eq(Status.has(game.player, Status.POISON), false, "the thrower is untouched by their own thrown potion")
+  eq(Hazards.at(game.level, rat.x, rat.y, Hazards.GAS) ~= nil, true,
+    "a shattered poison potion leaves a lingering cloud of fumes")
+end
+
+function tests.throwConfusePotionAppliesTheStatusToTheTargetNotTheThrower()
+  local game = stagedGame(4, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 6, 6, 1)
+  game.level.entities = { rat }
+  game.player.inventory[#game.player.inventory + 1] = Items.potionOf("confuse")
+  local success = game:throwAt(#game.player.inventory, rat)
+  eq(success, true, "a confuse potion throw with a clear line succeeds")
+  eq(Status.has(rat, Status.CONFUSE), true, "a thrown confuse potion confuses the target instead of the thrower")
+  eq(Status.has(game.player, Status.CONFUSE), false, "the thrower is untouched by their own thrown potion")
+end
+
+function tests.throwBlindPotionAppliesTheStatusToTheTargetNotTheThrower()
+  local game = stagedGame(4, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 6, 6, 1)
+  game.level.entities = { rat }
+  game.player.inventory[#game.player.inventory + 1] = Items.potionOf("blind")
+end
+
 function tests.saveLoadRoundTrip()
   local game = Game.new(2024)
   for _ = 1, 80 do
