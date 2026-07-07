@@ -1492,6 +1492,179 @@ function tests.throwBlindPotionAppliesTheStatusToTheTargetNotTheThrower()
   local rat = Monsters.create(Monsters.byKey.rat, 1, 6, 6, 1)
   game.level.entities = { rat }
   game.player.inventory[#game.player.inventory + 1] = Items.potionOf("blind")
+  local success = game:throwAt(#game.player.inventory, rat)
+  eq(success, true, "a blind potion throw with a clear line succeeds")
+  eq(Status.has(rat, Status.BLIND), true, "a thrown blind potion blinds the target instead of the thrower")
+  eq(Status.has(game.player, Status.BLIND), false, "the thrower is untouched by their own thrown potion")
+end
+
+function tests.throwLevitatePotionAppliesTheStatusToTheTargetNotTheThrower()
+  local game = stagedGame(4, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 6, 6, 1)
+  game.level.entities = { rat }
+  game.player.inventory[#game.player.inventory + 1] = Items.potionOf("levitate")
+  local success = game:throwAt(#game.player.inventory, rat)
+  eq(success, true, "a levitation potion throw with a clear line succeeds")
+  eq(Status.has(rat, Status.LEVITATE), true, "a thrown levitation potion lifts the target instead of the thrower")
+  eq(Status.has(game.player, Status.LEVITATE), false, "the thrower is untouched by their own thrown potion")
+end
+
+function tests.throwOutOfRangeFails()
+  local game = stagedGame(4, arena(21, 11), 2, 2)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 19, 9, 1)
+  game.level.entities = { rat }
+  game.player.inventory[#game.player.inventory + 1] = Items.weapon("dagger", 2)
+  local index = #game.player.inventory
+  local before = #game.player.inventory
+  local success = game:throwAt(index, rat)
+  eq(success, false, "a throw beyond range fails")
+  eq(#game.player.inventory, before, "a failed throw does not consume the item")
+  eq(rat.hp, rat.maxHp, "a failed throw deals no damage")
+end
+
+function tests.rangedShotHitsAtRangeAndConsumesAmmo()
+  local game = stagedGame(4, arena(21, 11), 3, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 9, 6, 1)
+  game.level.entities = { orc }
+  game.player.bow = Items.bow("short bow", 2, 6)
+  game.player.inventory[#game.player.inventory + 1] = Items.ammo("arrow", 2)
+  local expected = game.player.baseAttack + 2 - orc:effectiveDefense()
+  local success = game:fireAt(orc)
+  eq(success, true, "firing at a target within range and line of sight succeeds")
+  eq(orc.hp, orc.maxHp - expected, "the shot deals baseAttack plus bow power minus target defense")
+  local stack
+  for _, item in ipairs(game.player.inventory) do
+    if item.kind == Items.AMMO then stack = item end
+  end
+  eq(stack.count, 1, "firing consumes one arrow from the stack")
+  local landed = game.level:itemsAt(orc.x, orc.y)
+  eq(#landed, 1, "the spent arrow lands where the target stood")
+  eq(landed[1].item.kind, Items.AMMO, "the landed item is a spent arrow")
+end
+
+function tests.rangedShotKillGrantsXp()
+  local game = stagedGame(4, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 9, 6, 1)
+  rat.hp = 1
+  game.level.entities = { rat }
+  game.player.bow = Items.bow("long bow", 3, 7)
+  game.player.inventory[#game.player.inventory + 1] = Items.ammo("arrow", 1)
+  local xpBefore = game.player.xp
+  game:fireAt(rat)
+  eq(#game.level.entities, 0, "a lethal shot sweeps the monster from the level")
+  eq(game.player.xp, xpBefore + Monsters.xpFor(rat), "a ranged kill grants xp")
+end
+
+function tests.rangedFailsWithoutAmmo()
+  local game = stagedGame(4, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 9, 6, 1)
+  game.level.entities = { rat }
+  game.player.bow = Items.bow("short bow", 2, 6)
+  local success = game:fireAt(rat)
+  eq(success, false, "firing without arrows fails")
+  eq(rat.hp, rat.maxHp, "a failed shot deals no damage")
+end
+
+function tests.rangedFailsOutOfRange()
+  local game = stagedGame(4, arena(21, 11), 2, 2)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 19, 9, 1)
+  game.level.entities = { rat }
+  game.player.bow = Items.bow("short bow", 2, 3)
+  game.player.inventory[#game.player.inventory + 1] = Items.ammo("arrow", 3)
+  local success = game:fireAt(rat)
+  eq(success, false, "firing beyond the bow's range fails")
+  local stack
+  for _, item in ipairs(game.player.inventory) do
+    if item.kind == Items.AMMO then stack = item end
+  end
+  eq(stack.count, 3, "a failed shot does not consume ammunition")
+end
+
+function tests.ammoStacksOnPickup()
+  local game = stagedGame(4, arena(21, 11), 3, 3)
+  game.player.inventory[#game.player.inventory + 1] = Items.ammo("arrow", 2)
+  game.level.floorItems[#game.level.floorItems + 1] = { x = 3, y = 3, item = Items.ammo("arrow", 5) }
+  game:pickupHere()
+  local stacks, total = 0, 0
+  for _, item in ipairs(game.player.inventory) do
+    if item.kind == Items.AMMO then
+      stacks = stacks + 1
+      total = item.count
+    end
+  end
+  eq(stacks, 1, "picking up matching ammo merges into a single stack")
+  eq(total, 7, "the merged stack sums both counts")
+end
+
+function tests.trollRegenerateUnlessBurning()
+  local troll = Monsters.create(Monsters.byKey.troll, 1, 5, 5, 1)
+  troll.hp = troll.maxHp - 5
+  local line = Abilities.regenTick(troll)
+  ok(line ~= nil, "a damaged troll regenerates and logs it")
+  eq(troll.hp, troll.maxHp - 5 + Monsters.byKey.troll.regen, "regen heals by the species regen amount")
+
+  troll.hp = troll.maxHp
+  eq(Abilities.regenTick(troll), nil, "a troll already at full hp produces no regen line")
+
+  troll.hp = troll.maxHp - 5
+  Status.apply(troll, Status.BURNING, 3, 2)
+  eq(Abilities.regenTick(troll), nil, "burning suppresses troll regeneration")
+end
+
+function tests.ratHasNoRegen()
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 5, 5, 1)
+  rat.hp = 1
+  eq(Abilities.regenTick(rat), nil, "a species without a regen tag never heals passively")
+end
+
+function tests.wretchDeathBurstsPoisonSpores()
+  local game = stagedGame(1, arena(21, 11), 4, 6)
+  local wretch = Monsters.create(Monsters.byKey.wretch, 1, 5, 6, 1)
+  wretch.hp = 1
+  game.level.entities = { wretch }
+  eq(Status.has(game.player, Status.POISON), false, "the player starts unpoisoned")
+  game:playerAttack(wretch)
+  eq(Status.has(game.player, Status.POISON), true, "a wretch's death burst poisons an adjacent player")
+  ok(contains(game.log:recent(3)[1] or "", "spores") or contains(game.log:recent(3)[2] or "", "spores")
+    or contains(game.log:recent(3)[3] or "", "spores"), "the spore burst is logged")
+end
+
+function tests.dragonBreathIgnitesPlayer()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local dragon = Monsters.create(Monsters.byKey.dragon, 1, 6, 6, 1)
+  game.level.entities = { dragon }
+  local hpBefore = game.player.hp
+  Ai.act(game, dragon)
+  ok(game.player.hp < hpBefore, "a dragon in range breathes fire for damage")
+  eq(Status.has(game.player, Status.BURNING), true, "dragon breath ignites the player")
+end
+
+-- Layered special abilities: summon/curse/heal/rally run through
+-- Abilities.tryAct, which gates on cooldown and range before falling through
+-- to the species' ordinary ai.lua behaviour; split reacts to a survived hit;
+-- steal is a stateful chase-steal-flee sequence with no cooldown at all.
+
+function tests.necromancerSummonsZombie()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local necro = Monsters.create(Monsters.byKey.necromancer, 1, 6, 6, 4)
+  game.level.entities = { necro }
+  local acted = Abilities.tryAct(game, necro)
+  eq(acted, true, "a necromancer in range summons instead of moving")
+  eq(#game.level.entities, 2, "summoning adds a minion to the level")
+  local minion = game.level.entities[2]
+  eq(minion.species, "zombie", "the necromancer summons its configured species")
+  eq(minion.summonedBy, necro.id, "the minion is tagged with its summoner's id")
+  eq(necro.cooldown, 6, "summoning starts the ability's cooldown")
+  ok(contains(game.log:last(), "calls forth"), "the summon is logged")
+end
+
+function tests.summonRespectsPopulationCap()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local necro = Monsters.create(Monsters.byKey.necromancer, 1, 6, 6, 4)
+  local minionA = Monsters.create(Monsters.byKey.zombie, 2, 7, 6, 4)
+  local minionB = Monsters.create(Monsters.byKey.zombie, 3, 6, 7, 4)
+  minionA.summonedBy = necro.id
+  minionB.summonedBy = necro.id
 end
 
 function tests.saveLoadRoundTrip()
