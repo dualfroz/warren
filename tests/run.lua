@@ -2205,6 +2205,1390 @@ function tests.passiveShopkeeperIgnoresTheAdjacentPlayer()
   eq(game.player.hp, hpBefore, "an un-robbed shopkeeper does not attack even when adjacent")
 end
 
+function tests.sellItemGrantsHalfPriceAndRemovesIt()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  local index = #game.player.inventory
+  local item = game.player.inventory[index]
+  local expected = Shop.sellValue(item)
+  local goldBefore = game.player.gold
+  local value = game:sellItem(index)
+  eq(value, expected, "selling returns the catalog half-price")
+  eq(game.player.gold, goldBefore + expected, "the sale proceeds land in the wallet")
+  eq(#game.player.inventory, index - 1, "the sold item leaves the inventory")
+end
+
+function tests.builderOccasionallySeedsAShopWithMatchingWares()
+  local level = Builder.build(4, Rng.new(1), {})
+  local keeper
+  for _, e in ipairs(level.entities) do
+    if e.species == "shopkeeper" then keeper = e end
+  end
+  ok(keeper ~= nil, "this seed's depth-4 floor spawns a shopkeeper")
+  local waresFound = 0
+  for _, ground in ipairs(level.floorItems) do
+    if ground.price then
+      waresFound = waresFound + 1
+      eq(ground.shopId, keeper.id, "every priced ware is tagged with its shopkeeper's id")
+      ok(ground.price > 0, "every priced ware has a positive price")
+    end
+  end
+  ok(waresFound >= 3, "the shop stocks at least three wares")
+end
+
+function tests.shopAndLooseGoldStayOffTheShallowFloors()
+  for depth = 1, 3 do
+    local level = Builder.build(depth, Rng.new(1), {})
+    for _, ground in ipairs(level.floorItems) do
+      ok(ground.item.kind ~= Items.GOLD, "no loose gold appears above depth 4")
+      ok(not ground.price, "no shop ware appears above depth 4")
+    end
+    for _, e in ipairs(level.entities) do
+      ok(e.species ~= "shopkeeper", "no shopkeeper appears above depth 4")
+    end
+  end
+end
+
+local function arenaDark(w, h)
+  local map = Map.new(w, h)
+  for y = 2, h - 1 do for x = 2, w - 1 do map:set(x, y, Map.FLOOR) end end
+  return Level.new({
+    depth = 1, generator = "arena", map = map,
+    entities = {}, floorItems = {}, traps = {}, lights = {}, dark = true, explored = {},
+    upX = 2, upY = 2, downX = w - 1, downY = h - 1,
+  })
+end
+
+function tests.classApplyGrantsFighterStatBonuses()
+  local base = Game.new(9)
+  local fighter = Game.new(9, { class = "fighter" })
+  eq(fighter.player.class, "fighter", "the requested class is stamped onto the player")
+  eq(fighter.player.maxHp, base.player.maxHp + 8, "fighter grants a flat max hp bonus")
+  eq(fighter.player.hp, base.player.hp + 8, "the hp bonus also tops up current hp")
+  eq(fighter.player.attack, base.player.attack + 2, "fighter grants a flat attack bonus")
+end
+
+function tests.classApplyGrantsRogueGoldAndAttack()
+  local base = Game.new(9)
+  local rogue = Game.new(9, { class = "rogue" })
+  eq(rogue.player.gold, base.player.gold + 15, "rogue starts with extra gold")
+  eq(rogue.player.attack, base.player.attack + 1, "rogue grants a small attack bonus")
+end
+
+function tests.classApplyGrantsMageManaAndAttack()
+  local base = Game.new(9)
+  local mage = Game.new(9, { class = "mage" })
+  eq(mage.player.maxMana, base.player.maxMana + 8, "mage grants a flat mana bonus")
+  eq(mage.player.mana, base.player.mana + 8, "the mana bonus also tops up current mana")
+  eq(mage.player.attack, base.player.attack - 1, "mage trades some attack for its mana pool")
+end
+
+function tests.classApplyGrantsRangerBowAndAmmo()
+  local ranger = Game.new(9, { class = "ranger" })
+  ok(ranger.player.bow ~= nil, "ranger starts with a bow equipped")
+  local hasAmmo = false
+  for _, item in ipairs(ranger.player.inventory) do
+    if item.kind == Items.AMMO then hasAmmo = true end
+  end
+  ok(hasAmmo, "ranger starts with a stack of arrows")
+end
+
+function tests.invalidClassIsIgnored()
+  local base = Game.new(9)
+  local weird = Game.new(9, { class = "wizard" })
+  eq(weird.player.class, nil, "an unrecognised class name is not applied")
+  eq(weird.player.maxHp, base.player.maxHp, "stats are unaffected by an invalid class")
+end
+
+function tests.skillLearnRespectsClassLevelAndPoints()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.class = "fighter"
+  game.player.skillPoints = 0
+  eq(game:learnSkill("cleave"), false, "learning fails without a banked skill point")
+  game.player.skillPoints = 1
+  eq(game:learnSkill("backstab"), false, "learning a skill from another class fails")
+  eq(game.player.skillPoints, 1, "a failed learn spends no point")
+  eq(game:learnSkill("berserk"), false, "learning fails below the skill's level requirement")
+  eq(game:learnSkill("cleave"), true, "a same-class, level-eligible skill with a point banked learns")
+  eq(game.player.skillPoints, 0, "learning spends the point")
+  eq(Skills.has(game.player, "cleave"), true, "the skill is now known")
+  game.player.skillPoints = 1
+  eq(game:learnSkill("cleave"), false, "an already-known skill cannot be learned twice")
+  eq(game.player.skillPoints, 1, "re-learning a known skill spends no point")
+end
+
+function tests.skillCooldownBlocksImmediateReuseAndTicksDown()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.class = "fighter"
+  game.player.skills.secondWind = true
+  game.player.hp = game.player.maxHp - 10
+  eq(game:useSkill("secondWind"), true, "second wind activates while off cooldown")
+  eq(game:useSkill("secondWind"), false, "an immediate reuse fails while on cooldown")
+  for _ = 1, Skills.active.secondWind.cooldown do
+    game:endPlayerTurn()
+  end
+  eq(game.player.skillCooldowns.secondWind, 0, "the cooldown ticks down to zero over that many player turns")
+  game.player.hp = game.player.maxHp - 10
+  eq(game:useSkill("secondWind"), true, "second wind is usable again once its cooldown fully elapses")
+end
+
+function tests.fighterCleaveHitsPrimaryAndAdjacentMonsters()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.class = "fighter"
+  game.player.skills.cleave = true
+  local primary = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  local splash = Monsters.create(Monsters.byKey.orc, 2, 3, 5, 1)
+  game.level.entities = { primary, splash }
+  local success = game:useSkill("cleave", primary)
+  eq(success, true, "cleave lands on an adjacent primary target")
+  ok(primary.hp < primary.maxHp, "the primary target takes damage")
+  ok(splash.hp < splash.maxHp, "a second monster adjacent to the player also takes splash damage")
+  ok((splash.maxHp - splash.hp) < (primary.maxHp - primary.hp), "the splash hit deals less than the primary hit")
+  eq(game.player.skillCooldowns.cleave, Skills.active.cleave.cooldown, "cleave starts its own cooldown")
+end
+
+-- Cleave's splash targets must be mitigated by the wielder's own weapon
+-- damage type exactly like the primary target already is through
+-- Combat.damage/Combat.attack (see combat.lua's damageTypeOf and affixes.lua's
+-- own comment that a flaming sword "can do nothing at all against something
+-- fire-immune") - before this test the splash loop subtracted a raw
+-- attack-minus-defense number straight off hp with no Resistances.apply call
+-- at all, so a flaming weapon's cleave splash burned through fire immunity
+-- that the very same swing's primary hit already respected.
+function tests.fighterCleaveSplashRespectsAFireImmuneTargetLikeThePrimaryHitAlreadyDoes()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.class = "fighter"
+  game.player.skills.cleave = true
+  game.player.weapon = Affixes.decorate(Items.weapon("dagger", 2), Affixes.weapon[3])
+  eq(game.player.weapon.damageType, "fire", "the flaming affix retags the dagger's swing as fire")
+  local primary = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  local immune = Monsters.create(Monsters.byKey.dragon, 2, 3, 5, 6)
+  game.level.entities = { primary, immune }
+  game:useSkill("cleave", primary)
+  ok(primary.hp < primary.maxHp, "the primary target still burns for full mitigated damage")
+  eq(immune.hp, immune.maxHp, "a fire-immune splash target takes zero cleave splash from a flaming weapon")
+end
+
+function tests.fighterSecondWindRestoresPortionOfMaxHp()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.class = "fighter"
+  game.player.skills.secondWind = true
+  game.player.hp = 5
+  game:useSkill("secondWind")
+  eq(game.player.hp, 5 + math.floor(game.player.maxHp * 0.3), "second wind restores three tenths of max hp")
+
+  game.player.skillCooldowns.secondWind = 0
+  game.player.hp = game.player.maxHp - 1
+  game:useSkill("secondWind")
+  eq(game.player.hp, game.player.maxHp, "second wind never heals past max hp")
+end
+
+function tests.fighterBerserkBoostsAttackAtLowHp()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.class = "fighter"
+  game.player.skills.berserk = true
+  local full = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  game.level.entities = { full }
+  game.player.hp = game.player.maxHp
+  game:playerAttack(full)
+  local dmgFull = full.maxHp - full.hp
+
+  local game2 = stagedGame(1, arena(21, 11), 3, 6)
+  game2.player.class = "fighter"
+  game2.player.skills.berserk = true
+  local low = Monsters.create(Monsters.byKey.orc, 2, 4, 6, 1)
+  game2.level.entities = { low }
+  game2.player.hp = math.floor(game2.player.maxHp * 0.3)
+  game2:playerAttack(low)
+  local dmgLow = low.maxHp - low.hp
+
+  ok(dmgLow > dmgFull, "berserk raises attack once hp drops to a third of max")
+end
+
+function tests.rogueBackstabDoublesDamageOnFullHpTarget()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.class = "rogue"
+  game.player.skills.backstab = true
+  local fresh = Monsters.create(Monsters.byKey.rat, 1, 4, 6, 1)
+  game.level.entities = { fresh }
+  game:playerAttack(fresh)
+  local dmgFresh = fresh.maxHp - fresh.hp
+
+  local game2 = stagedGame(1, arena(21, 11), 3, 6)
+  game2.player.class = "rogue"
+  game2.player.skills.backstab = true
+  local hurt = Monsters.create(Monsters.byKey.rat, 2, 4, 6, 1)
+  hurt.hp = hurt.hp - 1
+  game2.level.entities = { hurt }
+  game2:playerAttack(hurt)
+  local dmgHurt = (hurt.maxHp - 1) - hurt.hp
+
+  eq(dmgFresh, dmgHurt * 2, "backstab doubles damage against a target still at full hp")
+end
+
+function tests.rogueEvasionCanFullyNegateMeleeHit()
+  local defender = { skills = { evasion = true } }
+  local sawDodge, sawHit = false, false
+  local rng = Rng.new(1)
+  for _ = 1, 60 do
+    if Skills.evades({ rng = rng }, defender) then sawDodge = true else sawHit = true end
+  end
+  ok(sawDodge, "evasion dodges at least once over enough attempts")
+  ok(sawHit, "evasion is a chance, not a guarantee, over enough attempts")
+  eq(Skills.evades({ rng = Rng.new(1) }, {}), false, "a defender without the skill never evades")
+end
+
+function tests.poisonBladeAppliesPoisonOnNextMeleeHitOnly()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.class = "rogue"
+  game.player.skills.poisonBlade = true
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  orc.hp, orc.maxHp = 100, 100
+  game.level.entities = { orc }
+  eq(game:useSkill("poisonBlade"), true, "poison blade readies without needing a target")
+  game:playerAttack(orc)
+  ok(Status.has(orc, Status.POISON), "the readied venom lands on the very next melee hit")
+  orc.statuses = {}
+  game:playerAttack(orc)
+  eq(Status.has(orc, Status.POISON), false, "poison blade is spent after one hit, not reapplied on the next")
+end
+
+-- pendingPoisonBlade lives on the player between "ready the venom" and "land
+-- the next swing" - a window a save/quit can happen inside, exactly like
+-- reputation, sanity or the skill tree already have to survive Game:toData.
+function tests.pendingPoisonBladeReadinessSurvivesAGameSaveLoadRoundTrip()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.class = "rogue"
+  game.player.skills.poisonBlade = true
+  eq(game:useSkill("poisonBlade"), true, "poison blade readies without needing a target")
+  eq(game.player.pendingPoisonBlade, true, "readying the skill sets the pending flag before any save/load happens")
+  local restored = Game.fromData(game:toData())
+  eq(restored.player.pendingPoisonBlade, true, "a poison blade readied before a save is still primed after loading it back")
+  ok(Skills.consumePoisonBlade(restored.player), "the restored pending venom is still consumable on the very next swing")
+end
+
+function tests.mageOverloadBoostsMissileDamage()
+  local game = stagedGame(5, arena(21, 11), 3, 6)
+  local base = Monsters.create(Monsters.byKey.orc, 1, 6, 6, 1)
+  game.level.entities = { base }
+  game:castSpell("missile", base)
+  local dmgBase = base.maxHp - base.hp
+
+  local game2 = stagedGame(5, arena(21, 11), 3, 6)
+  game2.player.class = "mage"
+  game2.player.skills.overload = true
+  local boosted = Monsters.create(Monsters.byKey.orc, 1, 6, 6, 1)
+  game2.level.entities = { boosted }
+  game2:castSpell("missile", boosted)
+  local dmgBoosted = boosted.maxHp - boosted.hp
+
+  ok(dmgBoosted > dmgBase, "overload raises missile spell damage")
+end
+
+function tests.mageMeditateRestoresManaWithinCap()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.class = "mage"
+  game.player.skills.meditate = true
+  game.player.mana = 2
+  game:useSkill("meditate")
+  eq(game.player.mana, 8, "meditate restores a flat amount of mana")
+
+  game.player.mana = game.player.maxMana - 1
+  game:useSkill("meditate")
+  eq(game.player.mana, game.player.maxMana, "meditate never overfills the mana pool")
+end
+
+function tests.mageManaShieldRaisesDefenseWhileManaHeld()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.class = "mage"
+  game.player.skills.manaShield = true
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  local before = game.player.hp
+  game.player.mana = 10
+  game:monsterMelee(orc)
+  local dmgWithShield = before - game.player.hp
+
+  game.player.hp = before
+  game.player.mana = 0
+  game:monsterMelee(orc)
+  local dmgWithoutShield = before - game.player.hp
+
+  ok(dmgWithoutShield > dmgWithShield, "mana shield reduces damage taken while mana holds")
+end
+
+function tests.rangerMultishotHitsTwoTargetsForOneArrow()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.class = "ranger"
+  game.player.skills.multishot = true
+  game.player.bow = Items.bow("shortbow", 3, 6)
+  game.player.inventory[#game.player.inventory + 1] = Items.ammo("arrow", 5)
+  local first = Monsters.create(Monsters.byKey.orc, 1, 6, 6, 1)
+  local second = Monsters.create(Monsters.byKey.orc, 2, 3, 8, 1)
+  game.level.entities = { first, second }
+  local success = game:useSkill("multishot", first, second)
+  eq(success, true, "multishot succeeds with two reachable targets")
+  ok(first.hp < first.maxHp, "the primary target takes damage")
+  ok(second.hp < second.maxHp, "the secondary target takes damage")
+  local stack
+  for _, item in ipairs(game.player.inventory) do
+    if item.kind == Items.AMMO then stack = item end
+  end
+  eq(stack.count, 4, "multishot consumes only a single arrow for both targets")
+end
+
+-- Multishot's split arrows must run through Resistances.apply exactly like a
+-- single Ranged.fire shot does (both always tag physical - arrows never
+-- carry an elemental damageType) - before this test the loop subtracted a
+-- raw attack-minus-defense number straight off hp for both targets with no
+-- mitigation call at all, so a physically resistant monster took a full,
+-- unresisted hit from a skill that is supposed to be "an arrow that splits",
+-- not a different damage model than the bow it comes out of.
+function tests.rangerMultishotRespectsPhysicalResistanceOnBothSplitArrows()
+  local function primaryDamageDealt(resistant)
+    local game = stagedGame(1, arena(21, 11), 3, 6)
+    game.player.class = "ranger"
+    game.player.skills.multishot = true
+    game.player.bow = Items.bow("shortbow", 3, 6)
+    game.player.inventory[#game.player.inventory + 1] = Items.ammo("arrow", 5)
+    local first = Monsters.create(Monsters.byKey.orc, 1, 6, 6, 1)
+    first.hp, first.maxHp = 100, 100
+    if resistant then first.resist = { physical = Resistances.RESIST } end
+    local second = Monsters.create(Monsters.byKey.orc, 2, 3, 8, 1)
+    second.hp, second.maxHp = 100, 100
+    game.level.entities = { first, second }
+    game:useSkill("multishot", first, second)
+    return 100 - first.hp
+  end
+  local plain = primaryDamageDealt(false)
+  local resisted = primaryDamageDealt(true)
+  ok(resisted < plain, "a physically resistant target takes measurably less multishot damage than an unresisted one")
+  eq(resisted, math.floor(plain / 2), "physical resistance halves the split-arrow hit, the same mitigation Resistances.apply gives a single Ranged.fire shot")
+end
+
+function tests.rangerCamouflageShrinksDetectionOnDarkFloors()
+  local game = stagedGame(1, arenaDark(21, 11), 3, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 11, 6, 1)
+  eq(game:canSeePlayer(orc, 10), true, "without camouflage a dark floor does not shrink detection")
+
+  game.player.class = "ranger"
+  game.player.skills.camouflage = true
+  eq(game:canSeePlayer(orc, 10), false, "camouflage shrinks a monster's detection range on a dark floor")
+
+  game.level.dark = false
+  eq(game:canSeePlayer(orc, 10), true, "camouflage does nothing once the floor is lit")
+end
+
+-- Blindness overrides Game:effectiveRadius outright rather than stacking as
+-- another penalty term (contrast Atmosphere.sightPenalty/Events.sightPenalty/
+-- Ascension.sightPenalty, which all just shave a fixed amount off) - a fully
+-- lit, unpenalized floor still clamps to a radius of one the instant the
+-- player is blinded, and returns to normal the instant the status is gone.
+function tests.effectiveRadiusBlindStatusOverridesLightAndWeatherToAMinimumOfOne()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local clear = game:effectiveRadius()
+  ok(clear > 1, "an unblinded, unpenalized floor has more than a radius of one to begin with")
+
+  Status.apply(game.player, Status.BLIND, 6, 1)
+  eq(game:effectiveRadius(), 1, "a blinded player's sight radius clamps to one regardless of light or weather")
+
+  game.player.statuses = {}
+  eq(game:effectiveRadius(), clear, "sight radius returns to normal once blindness is gone")
+end
+
+-- A blinded monster keeps its ordinary listed detection range on paper, but
+-- Game:canSeePlayer clamps every one of ai.lua's behaviours (chase/pack/
+-- ranged/flee/erratic/tunnel all route through this same helper) down to
+-- melee-only awareness while it lasts.
+function tests.canSeePlayerBlindedMonsterOnlyDetectsThePlayerAtMeleeRange()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 8, 6, 1)
+  eq(game:canSeePlayer(orc, 10), true, "an unblinded monster within its listed range sees the player")
+
+  Status.apply(orc, Status.BLIND, 6, 1)
+  eq(game:canSeePlayer(orc, 10), false, "a blinded monster loses a five-cell-away sighting despite its listed range")
+
+  local adjacentOrc = Monsters.create(Monsters.byKey.orc, 2, 4, 6, 1)
+  Status.apply(adjacentOrc, Status.BLIND, 6, 1)
+  eq(game:canSeePlayer(adjacentOrc, 10), true, "a blinded monster still senses the player once adjacent")
+end
+
+function tests.rangerTrueshotAddsFlatRangedDamage()
+  local game = stagedGame(4, arena(21, 11), 3, 6)
+  local base = Monsters.create(Monsters.byKey.orc, 1, 9, 6, 1)
+  game.level.entities = { base }
+  game.player.bow = Items.bow("short bow", 2, 6)
+  game.player.inventory[#game.player.inventory + 1] = Items.ammo("arrow", 2)
+  game:fireAt(base)
+  local dmgBase = base.maxHp - base.hp
+
+  local game2 = stagedGame(4, arena(21, 11), 3, 6)
+  game2.player.class = "ranger"
+  game2.player.skills.trueshot = true
+  local boosted = Monsters.create(Monsters.byKey.orc, 1, 9, 6, 1)
+  game2.level.entities = { boosted }
+  game2.player.bow = Items.bow("short bow", 2, 6)
+  game2.player.inventory[#game2.player.inventory + 1] = Items.ammo("arrow", 2)
+  game2:fireAt(boosted)
+  local dmgTrueshot = boosted.maxHp - boosted.hp
+
+  eq(dmgTrueshot, dmgBase + 3, "trueshot adds a flat +3 to every ranged hit")
+end
+
+function tests.autopilotLearnsSkillsAutomaticallyAsPointsAllow()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.class = "fighter"
+  game.player.skillPoints = 1
+  game:choosePlayerAction()
+  ok(Skills.has(game.player, "cleave"),
+    "the autopilot spends a banked point on the first level-eligible skill in class order")
+  eq(game.player.skillPoints, 0, "learning the skill spends the banked point")
+end
+
+function tests.skillFieldsSurviveSerialization()
+  local game = Game.new(5, { class = "mage" })
+  game.player.skills.overload = true
+  game.player.skillCooldowns.meditate = 2
+  game.player.skillPoints = 3
+  local path = os.tmpname()
+  game:save(path)
+  local restored = Game.load(path)
+  os.remove(path)
+  eq(restored.player.class, "mage", "class survives a save/load round trip")
+  eq(restored.player.skillPoints, 3, "skill points survive a save/load round trip")
+  eq(Skills.has(restored.player, "overload"), true, "learned skills survive a save/load round trip")
+  eq(restored.player.skillCooldowns.meditate, 2, "skill cooldowns survive a save/load round trip")
+end
+
+function tests.craftingForgeSpendsEssenceForATierOneGem()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.essence = Crafting.FORGE_COST - 1
+  local shortSuccess, shortReason = Crafting.forge(game.player, Crafting.FIRE)
+  eq(shortSuccess, false, "forging refuses when essence is short of the cost")
+  eq(shortReason, "not enough essence", "the refusal names the reason")
+
+  game.player.essence = Crafting.FORGE_COST
+  local success, gem = Crafting.forge(game.player, Crafting.FIRE)
+  ok(success, "forging succeeds with exactly the cost in essence")
+  eq(gem.tier, 1, "a forged gem starts at tier one")
+  eq(gem.element, Crafting.FIRE, "the gem carries the requested element")
+  eq(game.player.essence, 0, "the forge cost is spent")
+
+  local badSuccess, badReason = Crafting.forge(game.player, "shadow")
+  eq(badSuccess, false, "an unknown element is refused")
+  eq(badReason, "no such element", "the refusal names the reason")
+end
+
+function tests.craftingMergeGemsCombinesMatchingPairsIntoTheNextTier()
+  local success, _, merged = Crafting.mergeGems(Crafting.gem(Crafting.FIRE, 1), Crafting.gem(Crafting.FIRE, 1))
+  ok(success, "two matching chip gems merge")
+  eq(merged.tier, 2, "the merged gem is one tier higher")
+  eq(merged.element, Crafting.FIRE, "the merged gem keeps the shared element")
+  eq(merged.power, 2, "a gem's power always matches its tier")
+
+  local mismatchElement, elementReason = Crafting.mergeGems(Crafting.gem(Crafting.FIRE, 1), Crafting.gem(Crafting.FROST, 1))
+  eq(mismatchElement, false, "gems of different elements refuse to merge")
+  eq(elementReason, "elements do not match", "the refusal names the reason")
+
+  local mismatchTier, tierReason = Crafting.mergeGems(Crafting.gem(Crafting.FIRE, 1), Crafting.gem(Crafting.FIRE, 2))
+  eq(mismatchTier, false, "gems of different tiers refuse to merge")
+  eq(tierReason, "tiers do not match", "the refusal names the reason")
+
+  local atCap, capReason = Crafting.mergeGems(
+    Crafting.gem(Crafting.FIRE, Crafting.MAX_TIER), Crafting.gem(Crafting.FIRE, Crafting.MAX_TIER))
+  eq(atCap, false, "a gem already at the maximum tier cannot merge further")
+  eq(capReason, "already at maximum tier", "the refusal names the reason")
+end
+
+function tests.craftingSocketAddsPowerAndSwapsRiderOnResocket()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local weapon = Items.weapon("dagger", 2)
+  Items.equipWeapon(weapon, game.player)
+  local attackBaseline = game.player.attack
+
+  ok(Crafting.socket(game.player, weapon, Crafting.gem(Crafting.FIRE, 1)),
+    "a gem sockets into an equipped weapon")
+  eq(weapon.power, 3, "the gem's power lands on the item")
+  eq(game.player.attack, attackBaseline + 1, "socketing an equipped weapon updates attack immediately")
+  eq(weapon.socket.element, Crafting.FIRE, "the socket records its element")
+
+  ok(Crafting.socket(game.player, weapon, Crafting.gem(Crafting.FROST, 2)),
+    "resocketing replaces the previous gem")
+  eq(weapon.power, 4, "power reflects only the new gem, not a stack of both")
+  eq(game.player.attack, attackBaseline + 2, "attack reflects the swap, not an accumulation")
+  eq(weapon.socket.element, Crafting.FROST, "the new gem's element replaces the old one")
+
+  local success, reason = Crafting.socket(game.player, weapon, { kind = Items.WEAPON })
+  eq(success, false, "a non-gem refuses to socket")
+  eq(reason, "not a gem", "the refusal names the reason")
+end
+
+function tests.craftingTemperRaisesPowerAtRisingCostUpToACap()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local weapon = Items.weapon("dagger", 2)
+  Items.equipWeapon(weapon, game.player)
+  local attackBaseline = game.player.attack
+  local totalCost = 0
+  for level = 0, Crafting.TEMPER_MAX - 1 do
+    totalCost = totalCost + (level + 1) * 4
+  end
+  game.player.essence = totalCost
+
+  for level = 1, Crafting.TEMPER_MAX do
+    ok(Crafting.temper(game.player, weapon), "temper step " .. level .. " succeeds with enough essence")
+  end
+  eq(weapon.power, 2 + Crafting.TEMPER_MAX, "each temper step adds exactly one flat power")
+  eq(game.player.attack, attackBaseline + Crafting.TEMPER_MAX,
+    "tempering an equipped weapon updates attack immediately")
+  eq(game.player.essence, 0, "the full ladder of rising costs is spent exactly")
+
+  local success, reason = Crafting.temper(game.player, weapon)
+  eq(success, false, "a fully tempered item refuses a further step")
+  eq(reason, "fully tempered", "the refusal names the reason")
+end
+
+function tests.craftingTemperRefusesWithoutEnoughEssence()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local weapon = Items.weapon("mace", 3)
+  Items.equipWeapon(weapon, game.player)
+  game.player.essence = 3
+  local success, reason = Crafting.temper(game.player, weapon)
+  eq(success, false, "tempering fails when essence is short of the cost")
+  eq(reason, "not enough essence", "the refusal names the reason")
+  eq(weapon.power, 3, "a failed temper leaves power untouched")
+  eq(game.player.essence, 3, "a failed temper spends nothing")
+end
+
+function tests.craftingEnchantGrantsAChosenAffixOnce()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local weapon = Items.weapon("dagger", 2)
+  Items.equipWeapon(weapon, game.player)
+  local attackBaseline = game.player.attack
+  game.player.essence = Crafting.ENCHANT_COST
+
+  ok(Crafting.enchant(game.player, weapon, "flaming"), "enchanting an unaffixed weapon succeeds")
+  eq(weapon.affix.key, "flaming", "the chosen affix is attached, not a random roll")
+  eq(weapon.power, 3, "the affix's power lands on the item")
+  eq(weapon.name, "flaming dagger", "the affix prefix is applied to the name")
+  eq(game.player.attack, attackBaseline + 1, "enchanting an equipped weapon updates attack immediately")
+  eq(game.player.essence, 0, "the enchant cost is spent")
+
+  local repeatSuccess, repeatReason = Crafting.enchant(game.player, weapon, "vicious")
+  eq(repeatSuccess, false, "an already-affixed weapon refuses a second enchant")
+  eq(repeatReason, "already bears an affix", "the refusal names the reason")
+
+  local badSuccess, badReason = Crafting.enchant(game.player, Items.armor("leather armor", 1), "not-a-real-affix")
+  eq(badSuccess, false, "an unknown affix key is refused")
+  eq(badReason, "unknown affix", "the refusal names the reason")
+
+  local ringSuccess, ringReason = Crafting.enchant(game.player, Items.ring("ring of power", 1, 1), "sharp")
+  eq(ringSuccess, false, "gear without an affix pool cannot be enchanted")
+  eq(ringReason, "cannot be enchanted", "the refusal names the reason")
+end
+
+function tests.craftingDisenchantStripsAffixAndRefundsEssence()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local armor = Affixes.decorate(Items.armor("chain mail", 2), Affixes.armor[2])
+  Items.equipArmor(armor, game.player)
+  local defenseBaseline = game.player.defense
+  eq(armor.name, "reinforced chain mail", "sanity check: the drop rolled the expected affix")
+
+  local success, refund = Crafting.disenchant(game.player, armor)
+  ok(success, "disenchanting an affixed armor succeeds")
+  eq(refund, Crafting.FORGE_COST + 2 * 3, "the refund scales with the stripped affix's power")
+  eq(armor.power, 2, "power drops back to its base value")
+  eq(armor.name, "chain mail", "the affix prefix is removed from the name")
+  eq(armor.affix, nil, "the affix is gone")
+  eq(game.player.defense, defenseBaseline - 2, "disenchanting an equipped armor updates defense immediately")
+  eq(game.player.essence, refund, "the refund lands in the player's essence")
+
+  local again, reason = Crafting.disenchant(game.player, armor)
+  eq(again, false, "an already-plain item has nothing left to disenchant")
+  eq(reason, "nothing to disenchant", "the refusal names the reason")
+end
+
+function tests.craftingSocketedGemRidersStackWithARolledAffixOnHit()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local weapon = Affixes.decorate(Items.weapon("dagger", 2), Affixes.weapon[4])
+  Items.equipWeapon(weapon, game.player)
+  ok(Crafting.socket(game.player, weapon, Crafting.gem(Crafting.SHOCK, 1)),
+    "a shock gem sockets alongside the rolled affix")
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  orc.hp, orc.maxHp = 30, 30
+  game.level.entities = { orc }
+  game:playerAttack(orc)
+  eq(Status.has(orc, Status.POISON), true, "the rolled venomed affix still lands its rider")
+  eq(Status.has(orc, Status.STUN), true, "the socketed shock gem lands its own rider on the same hit")
+end
+
+-- Regression: a shock rider applied during the PLAYER's turn is ticked for
+-- the first time on the very same round, inside the victim's own upcoming
+-- Game:takeMonsterTurn (Status.tick runs there before Status.skipsTurn is
+-- ever checked) - so a duration of 1 would already read 0 and be gone
+-- before skipsTurn saw it, and the "stun" would silently never do anything.
+-- This confirms the fix (duration 2, see crafting.lua) actually skips the
+-- victim's very next turn, not just that the status gets attached.
+function tests.craftingShockRiderActuallyStunsTheVictimOnItsNextTurnNotJustOnPaper()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local weapon = Items.weapon("dagger", 2)
+  Items.equipWeapon(weapon, game.player)
+  ok(Crafting.socket(game.player, weapon, Crafting.gem(Crafting.SHOCK, 1)),
+    "a bare shock gem sockets onto an unaffixed weapon")
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  orc.hp, orc.maxHp = 30, 30
+  game.level.entities = { orc }
+
+  game:playerAttack(orc)
+  eq(Status.has(orc, Status.STUN), true, "the shock rider lands immediately on the hit")
+
+  local hpBefore, xBefore, yBefore = game.player.hp, orc.x, orc.y
+  game:takeMonsterTurn(orc)
+  eq(game.player.hp, hpBefore, "a stunned orc's very next turn deals no melee damage")
+  eq(orc.x, xBefore, "a stunned orc's very next turn does not move")
+  eq(orc.y, yBefore, "a stunned orc's very next turn does not move")
+
+  game:takeMonsterTurn(orc)
+  eq(Status.has(orc, Status.STUN), false, "the stun has fully expired by the turn after that")
+  ok(game.player.hp < hpBefore, "once unstunned the orc resumes attacking normally")
+end
+
+function tests.gameCraftingWrappersDriveTheFullPipeline()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local weapon = Items.weapon("dagger", 2)
+  Items.equipWeapon(weapon, game.player)
+  local attackBaseline = game.player.attack
+
+  game.player.essence = Crafting.FORGE_COST * 2
+  ok(game:forgeGem(Crafting.FIRE), "forging a gem through the game wrapper succeeds")
+  ok(game:forgeGem(Crafting.FIRE), "forging a second matching gem succeeds")
+  local invBefore = #game.player.inventory
+
+  local firstGemIndex, secondGemIndex
+  for i, item in ipairs(game.player.inventory) do
+    if item.kind == Items.GEM then
+      if not firstGemIndex then firstGemIndex = i else secondGemIndex = i end
+    end
+  end
+  ok(game:mergeGemsAt(firstGemIndex, secondGemIndex), "merging through the game wrapper succeeds")
+  eq(#game.player.inventory, invBefore - 1, "merging removes both source gems and adds one merged gem")
+
+  local mergedIndex
+  for i, item in ipairs(game.player.inventory) do
+    if item.kind == Items.GEM then mergedIndex = i end
+  end
+  ok(game:socketItem("weapon", mergedIndex), "socketing the equipped weapon through the game wrapper succeeds")
+  eq(weapon.socket.element, Crafting.FIRE, "the socketed gem's element lands on the weapon")
+  eq(game.player.attack, attackBaseline + 2, "socketing a tier-2 gem adds its power to attack")
+  ok(not game:socketItem("weapon", mergedIndex), "the gem slot is consumed and cannot be socketed twice")
+
+  game.player.essence = Crafting.temperCost(weapon)
+  ok(game:temperItem("weapon"), "tempering the equipped weapon through the game wrapper succeeds")
+  eq(weapon.power, 2 + 2 + 1, "temper stacks on top of the socket's power")
+  eq(game.player.attack, attackBaseline + 3, "tempering the equipped weapon updates attack immediately")
+
+  game.player.essence = Crafting.ENCHANT_COST
+  ok(game:enchantItem("weapon", "vicious"), "enchanting the equipped weapon through the game wrapper succeeds")
+  eq(weapon.affix.key, "vicious", "the chosen affix lands on the weapon")
+
+  local beforeDisenchant = game.player.attack
+  local expectedRefund = Crafting.FORGE_COST + 2 * 3
+  ok(game:disenchantItem("weapon"), "disenchanting the equipped weapon through the game wrapper succeeds")
+  eq(game.player.attack, beforeDisenchant - 2, "disenchanting removes the affix's power from attack")
+  eq(game.player.essence, expectedRefund, "the disenchant refund lands in essence")
+  ok(contains(game.log:recent(1)[1] or "", "disenchant"), "the disenchant is logged")
+end
+
+function tests.monsterKillsGrantEssenceScaledToTheirXpReward()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 4, 6, 1)
+  rat.hp = 1
+  game.level.entities = { rat }
+  local essenceBefore = game.player.essence
+  game:playerAttack(rat)
+  eq(game.player.essence, essenceBefore + Crafting.essenceFor(Monsters.xpFor(rat)),
+    "a kill grants essence scaled to the monster's xp reward")
+end
+
+function tests.craftingFieldsSurviveSerialization()
+  local game = Game.new(5)
+  local weapon = Items.weapon("dagger", 2)
+  Items.equipWeapon(weapon, game.player)
+  Crafting.socket(game.player, weapon, Crafting.gem(Crafting.VENOM, 2))
+  game.player.essence = 37
+  game.player.inventory[#game.player.inventory + 1] = Crafting.gem(Crafting.SHOCK, 1)
+
+  local path = os.tmpname()
+  game:save(path)
+  local restored = Game.load(path)
+  os.remove(path)
+
+  eq(restored.player.essence, 37, "essence survives a save/load round trip")
+  eq(restored.player.weapon.socket.element, Crafting.VENOM, "a socketed gem's element survives a save/load round trip")
+  eq(restored.player.weapon.socket.tier, 2, "a socketed gem's tier survives a save/load round trip")
+  local restoredGem
+  for _, item in ipairs(restored.player.inventory) do
+    if item.kind == Items.GEM then restoredGem = item end
+  end
+  ok(restoredGem ~= nil, "a loose gem in the inventory survives a save/load round trip")
+  eq(restoredGem.element, Crafting.SHOCK, "the loose gem's element survives a save/load round trip")
+end
+
+function tests.alchemyBrewResolvesAKnownPairToItsFixedPotion()
+  local potion = Alchemy.brew(Alchemy.SUNPETAL, Alchemy.SUNPETAL)
+  eq(potion.effect, "heal", "a matched pair of the same herb brews that herb's aspect")
+  eq(potion.power, 18, "a doubled herb brews a stronger potion than a mixed pair")
+end
+
+function tests.alchemyBrewIsOrderIndependent()
+  local forward = Alchemy.brew(Alchemy.BLOODROOT, Alchemy.NIGHTCAP)
+  local backward = Alchemy.brew(Alchemy.NIGHTCAP, Alchemy.BLOODROOT)
+  eq(forward.effect, backward.effect, "brewing a pair does not depend on which herb is named first")
+  eq(forward.power, backward.power, "a brewed potion's power does not depend on herb order either")
+end
+
+function tests.alchemyBrewCurdlesOnAnOpposedPairing()
+  local potion, reason = Alchemy.brew(Alchemy.SUNPETAL, Alchemy.NIGHTCAP)
+  eq(potion, nil, "light and shade herbs curdle rather than brewing a potion")
+  eq(reason, "curdle", "a curdled brew names its failure")
+end
+
+function tests.alchemyLookupRejectsAnUnknownHerb()
+  eq(Alchemy.lookup("mud", Alchemy.SUNPETAL), nil, "a nonexistent herb key has no recipe")
+end
+
+function tests.gameBrewAtCombinesTwoHerbsIntoAPotionAtACauldron()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.level.cauldrons = { { x = 5, y = 5 } }
+  game.player.inventory = { Alchemy.herb(Alchemy.SUNPETAL), Alchemy.herb(Alchemy.BLOODROOT) }
+  ok(game:brewAt(1, 2), "brewing two herbs at a cauldron underfoot succeeds")
+  eq(#game.player.inventory, 1, "both source herbs are spent and one potion is added")
+  local brewed = game.player.inventory[1]
+  eq(brewed.kind, Items.POTION, "brewing yields an ordinary catalog potion")
+  eq(brewed.effect, "heal", "the brewed potion matches the herb pair's fixed recipe")
+  eq(brewed.power, 10, "the brewed potion's power matches the recipe, not the catalog default")
+  ok(Identify.isKnown(game.identify, brewed), "brewing a potion yourself identifies its type for free")
+end
+
+function tests.gameBrewAtFailsWithoutACauldronUnderfoot()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.player.inventory = { Alchemy.herb(Alchemy.SUNPETAL), Alchemy.herb(Alchemy.BLOODROOT) }
+  ok(not game:brewAt(1, 2), "brewing away from any cauldron fails")
+  eq(#game.player.inventory, 2, "a failed brew for lack of a cauldron spends nothing")
+end
+
+function tests.gameBrewAtRequiresTwoHerbItems()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.level.cauldrons = { { x = 5, y = 5 } }
+  game.player.inventory = { Alchemy.herb(Alchemy.SUNPETAL) }
+  ok(not game:brewAt(1, 1), "brewing a herb against itself by index is rejected")
+  game.player.inventory = { Alchemy.herb(Alchemy.SUNPETAL), Items.potion(10) }
+  ok(not game:brewAt(1, 2), "a non-herb item cannot stand in for the second half of a brew")
+  eq(#game.player.inventory, 2, "a rejected brew attempt spends nothing")
+end
+
+function tests.gameBrewAtCurdlesIntoGasInsteadOfAPotion()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.level.cauldrons = { { x = 5, y = 5 } }
+  game.player.inventory = { Alchemy.herb(Alchemy.SUNPETAL), Alchemy.herb(Alchemy.NIGHTCAP) }
+  ok(not game:brewAt(1, 2), "a curdled brew reports failure")
+  eq(#game.player.inventory, 0, "a curdled brew still spends both herbs")
+  ok(Hazards.at(game.level, 5, 5, Hazards.GAS) ~= nil, "a curdled brew vents a gas hazard at the brewer's feet")
+  ok(contains(game.log:recent(1)[1] or "", "curdle"), "the curdle is logged")
+end
+
+function tests.buildersScatterHerbsFromTheFirstFloor()
+  local level = Builder.build(1, Rng.new(1), {})
+  local herbs = 0
+  for _, ground in ipairs(level.floorItems) do
+    if ground.item.kind == Items.HERB then herbs = herbs + 1 end
+  end
+  ok(herbs >= 2, "the entrance floor already scatters foraging herbs")
+end
+
+function tests.cauldronsStayOffTheEntranceFloor()
+  for seed = 1, 5 do
+    local level = Builder.build(1, Rng.new(seed), {})
+    eq(#level.cauldrons, 0, "no cauldron appears on the entrance floor")
+  end
+end
+
+function tests.buildersOccasionallyPlaceACauldronFromDepthTwo()
+  local level = Builder.build(2, Rng.new(14), {})
+  eq(#level.cauldrons, 1, "this seed's depth-2 floor places a cauldron")
+end
+
+function tests.cauldronFieldsSurviveSerialization()
+  local level = arena(21, 11)
+  level.cauldrons = { { x = 4, y = 4 } }
+  local restored = Level.fromData(level:toData())
+  eq(#restored.cauldrons, 1, "the cauldron list survives a round trip")
+  eq(restored.cauldrons[1].x, 4, "a cauldron's position survives a round trip")
+end
+
+function tests.cauldronRendersItsGlyphWhenVisible()
+  local rendered = stagedGame(1, arena(21, 11), 3, 6)
+  rendered.level.cauldrons = { { x = 5, y = 6 } }
+  rendered:computeVisible()
+  ok(contains(rendered:render(), "U"), "a cauldron on a visible cell renders as its glyph")
+end
+
+local function nodePlayer()
+  return { essence = 0, inventory = {} }
+end
+
+local function nodeGame(seed)
+  local game = { player = nodePlayer(), rng = Rng.new(seed), level = { event = nil }, ascension = {} }
+  function game:essenceMultiplier()
+    return Events.essenceMultiplier(self.level.event) * Ascension.essenceMultiplier(self.ascension)
+  end
+  return game
+end
+
+function tests.nodesHarvestingAnOreVeinPaysEssenceAndSpendsACharge()
+  local node = Nodes.new(Nodes.ORE)
+  local game = nodeGame(3)
+  local success, line = Nodes.harvest(game, node)
+  ok(success, "harvesting a fresh ore vein succeeds")
+  eq(node.charges, Nodes.MAX_CHARGES - 1, "a harvest spends exactly one charge")
+  ok(game.player.essence >= Nodes.ORE_YIELD_MIN and game.player.essence <= Nodes.ORE_YIELD_MAX,
+    "the essence paid out falls within the vein's yield range")
+  ok(contains(line, "essence"), "the harvest is logged")
+end
+
+function tests.nodesHarvestingAnOreVeinDoublesItsYieldDuringRichVeins()
+  local node = Nodes.new(Nodes.ORE)
+  local game = nodeGame(3)
+  game.level.event = { key = Events.RICHVEINS, turnsLeft = 5 }
+  Nodes.harvest(game, node)
+  ok(game.player.essence >= Nodes.ORE_YIELD_MIN * 2 and game.player.essence <= Nodes.ORE_YIELD_MAX * 2,
+    "rich veins doubles the vein's ordinary yield range")
+end
+
+function tests.nodesHarvestingAGemSeamYieldsARawTierOneGemOfItsElement()
+  local node = Nodes.new(Nodes.GEM, Crafting.FIRE)
+  local game = nodeGame(3)
+  local success = Nodes.harvest(game, node)
+  ok(success, "harvesting a fresh gem seam succeeds")
+  eq(#game.player.inventory, 1, "a gem lands in the inventory")
+  local gem = game.player.inventory[1]
+  eq(gem.kind, Items.GEM, "the yield is a gem item")
+  eq(gem.element, Crafting.FIRE, "the gem matches the seam's own element")
+  eq(gem.tier, 1, "a freshly pried gem is raw, tier one")
+end
+
+function tests.nodesGoingFallowRefusesFurtherHarvestsUntilItReopens()
+  local node = Nodes.new(Nodes.ORE)
+  node.charges = 1
+  local game = nodeGame(9)
+  ok(Nodes.harvest(game, node), "the last charge still pays out")
+  eq(node.charges, 0, "spending the last charge empties the vein")
+  eq(node.cooldown, Nodes.REGEN_TURNS, "emptying a vein starts its regen cooldown")
+  local success, line = Nodes.harvest(game, node)
+  eq(success, false, "a fallow vein refuses to be harvested again")
+  ok(contains(line, "played out"), "the refusal is logged")
+end
+
+function tests.nodesStepCountsDownAndReopensAFallowNode()
+  local level = { nodes = { Nodes.new(Nodes.ORE) } }
+  local node = level.nodes[1]
+  node.charges = 0
+  node.cooldown = 2
+  Nodes.step(level)
+  eq(node.cooldown, 1, "each step counts the cooldown down by one")
+  eq(node.charges, 0, "the vein stays fallow until its cooldown reaches zero")
+  Nodes.step(level)
+  eq(node.cooldown, 0, "the cooldown reaches zero on schedule")
+  eq(node.charges, Nodes.MAX_CHARGES, "reaching zero cooldown fully reopens the vein")
+end
+
+function tests.nodesFieldsSurviveSerialization()
+  local level = arena(21, 11)
+  local node = Nodes.new(Nodes.GEM, Crafting.FROST)
+  node.x, node.y = 4, 4
+  node.charges = 1
+  node.cooldown = 5
+  level.nodes = { node }
+  local restored = Level.fromData(level:toData())
+  eq(#restored.nodes, 1, "the node list survives a round trip")
+  eq(restored.nodes[1].kind, Nodes.GEM, "a node's kind survives a round trip")
+  eq(restored.nodes[1].element, Crafting.FROST, "a node's element survives a round trip")
+  eq(restored.nodes[1].charges, 1, "a node's charges survive a round trip")
+  eq(restored.nodes[1].cooldown, 5, "a node's cooldown survives a round trip")
+end
+
+function tests.nodeRendersItsGlyphWhenVisible()
+  local rendered = stagedGame(1, arena(21, 11), 3, 6)
+  local ore = Nodes.new(Nodes.ORE)
+  ore.x, ore.y = 5, 6
+  rendered.level.nodes = { ore }
+  rendered:computeVisible()
+  ok(contains(rendered:render(), "O"), "an ore vein on a visible cell renders as its glyph")
+end
+
+function tests.gameHarvestNodeAtAnOreVeinAddsEssenceAndSpendsACharge()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local ore = Nodes.new(Nodes.ORE)
+  ore.x, ore.y = 5, 5
+  game.level.nodes = { ore }
+  local before = game.player.essence
+  ok(game:harvestNode(), "harvesting the ore vein underfoot succeeds")
+  ok(game.player.essence > before, "harvesting an ore vein raises the player's essence")
+  eq(ore.charges, Nodes.MAX_CHARGES - 1, "harvesting spends one of the vein's charges")
+end
+
+function tests.gameHarvestNodeFailsWithoutANodeUnderfoot()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  ok(not game:harvestNode(), "harvesting empty ground fails")
+end
+
+function tests.gameHarvestNodeOnAFallowVeinFails()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local ore = Nodes.new(Nodes.ORE)
+  ore.x, ore.y, ore.charges = 5, 5, 0
+  game.level.nodes = { ore }
+  ok(not game:harvestNode(), "a fallow vein cannot be harvested")
+end
+
+function tests.autopilotHarvestsAnOreVeinWhenIdleAndStandingOnIt()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local ore = Nodes.new(Nodes.ORE)
+  ore.x, ore.y = 5, 5
+  game.level.nodes = { ore }
+  local before = game.player.essence
+  game:choosePlayerAction()
+  eq(ore.charges, Nodes.MAX_CHARGES - 1, "the autopilot harvests an unspent vein it stands on")
+  ok(game.player.essence > before, "the autopilot's harvest actually pays out essence")
+end
+
+function tests.autopilotSkipsAFallowNode()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local ore = Nodes.new(Nodes.ORE)
+  ore.x, ore.y, ore.charges = 5, 5, 0
+  game.level.nodes = { ore }
+  game:choosePlayerAction()
+  eq(ore.charges, 0, "the autopilot never touches a fallow node")
+end
+
+function tests.buildersNeverPlaceANodeOnTheEntranceFloor()
+  for seed = 1, 5 do
+    local level = Builder.build(1, Rng.new(seed), {})
+    eq(#level.nodes, 0, "no resource node appears on the entrance floor")
+  end
+end
+
+function tests.buildersAlwaysPlaceAtLeastOneNodeFromDepthTwoOn()
+  for seed = 1, 5 do
+    for depth = 2, 5 do
+      local level = Builder.build(depth, Rng.new(seed), {})
+      ok(#level.nodes >= 1, "every depth-2-and-deeper floor places at least one resource node")
+      ok(#level.nodes <= 2, "no floor places more than two resource nodes")
+      for _, node in ipairs(level.nodes) do
+        ok(node.kind == Nodes.ORE or node.kind == Nodes.GEM, "every placed node is a known kind")
+      end
+    end
+  end
+end
+
+local function corpsePlayer()
+  return { inventory = {}, statuses = {} }
+end
+
+function tests.corpsesSpawnsForAWildMonsterButNotForUndeadMimicOrBoss()
+  local level = { corpses = {} }
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 5, 5, 1)
+  Corpses.spawn(level, rat)
+  eq(#level.corpses, 1, "a wild monster leaves a corpse behind")
+
+  local zombie = Monsters.create(Monsters.byKey.zombie, 2, 6, 6, 4)
+  Corpses.spawn(level, zombie)
+  eq(#level.corpses, 1, "an undead monster crumbles to dust, leaving no corpse")
+
+  local mimic = Mimics.reveal(3, 7, 7, 4)
+  Corpses.spawn(level, mimic)
+  eq(#level.corpses, 1, "a mimic was never alive, so it leaves no corpse")
+
+  local warlord = Bosses.create(Bosses.byKey.warlord, 4, 8, 8)
+  Corpses.spawn(level, warlord)
+  eq(#level.corpses, 1, "a boss's own scripted loot drop replaces a corpse")
+end
+
+function tests.corpsesNutritionScalesWithTheFelledSpeciesMaxHpClampedToAFixedBand()
+  local bat = Monsters.create(Monsters.byKey.bat, 1, 5, 5, 1)
+  local batCorpse = Corpses.new(bat)
+  eq(batCorpse.nutrition, Corpses.NUTRITION_MIN, "a frail species clamps to the nutrition floor")
+
+  local troll = Monsters.create(Monsters.byKey.troll, 2, 5, 5, 5)
+  local trollCorpse = Corpses.new(troll)
+  eq(trollCorpse.nutrition, troll.maxHp * Corpses.NUTRITION_PER_HP, "a tougher species scales nutrition with maxHp")
+
+  local dragon = Monsters.create(Monsters.byKey.dragon, 3, 5, 5, 6)
+  local dragonCorpse = Corpses.new(dragon)
+  eq(dragonCorpse.nutrition, Corpses.NUTRITION_MAX, "an especially tough species clamps to the nutrition ceiling")
+end
+
+function tests.corpsesStepCountsDownAndRotsAwayEntirely()
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 5, 5, 1)
+  local level = { corpses = {} }
+  Corpses.spawn(level, rat)
+  local corpse = level.corpses[1]
+  for _ = 1, Corpses.DECAY_TURNS - 1 do Corpses.step(level) end
+  eq(#level.corpses, 1, "a corpse survives right up to its final round")
+  eq(corpse.decay, 1, "decay counts down by exactly one each step")
+  Corpses.step(level)
+  eq(#level.corpses, 0, "a corpse vanishes outright once its decay reaches zero")
+end
+
+function tests.corpsesGoesRottenPastItsThresholdButStaysButcherableUntilThen()
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 5, 5, 1)
+  local corpse = Corpses.new(rat)
+  ok(not Corpses.isRotten(corpse), "a freshly spawned corpse is not yet rotten")
+  corpse.decay = Corpses.ROT_TURNS
+  ok(Corpses.isRotten(corpse), "a corpse right at its rot threshold counts as rotten")
+  corpse.decay = Corpses.ROT_TURNS + 1
+  ok(not Corpses.isRotten(corpse), "a corpse one round above the threshold is still good")
+end
+
+function tests.corpsesButcheringFreshMeatAddsFoodToInventoryAndConsumesTheCorpse()
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 5, 5, 1)
+  local level = { corpses = {} }
+  Corpses.spawn(level, rat)
+  local corpse = level.corpses[1]
+  local game = { player = corpsePlayer(), level = level }
+  local line = Corpses.butcher(game, corpse)
+  eq(#level.corpses, 0, "butchering removes the corpse from the level")
+  eq(#game.player.inventory, 1, "butchering fresh meat adds a food item to the inventory")
+  eq(game.player.inventory[1].kind, Items.FOOD, "the yield is a food item")
+  eq(game.player.inventory[1].nutrition, corpse.nutrition, "the food item carries the corpse's own nutrition value")
+  ok(contains(line, "carve"), "a fresh butchering is logged as carving meat")
+  ok(#game.player.statuses == 0, "fresh meat never poisons the player")
+end
+
+function tests.corpsesButcheringRottenMeatPoisonsThePlayerInsteadAndStillConsumesTheCorpse()
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 5, 5, 1)
+  local level = { corpses = {} }
+  Corpses.spawn(level, rat)
+  local corpse = level.corpses[1]
+  corpse.decay = Corpses.ROT_TURNS
+  local game = { player = corpsePlayer(), level = level }
+  local line = Corpses.butcher(game, corpse)
+  eq(#level.corpses, 0, "butchering removes a rotten corpse too")
+  eq(#game.player.inventory, 0, "rotten meat yields no food item")
+  ok(Status.has(game.player, Status.POISON), "eating rotten meat poisons the player")
+  ok(contains(line, "rotted"), "a rotten butchering is logged as such")
+end
+
+function tests.corpseFieldsSurviveSerialization()
+  local level = arena(21, 11)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 5, 5, 1)
+  Corpses.spawn(level, rat)
+  level.corpses[1].x, level.corpses[1].y = 4, 4
+  local restored = Level.fromData(level:toData())
+  eq(#restored.corpses, 1, "the corpse list survives a round trip")
+  eq(restored.corpses[1].species, "rat", "a corpse's species survives a round trip")
+  eq(restored.corpses[1].nutrition, level.corpses[1].nutrition, "a corpse's nutrition survives a round trip")
+  eq(restored.corpses[1].decay, level.corpses[1].decay, "a corpse's decay survives a round trip")
+end
+
+function tests.corpseRendersItsGlyphWhenVisible()
+  local rendered = stagedGame(1, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 5, 6, 1)
+  Corpses.spawn(rendered.level, rat)
+  rendered:computeVisible()
+  ok(contains(rendered:render(), "%"), "a corpse on a visible cell renders as its glyph")
+end
+
+function tests.gameAwardKillLeavesACorpseForAWildMonsterButNotForUndeadOrMimic()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 4, 6, 1)
+  rat.hp = 0
+  game.level.entities = { rat }
+  game:awardKill(rat)
+  eq(#game.level.corpses, 1, "killing a wild monster through awardKill leaves a corpse")
+  eq(game.level.corpses[1].x, 4, "the corpse sits exactly where the monster fell")
+
+  local zombie = Monsters.create(Monsters.byKey.zombie, 2, 4, 7, 4)
+  zombie.hp = 0
+  game.level.entities = { zombie }
+  game:awardKill(zombie)
+  eq(#game.level.corpses, 1, "killing an undead monster through awardKill leaves no new corpse")
+end
+
+function tests.gameButcherCorpseAtFreshMeatFeedsThePlayerAndClearsTheCorpse()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 5, 5, 1)
+  Corpses.spawn(game.level, rat)
+  local before = #game.player.inventory
+  ok(game:butcherCorpse(), "butchering the corpse underfoot succeeds")
+  eq(#game.level.corpses, 0, "the corpse is gone after butchering")
+  eq(#game.player.inventory, before + 1, "the player's inventory gains the carved meat")
+end
+
+function tests.gameButcherCorpseFailsWithoutACorpseUnderfoot()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  ok(not game:butcherCorpse(), "butchering empty ground fails")
+end
+
+function tests.autopilotButchersAFreshCorpseWhenIdleAndStandingOnIt()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 5, 5, 1)
+  Corpses.spawn(game.level, rat)
+  local before = #game.player.inventory
+  game:choosePlayerAction()
+  eq(#game.level.corpses, 0, "the autopilot butchers a fresh corpse it stands on")
+  eq(#game.player.inventory, before + 1, "the autopilot's butchering actually yields food")
+end
+
+function tests.autopilotLeavesARottenCorpseAloneRatherThanRiskingPoison()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 5, 5, 1)
+  Corpses.spawn(game.level, rat)
+  game.level.corpses[1].decay = Corpses.ROT_TURNS
+  game:choosePlayerAction()
+  eq(#game.level.corpses, 1, "the autopilot never touches a rotten corpse")
+  ok(not Status.has(game.player, Status.POISON), "the autopilot never risks poisoning itself on rotten meat")
+end
+
+function tests.hungerCurrentDefaultsToCapForAFreshEntity()
+  eq(Hunger.current({}), Hunger.CAP, "an entity with no satiation field reads as fully fed")
+end
+
+function tests.hungerTierOfClassifiesEachBandAtItsBoundaries()
+  eq(Hunger.tierOf({ satiation = Hunger.CAP }), Hunger.FED, "a full meter is fed")
+  eq(Hunger.tierOf({ satiation = Hunger.HUNGRY_MAX + 1 }), Hunger.FED, "just above the hungry ceiling is still fed")
+  eq(Hunger.tierOf({ satiation = Hunger.HUNGRY_MAX }), Hunger.HUNGRY, "the hungry ceiling itself reads as hungry")
+  eq(Hunger.tierOf({ satiation = Hunger.WEAK_MAX + 1 }), Hunger.HUNGRY, "just above the weak ceiling is still hungry")
+  eq(Hunger.tierOf({ satiation = Hunger.WEAK_MAX }), Hunger.WEAK, "the weak ceiling itself reads as weak")
+  eq(Hunger.tierOf({ satiation = 1 }), Hunger.WEAK, "one point above zero is still weak, never starving")
+  eq(Hunger.tierOf({ satiation = 0 }), Hunger.STARVING, "zero itself is starving")
+end
+
+function tests.hungerAttackAndDefensePenaltiesEscalateByTier()
+  eq(Hunger.attackPenalty({ satiation = Hunger.CAP }), 0, "a fed body carries no attack penalty")
+  eq(Hunger.attackPenalty({ satiation = Hunger.HUNGRY_MAX }), 0, "merely hungry still carries no attack penalty")
+  eq(Hunger.attackPenalty({ satiation = Hunger.WEAK_MAX }), -2, "weak costs two points of attack")
+  eq(Hunger.attackPenalty({ satiation = 0 }), -4, "starving costs four points of attack")
+  eq(Hunger.defensePenalty({ satiation = Hunger.CAP }), 0, "a fed body carries no defense penalty")
+  eq(Hunger.defensePenalty({ satiation = Hunger.HUNGRY_MAX }), 0, "merely hungry still carries no defense penalty")
+  eq(Hunger.defensePenalty({ satiation = Hunger.WEAK_MAX }), -1, "weak costs one point of defense")
+  eq(Hunger.defensePenalty({ satiation = 0 }), -3, "starving costs three points of defense")
+end
+
+function tests.entityEffectiveAttackAndDefenseFoldInTheHungerPenalty()
+  local entity = Entity.new({ x = 1, y = 1, glyph = "@", name = "you", kind = "player", hp = 20, attack = 6, defense = 4 })
+  eq(entity:effectiveAttack(), 6, "a fresh entity with no satiation field carries no penalty")
+  entity.satiation = 0
+  eq(entity:effectiveAttack(), 2, "a starving body's attack penalty is live in effectiveAttack")
+  eq(entity:effectiveDefense(), 1, "a starving body's defense penalty is live in effectiveDefense")
+end
+
+function tests.hungerSuppressesRegenOnlyAtWeakOrWorse()
+  ok(not Hunger.suppressesRegen({ satiation = Hunger.HUNGRY_MAX }), "merely hungry never blocks passive regen")
+  ok(Hunger.suppressesRegen({ satiation = Hunger.WEAK_MAX }), "weak blocks passive regen")
+  ok(Hunger.suppressesRegen({ satiation = 0 }), "starving blocks passive regen")
+end
+
+function tests.hungerTickDrainsByOneAndLogsOnlyOnATierCrossing()
+  local entity = { satiation = Hunger.HUNGRY_MAX + 2, hp = 20 }
+  eq(Hunger.tick(entity), nil, "a drain turn that stays within its tier reports no line")
+  eq(entity.satiation, Hunger.HUNGRY_MAX + 1, "the drain was still deducted even without a tier crossing")
+  eq(Hunger.tick(entity), "you feel hungry", "crossing down into hungry is announced")
+  eq(entity.satiation, Hunger.HUNGRY_MAX, "the meter keeps draining turn over turn")
+  eq(entity.hp, 20, "hunger alone never costs hp above starving")
+end
+
+function tests.hungerTickBitesForOneHpEveryRoundWhileStarving()
+  local entity = { satiation = 1, hp = 10 }
+  eq(Hunger.tick(entity), "you are starving", "crossing down into starving is announced")
+  eq(entity.satiation, 0, "starving is a floor, not a negative value")
+  eq(entity.hp, 9, "reaching starving costs a point of hp immediately")
+  eq(Hunger.tick(entity), "you are starving", "starving keeps announcing and biting every round it holds")
+  eq(entity.hp, 8, "a second starving round costs a second point of hp")
+end
+
+function tests.hungerEatCapsAtTheCeilingAndWastesAnOverfullMealIntoBloat()
+  local entity = { satiation = Hunger.CAP, statuses = {} }
+  local bloated = Hunger.eat(entity, 400)
+  ok(bloated, "eating while already at the cap reports the meal as wasted")
+  eq(entity.satiation, Hunger.CAP, "an overfull meal never lifts satiation past the cap")
+  ok(Status.has(entity, Status.SLOW), "an overfull meal leaves the diner slowed")
+end
+
+function tests.hungerEatBelowTheCeilingBanksNutritionWithNoWaste()
+  local entity = { satiation = Hunger.HUNGRY_MAX, statuses = {} }
+  local bloated = Hunger.eat(entity, 100)
+  ok(not bloated, "an ordinary meal below the cap is never wasted")
+  eq(entity.satiation, Hunger.HUNGRY_MAX + 100, "the full nutrition value is banked")
+  ok(not Status.has(entity, Status.SLOW), "an ordinary meal never bloats the diner")
+end
+
+function tests.hungerEatClampsAMealThatWouldOverflowPastTheCapWithoutBloating()
+  local entity = { satiation = Hunger.CAP - 50, statuses = {} }
+  local bloated = Hunger.eat(entity, 400)
+  ok(not bloated, "a meal eaten while still short of the cap is never wasted, even if it overflows")
+  eq(entity.satiation, Hunger.CAP, "the surplus past the cap is simply clamped away")
+  ok(not Status.has(entity, Status.SLOW), "clamping alone never bloats the diner")
+end
+
+function tests.gameHungerTorchTickSuppressesRingRegenOnceThePlayerIsWeak()
+  local game = Game.new(1)
+  Items.equipRing(Artifacts.create("ring_of_the_tide"), game.player)
+  game.player.hp = game.player.maxHp - 10
+  game.player.satiation = Hunger.WEAK_MAX
+  local before = game.player.hp
+  game:hungerTorchTick()
+  eq(game.player.hp, before, "a weak player's ring of the tide grants no regen this turn")
+end
+
+function tests.gameUseItemEatingFoodRestoresSatiationAndLogsTheMeal()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.satiation = 200
+  game.player.inventory = { Items.food("ration", 400) }
+  ok(game:useItem(1), "eating a carried ration succeeds")
+  eq(game.player.satiation, 600, "the ration's full nutrition is banked")
+  eq(#game.player.inventory, 0, "the eaten ration leaves the inventory")
+  ok(contains(game.log:last(), "eat"), "the meal is logged")
+end
+
+function tests.gameUseItemEatingFoodWhileAlreadyFullAppliesSlowAndLogsBloat()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.satiation = Hunger.CAP
+  game.player.inventory = { Items.food("ration", 400) }
+  ok(game:useItem(1), "eating while already full still succeeds")
+  eq(game.player.satiation, Hunger.CAP, "an overfull meal never lifts satiation past the cap")
+  ok(Status.has(game.player, Status.SLOW), "eating past the cap leaves the player bloated and slow")
+  ok(contains(game.log:last(), "bloated"), "the wasted meal is logged as bloating")
+end
+
+function tests.reanimationRaiseCreatesAThrallAdjacentToThePlayerAndSpendsTheCorpseAndSanity()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 5, 5, 1)
+  Corpses.spawn(game.level, rat)
+  local corpse = game.level.corpses[1]
+  local sanityBefore = game.player.sanity
+  local thrall = Reanimation.raise(game, corpse)
+  ok(thrall ~= nil, "raising a fresh corpse succeeds")
+  eq(thrall.kind, "thrall", "a raised thrall is tagged with the thrall kind")
+  eq(math.max(math.abs(thrall.x - 5), math.abs(thrall.y - 5)), 1, "the thrall rises adjacent to the player")
+  eq(#game.level.corpses, 0, "raising the corpse consumes it")
+  eq(game.player.sanity, sanityBefore - Reanimation.SANITY_COST, "raising a thrall costs a fixed bite of sanity")
+end
+
+function tests.reanimationRaiseRefusesARottenCorpseWithoutSpendingAnything()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 5, 5, 1)
+  Corpses.spawn(game.level, rat)
+  game.level.corpses[1].decay = Corpses.ROT_TURNS
+  local sanityBefore = game.player.sanity
+  local thrall, line = Reanimation.raise(game, game.level.corpses[1])
+  eq(thrall, nil, "a rotten corpse cannot be raised")
+  eq(#game.level.corpses, 1, "a refused raise leaves the corpse in place")
+  eq(game.player.sanity, sanityBefore, "a refused raise spends no sanity")
+  ok(contains(line, "rotted"), "the refusal explains the corpse has rotted too far")
+end
+
+function tests.reanimationRaiseRefusesWithoutEnoughSanityAndLeavesTheCorpseAlone()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 5, 5, 1)
+  Corpses.spawn(game.level, rat)
+  game.player.sanity = Reanimation.SANITY_COST - 1
+  local thrall, line = Reanimation.raise(game, game.level.corpses[1])
+  eq(thrall, nil, "raising fails when sanity is too low to pay the cost")
+  eq(#game.level.corpses, 1, "a refused raise for lack of sanity leaves the corpse untouched")
+  ok(contains(line, "mind"), "the refusal blames the player's own frail grip on their mind")
+end
+
+function tests.reanimationRaiseScalesThrallStatsDownFromTheOriginSpecies()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local troll = Monsters.create(Monsters.byKey.troll, 1, 5, 5, 5)
+  Corpses.spawn(game.level, troll)
+  local thrall = Reanimation.raise(game, game.level.corpses[1])
+  eq(thrall.hp, math.floor(Monsters.byKey.troll.hp * Reanimation.HP_FRACTION),
+    "a thrall's hp is a fixed fraction of the living species' own hp")
+  eq(thrall.attack, Monsters.byKey.troll.attack - Reanimation.ATTACK_PENALTY,
+    "a thrall's attack is blunted by a fixed amount from the living species")
+  eq(thrall.defense, Monsters.byKey.troll.defense, "a thrall keeps the living species' own defense")
+end
+
+function tests.reanimationRaiseFallsBackToAPlainSkeletonForAnUnrecognisedSpecies()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.level.corpses[1] = { x = 5, y = 5, species = "unknown-thing", name = "unknown-thing", decay = Corpses.DECAY_TURNS }
+  local thrall = Reanimation.raise(game, game.level.corpses[1])
+  ok(thrall ~= nil, "a corpse of an unrecognised species can still be raised")
+  eq(thrall.hp, 8, "an unrecognised species falls back to a flat skeleton hp")
+  eq(thrall.attack, 2, "an unrecognised species falls back to a flat skeleton attack")
+end
+
+function tests.reanimationRaiseRetiresAnEarlierThrallWhenRaisingAnother()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local rat1 = Monsters.create(Monsters.byKey.rat, 1, 5, 5, 1)
+  Corpses.spawn(game.level, rat1)
+  local first = Reanimation.raise(game, game.level.corpses[1])
+  local rat2 = Monsters.create(Monsters.byKey.rat, 2, 6, 5, 1)
+  Corpses.spawn(game.level, rat2)
+  local second = Reanimation.raise(game, game.level.corpses[1])
+  ok(not first:isAlive(), "raising a new thrall retires the earlier one")
+  ok(second:isAlive(), "the freshly raised thrall is alive")
+  local alive = 0
+  for _, e in ipairs(game.level.entities) do
+    if e.kind == "thrall" and e:isAlive() then alive = alive + 1 end
+  end
+  eq(alive, 1, "only one thrall is ever alive at a time")
+end
+
+function tests.reanimationActAttacksAnAdjacentHostileMonsterAndCanKillIt()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local chieftain = Monsters.create(Monsters.byKey.chieftain, 1, 5, 5, 6)
+  Corpses.spawn(game.level, chieftain)
+  local thrall = Reanimation.raise(game, game.level.corpses[1])
+  local rat = Monsters.create(Monsters.byKey.rat, 50, thrall.x + 1, thrall.y, 1)
+  game.level.entities[#game.level.entities + 1] = rat
+  local xpBefore = game.player.xp
+  Reanimation.act(game, thrall)
+  eq(rat.hp, 0, "a thrall's hit kills the weak rat standing next to it")
+  ok(game.player.xp > xpBefore, "the player is credited xp for its thrall's kill")
+end
+
+function tests.reanimationActAdvancesOnAVisibleMonsterItCannotYetReach()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local rat0 = Monsters.create(Monsters.byKey.rat, 1, 5, 5, 1)
+  Corpses.spawn(game.level, rat0)
+  local thrall = Reanimation.raise(game, game.level.corpses[1])
+  local orc = Monsters.create(Monsters.byKey.orc, 50, thrall.x + 5, thrall.y, 1)
+  game.level.entities[#game.level.entities + 1] = orc
+  local startX = thrall.x
+  Reanimation.act(game, thrall)
+  ok(thrall.x > startX, "the thrall closes the distance to a monster it can see but not reach")
+end
+
+function tests.reanimationActIgnoresAMonsterBeyondItsSightRadius()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  local rat0 = Monsters.create(Monsters.byKey.rat, 1, 3, 3, 1)
+  Corpses.spawn(game.level, rat0)
+  local thrall = Reanimation.raise(game, game.level.corpses[1])
+  local orc = Monsters.create(Monsters.byKey.orc, 50, 19, 9, 1)
+  game.level.entities[#game.level.entities + 1] = orc
+  local startX, startY = thrall.x, thrall.y
+  Reanimation.act(game, thrall)
+  eq(thrall.x, startX, "a monster far outside sight range does not pull the thrall off course (x)")
+  eq(thrall.y, startY, "a monster far outside sight range does not pull the thrall off course (y)")
+end
+
+-- Same gap as companionActBlindedCompanionOnlyDetectsAnAdjacentHostileNot
+-- OneWithinItsSightRadius, but for Reanimation.act's own nearestHostile.
+function tests.reanimationActBlindedThrallOnlyDetectsAnAdjacentHostileNotOneWithinItsSightRadius()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local rat0 = Monsters.create(Monsters.byKey.rat, 1, 5, 5, 1)
+  Corpses.spawn(game.level, rat0)
+  local thrall = Reanimation.raise(game, game.level.corpses[1])
+  local farOrc = Monsters.create(Monsters.byKey.orc, 50, thrall.x + 5, thrall.y, 1)
+  game.level.entities[#game.level.entities + 1] = farOrc
+  Status.apply(thrall, Status.BLIND, 6, 1)
+  local startX = thrall.x
+  Reanimation.act(game, thrall)
+  eq(thrall.x, startX, "a blinded thrall loses a sighting well within its listed sight radius")
+
+  local rat = Monsters.create(Monsters.byKey.rat, 51, thrall.x + 1, thrall.y, 1)
+  game.level.entities[#game.level.entities + 1] = rat
+  local ratHpBefore = rat.hp
+  Reanimation.act(game, thrall)
 end
 
 local order = {
