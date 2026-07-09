@@ -1665,6 +1665,318 @@ function tests.summonRespectsPopulationCap()
   local minionB = Monsters.create(Monsters.byKey.zombie, 3, 6, 7, 4)
   minionA.summonedBy = necro.id
   minionB.summonedBy = necro.id
+  game.level.entities = { necro, minionA, minionB }
+  local acted = Abilities.tryAct(game, necro)
+  eq(acted, false, "a necromancer already at its summon cap does not summon a third")
+  eq(#game.level.entities, 3, "the level still has exactly the two existing minions")
+end
+
+function tests.curseAtRangeHurtsAndWeakens()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local shaman = Monsters.create(Monsters.byKey.shaman, 1, 7, 6, 4)
+  game.level.entities = { shaman }
+  local hpBefore = game.player.hp
+  local acted = Abilities.tryAct(game, shaman)
+  eq(acted, true, "a shaman with a clear shot curses instead of moving")
+  eq(game.player.hp, hpBefore - 1, "the curse bolt runs through Combat.damage (shaman attack 2 minus the player's base defense 1)")
+  eq(Status.has(game.player, Status.WEAKEN), true, "the curse also weakens the player")
+  eq(shaman.cooldown, 4, "casting the curse starts its cooldown")
+  ok(contains(game.log:last(), "curses you for 1"), "the logged amount matches the mitigated damage, not a flat number")
+end
+
+-- The curse bolt used to bypass Combat.damage entirely (a flat, unmitigated
+-- subtraction from hp), so a shaman hit for the same 3 no matter how armored
+-- the player was, never broke a melee combo, and never wore armor - every
+-- other monster-on-player attack (monsterMelee, monsterShoot, mimic/grave
+-- ambush) already ran through Combat.damage + Momentum.onDamaged +
+-- Durability.wearArmor. These three lock in the fix.
+function tests.curseDamageIsMitigatedByThePlayersDefenseLikeAnyOtherAttack()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local shaman = Monsters.create(Monsters.byKey.shaman, 1, 7, 6, 4)
+  game.level.entities = { shaman }
+  game.player.defense = game.player.defense + 10
+  local hpBefore = game.player.hp
+  Abilities.tryAct(game, shaman)
+  eq(game.player.hp, hpBefore - 1, "a shaman's attack (2) minus a heavily-defended player floors at Combat.damage's minimum of 1, not a flat 3")
+end
+
+function tests.curseBreaksThePlayersMeleeMomentumStack()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local shaman = Monsters.create(Monsters.byKey.shaman, 1, 7, 6, 4)
+  game.level.entities = { shaman }
+  game.player.combo = 4
+  Abilities.tryAct(game, shaman)
+  eq(Momentum.stacks(game.player), 0, "a landed curse bolt snaps momentum to zero exactly like a melee hit or a breath attack")
+end
+
+function tests.curseWearsThePlayersEquippedArmor()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local shaman = Monsters.create(Monsters.byKey.shaman, 1, 7, 6, 4)
+  game.level.entities = { shaman }
+  game.player.armor = { name = "chainmail", kind = Items.ARMOR, power = 2, defense = 2 }
+  Durability.ensure(game.player.armor)
+  local durabilityBefore = game.player.armor.durability
+  Abilities.tryAct(game, shaman)
+  eq(game.player.armor.durability, durabilityBefore - 1, "the curse wears equipped armor exactly like a landed melee or breath hit does")
+end
+
+function tests.curseWithheldWhenAdjacent()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local shaman = Monsters.create(Monsters.byKey.shaman, 1, 4, 6, 4)
+  game.level.entities = { shaman }
+  local acted = Abilities.tryAct(game, shaman)
+  eq(acted, false, "a shaman standing next to the player withholds its curse")
+end
+
+function tests.shriekAtRangeBlindsThePlayer()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local banshee = Monsters.create(Monsters.byKey.banshee, 1, 7, 6, 5)
+  game.level.entities = { banshee }
+  eq(Status.has(game.player, Status.BLIND), false, "the player starts able to see")
+  local acted = Abilities.tryAct(game, banshee)
+  eq(acted, true, "a banshee with a clear shot shrieks instead of moving")
+  eq(Status.has(game.player, Status.BLIND), true, "the shriek blinds the player")
+  eq(banshee.cooldown, 6, "shrieking starts its cooldown")
+  ok(contains(game.log:last(), "blinds you"), "the shriek is logged")
+end
+
+function tests.shriekWithheldWhenAdjacent()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local banshee = Monsters.create(Monsters.byKey.banshee, 1, 4, 6, 5)
+  game.level.entities = { banshee }
+  local acted = Abilities.tryAct(game, banshee)
+  eq(acted, false, "a banshee standing next to the player withholds its shriek")
+  eq(Status.has(game.player, Status.BLIND), false, "no shriek means no blindness")
+end
+
+function tests.shriekIsUnavailableOutOfRange()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local banshee = Monsters.create(Monsters.byKey.banshee, 1, 20, 6, 5)
+  game.level.entities = { banshee }
+  local acted = Abilities.tryAct(game, banshee)
+  eq(acted, false, "a banshee out of shriek range falls through to its base ai")
+  eq(Status.has(game.player, Status.BLIND), false, "no shriek means no blindness")
+end
+
+function tests.shriekBlindnessReducesTheVictimsEffectiveSightRadius()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local banshee = Monsters.create(Monsters.byKey.banshee, 1, 7, 6, 5)
+  game.level.entities = { banshee }
+  Abilities.tryAct(game, banshee)
+  eq(game:effectiveRadius(), 1, "blind (also inflicted by a banshee) still narrows sight to game.lua's own radius")
+end
+
+function tests.abilityCooldownBlocksImmediateReuse()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local shaman = Monsters.create(Monsters.byKey.shaman, 1, 7, 6, 4)
+  game.level.entities = { shaman }
+  Abilities.tryAct(game, shaman)
+  local hpAfterFirst = game.player.hp
+  local acted = Abilities.tryAct(game, shaman)
+  eq(acted, false, "an ability on cooldown does not fire again")
+  eq(game.player.hp, hpAfterFirst, "no further damage is dealt while on cooldown")
+  for _ = 1, 4 do Abilities.tickCooldown(shaman) end
+  eq(shaman.cooldown, 0, "four ticks fully drains a four-turn cooldown")
+  local actedAgain = Abilities.tryAct(game, shaman)
+  eq(actedAgain, true, "the ability is usable again once its cooldown has ticked down")
+end
+
+function tests.healerMendsNeediestAlly()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local cleric = Monsters.create(Monsters.byKey.cleric, 1, 6, 6, 5)
+  local hurt = Monsters.create(Monsters.byKey.rat, 2, 8, 6, 5)
+  hurt.hp = 1
+  game.level.entities = { cleric, hurt }
+  local acted = Abilities.tryAct(game, cleric)
+  eq(acted, true, "a cleric with a hurt ally in sight heals instead of moving")
+  eq(hurt.hp, 7, "healing restores the fixed amount, capped at max hp")
+  eq(cleric.cooldown, 5, "healing starts its cooldown")
+end
+
+function tests.healerSkipsWhenAlliesAreHealthy()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local cleric = Monsters.create(Monsters.byKey.cleric, 1, 6, 6, 5)
+  local ally = Monsters.create(Monsters.byKey.rat, 2, 8, 6, 5)
+  game.level.entities = { cleric, ally }
+  local acted = Abilities.tryAct(game, cleric)
+  eq(acted, false, "a cleric with no hurt allies falls through to its base ai")
+end
+
+function tests.rallyBuffsAdjacentAllies()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local chieftain = Monsters.create(Monsters.byKey.chieftain, 1, 10, 6, 6)
+  local grunt = Monsters.create(Monsters.byKey.goblin, 2, 11, 6, 6)
+  game.level.entities = { chieftain, grunt }
+  eq(Status.has(grunt, Status.STRENGTH), false, "the grunt starts unbuffed")
+  local acted = Abilities.tryAct(game, chieftain)
+  eq(acted, true, "a chieftain next to an unbuffed ally rallies instead of moving")
+  eq(Status.has(grunt, Status.STRENGTH), true, "rallying buffs the adjacent ally")
+  eq(Status.has(chieftain, Status.STRENGTH), true, "rallying also buffs the chieftain itself")
+  eq(chieftain.cooldown, 8, "rallying starts its cooldown")
+end
+
+function tests.rallySkipsWhenNoUnbuffedAlliesAdjacent()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local chieftain = Monsters.create(Monsters.byKey.chieftain, 1, 10, 6, 6)
+  game.level.entities = { chieftain }
+  local acted = Abilities.tryAct(game, chieftain)
+  eq(acted, false, "a chieftain with no adjacent allies falls through to its base ai")
+end
+
+function tests.healerNeverMendsThePlayersOwnCompanionHirelingOrThrall()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local cleric = Monsters.create(Monsters.byKey.cleric, 1, 6, 6, 5)
+  local companion = Companions.summon(game, "hound")
+  companion.x, companion.y = 8, 6
+  companion.hp = 1
+  game.level.entities = { cleric, companion }
+  local acted = Abilities.tryAct(game, cleric)
+  eq(acted, false, "a hurt companion is not a valid heal target, so the cleric falls through instead")
+  eq(companion.hp, 1, "the player's own companion is left exactly as hurt as it was")
+end
+
+function tests.rallyNeverBuffsThePlayersOwnCompanionHirelingOrThrall()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local chieftain = Monsters.create(Monsters.byKey.chieftain, 1, 10, 6, 6)
+  local companion = Companions.summon(game, "hound")
+  companion.x, companion.y = 11, 6
+  game.level.entities = { chieftain, companion }
+  local acted = Abilities.tryAct(game, chieftain)
+  eq(acted, false, "an adjacent companion is not a valid rally target, so the chieftain falls through instead")
+  eq(Status.has(companion, Status.STRENGTH), false, "the player's own companion is never buffed by a hostile chieftain")
+  eq(Status.has(chieftain, Status.STRENGTH), false, "the chieftain does not even buff itself when it has no monster ally to rally")
+end
+
+function tests.footpadStealsThenFlees()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local footpad = Monsters.create(Monsters.byKey.footpad, 1, 4, 6, 4)
+  game.level.entities = { footpad }
+  local before = #game.player.inventory
+  local acted = Abilities.tryAct(game, footpad)
+  eq(acted, true, "an adjacent footpad steals instead of attacking")
+  eq(#game.player.inventory, before - 1, "the stolen item leaves the player's inventory")
+  eq(footpad.fleeing, true, "the footpad starts fleeing after the theft")
+  ok(contains(game.log:last(), "steals"), "the theft is logged")
+
+  local xBefore = footpad.x
+  local actedAgain = Abilities.tryAct(game, footpad)
+  eq(actedAgain, true, "a fleeing footpad keeps acting through its ability")
+  eq(#game.player.inventory, before - 1, "a fleeing footpad does not steal again")
+  ok(footpad.x ~= xBefore, "a fleeing footpad moves away from the player")
+end
+
+function tests.footpadWithNothingToStealStillFlees()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.inventory = {}
+  local footpad = Monsters.create(Monsters.byKey.footpad, 1, 4, 6, 4)
+  game.level.entities = { footpad }
+  local acted = Abilities.tryAct(game, footpad)
+  eq(acted, true, "a footpad with nothing to steal still consumes its turn")
+  eq(footpad.fleeing, true, "it flees even without a prize")
+  ok(contains(game.log:last(), "nothing worth stealing"), "the empty-handed theft attempt is logged")
+end
+
+function tests.slimeSplitsOnSurvivedHit()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local slime = Monsters.create(Monsters.byKey.slime, 1, 4, 6, 4)
+  game.level.entities = { slime }
+  eq(slime.hp, 13, "a depth-4 slime spawns with its bonus hp")
+  game:playerAttack(slime)
+  eq(slime:isAlive(), true, "the slime survives a single hit")
+  eq(slime.maxHp, 6, "a surviving split halves the slime's max hp")
+  eq(slime.hp, 6, "the split slime is left at its new max hp")
+  eq(#game.level.entities, 2, "the split spawns a clone next to the original")
+  local clone = game.level.entities[2]
+  eq(clone.species, "slime", "the clone is the same species as the original")
+  eq(clone.maxHp, 6, "the clone shares the halved max hp")
+  eq(clone.splitGen, 1, "the clone is tagged as a first-generation split")
+  ok(contains(game.log:last(), "splits in two"), "the split is logged")
+end
+
+function tests.splitCapsAtTwoGenerations()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local slime = Monsters.create(Monsters.byKey.slime, 1, 4, 6, 4)
+  slime.splitGen = 2
+  game.level.entities = { slime }
+  local before = #game.level.entities
+  local line = Abilities.onHit(game, slime)
+  eq(line, nil, "a slime that already split twice does not split again")
+  eq(#game.level.entities, before, "no clone is added once the split cap is reached")
+end
+
+function tests.takeMonsterTurnPrefersAbilityOverMovement()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local necro = Monsters.create(Monsters.byKey.necromancer, 1, 6, 6, 4)
+  game.level.entities = { necro }
+  game:takeMonsterTurn(necro)
+  eq(necro.x, 6, "summoning consumes the turn instead of the necromancer's flee movement")
+  eq(necro.y, 6, "summoning leaves the necromancer's y unchanged too")
+  eq(#game.level.entities, 2, "the full turn pipeline invokes the summon ability")
+end
+
+function tests.takeMonsterTurnFallsBackToAiWhenOnCooldown()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local necro = Monsters.create(Monsters.byKey.necromancer, 1, 6, 6, 4)
+  necro.cooldown = 3
+  game.level.entities = { necro }
+  game:takeMonsterTurn(necro)
+  eq(#game.level.entities, 1, "no minion is summoned while the ability is on cooldown")
+  eq(necro.cooldown, 2, "the cooldown ticks down even on a turn spent fleeing")
+  ok(necro.x ~= 6 or necro.y ~= 6, "the necromancer falls back to its flee ai instead")
+end
+
+function tests.abilityFieldsSurviveSerialization()
+  local necro = Monsters.create(Monsters.byKey.necromancer, 5, 6, 6, 4)
+  necro.cooldown = 3
+  necro.fleeing = true
+  necro.splitGen = 1
+  necro.summonedBy = 2
+  necro.stolen = Items.potion(10)
+  local restored = Entity.fromData(necro:toData())
+  eq(restored.ability, "summon", "the ability tag survives a round trip")
+  eq(restored.summonSpecies, "zombie", "the summon species survives a round trip")
+  eq(restored.cooldown, 3, "cooldown survives a round trip")
+  eq(restored.fleeing, true, "the fleeing flag survives a round trip")
+  eq(restored.splitGen, 1, "the split generation survives a round trip")
+  eq(restored.summonedBy, 2, "the summoner id survives a round trip")
+  eq(restored.stolen.name, "potion of healing", "a stolen item's data survives a round trip")
+end
+
+function tests.statusEffectKillGrantsXpAndLogsDeath()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 15, 9, 1)
+  Status.apply(rat, Status.POISON, 1, 50)
+  game.level.entities = { rat }
+  local xpBefore = game.player.xp
+  game:takeMonsterTurn(rat)
+  eq(#game.level.entities, 0, "a monster that dies to its own status tick is swept from the level")
+  eq(game.player.xp, xpBefore + Monsters.xpFor(rat), "dying to a status effect still grants its xp")
+  ok(contains(game.log:recent(4)[1] or "", "dies") or contains(game.log:recent(4)[2] or "", "dies")
+    or contains(game.log:recent(4)[3] or "", "dies") or contains(game.log:recent(4)[4] or "", "dies"),
+    "the status-effect kill is logged as a death")
+end
+
+function tests.hazardKillDuringMonsterTurnGrantsXp()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 15, 9, 1)
+  rat.hp = 1
+  Hazards.ignite(game.level, rat.x, rat.y, 3, 50)
+  game.level.entities = { rat }
+  local xpBefore = game.player.xp
+  game:takeMonsterTurn(rat)
+  eq(#game.level.entities, 0, "a monster that dies standing in fire is swept from the level")
+  eq(game.player.xp, xpBefore + Monsters.xpFor(rat), "dying to a hazard still grants its xp")
+end
+
+function tests.hazardStepRunsOncePerPlayerRound()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local px, py = game.player.x, game.player.y
+  Hazards.ignite(game.level, px, py, 1, 3)
+  local hpBefore = game.player.hp
+  game:autoStep()
+  eq(game.player.hp, hpBefore - 3, "the player takes hazard damage while standing in fire on their turn")
+  eq(Hazards.at(game.level, px, py, Hazards.FIRE), nil,
+    "the hazard's duration is spent by the environmental step at the end of the round")
 end
 
 function tests.saveLoadRoundTrip()
@@ -1710,11 +2022,189 @@ function tests.autoplayDescends()
     end
     return game
   end
-  local run = playout(2024)
+  -- Seed re-picked when the blind potion/trap effect joined the shared loot
+  -- and trap-effect tables (builder.lua): appending a new outcome changes the
+  -- denominator of every rng:range(1, #effects) draw those tables feed, which
+  -- reshuffles the whole downstream procedural sequence for any fixed seed -
+  -- 2024 itself did not get more dangerous, its particular draw just moved.
+  local run = playout(2025)
   ok(run.depth >= 3, "the autopilot descends several levels")
-  local again = playout(2024)
+  local again = playout(2025)
   eq(again.depth, run.depth, "the autopilot reaches the same depth on the same seed")
   eq(again.turn, run.turn, "the autopilot takes the same number of turns")
+end
+
+function tests.amuletSpawnsOnFinalFloorOnly()
+  local finalLevel = Builder.build(Builder.MAX_DEPTH, Rng.new(999), {})
+  local finalCount = 0
+  for _, ground in ipairs(finalLevel.floorItems) do
+    if ground.item.kind == Items.AMULET then finalCount = finalCount + 1 end
+  end
+  eq(finalCount, 1, "exactly one amulet is placed on the final floor")
+
+  local shallowLevel = Builder.build(Builder.MAX_DEPTH - 1, Rng.new(999), {})
+  local shallowCount = 0
+  for _, ground in ipairs(shallowLevel.floorItems) do
+    if ground.item.kind == Items.AMULET then shallowCount = shallowCount + 1 end
+  end
+  eq(shallowCount, 0, "no amulet appears above the final floor")
+end
+
+function tests.descendIsBlockedAtTheFinalFloor()
+  local game = Game.new(555)
+  game.depth = game.maxDepth
+  game.level = game.dungeon:get(game.maxDepth)
+  game.player.x, game.player.y = game.level.downX, game.level.downY
+  local result = game:descend()
+  eq(result, false, "descend fails once at the final floor")
+  eq(game.depth, game.maxDepth, "depth is unchanged after a blocked descend")
+  ok(contains(game.log:last(), "rock"), "a message explains why the descent is blocked")
+end
+
+function tests.ascendWithoutAmuletDoesNotWin()
+  local game = Game.new(7)
+  game.player.x, game.player.y = game.level.upX, game.level.upY
+  local result = game:ascend()
+  eq(result, true, "climbing out at depth 1 is still a valid move")
+  eq(game.won, false, "climbing out without the amulet does not win the game")
+end
+
+function tests.ascendWithAmuletWinsTheGame()
+  local game = Game.new(7)
+  game.player.inventory[#game.player.inventory + 1] = Items.amulet()
+  game.player.x, game.player.y = game.level.upX, game.level.upY
+  local result = game:ascend()
+  eq(result, true, "climbing out at depth 1 with the amulet succeeds")
+  eq(game.won, true, "carrying the amulet to the surface wins the game")
+  ok(contains(game.log:last(), "win"), "the victory is logged")
+end
+
+function tests.wonGameHaltsTheAutopilot()
+  local game = Game.new(7)
+  game.won = true
+  local turnBefore = game.turn
+  game:autoStep()
+  eq(game.turn, turnBefore, "autoStep is a no-op once the game is already won")
+end
+
+function tests.autopilotFetchesTheAmuletAndWins()
+  local function playout(seed)
+    local game = Game.new(seed, { maxDepth = 3 })
+    for _ = 1, 900 do
+      if not game.player:isAlive() or game.won then break end
+      game:autoStep()
+    end
+    return game
+  end
+  local run = playout(67)
+  ok(run.player:isAlive(), "the autopilot survives the round trip on this seed")
+  eq(run.won, true, "the autopilot retrieves the amulet and escapes")
+  eq(run.depth, 1, "winning leaves the player back at depth 1")
+  ok(run:hasAmulet(), "the amulet is still in the winning player's inventory")
+  local again = playout(67)
+  eq(again.turn, run.turn, "the winning playthrough takes the same number of turns on the same seed")
+end
+
+function tests.shopPriceCatalogScalesWithPower()
+  local base = Shop.priceOf(Items.weapon("dagger", 2))
+  local strong = Shop.priceOf(Items.weapon("battle axe", 5))
+  ok(strong > base, "a more powerful weapon costs more at the shop")
+  eq(Shop.priceOf(Items.potionOf("heal")), 15, "a catalogued potion has its fixed price")
+  eq(Shop.sellValue(Items.potionOf("heal")), 7, "selling nets half the catalog price, rounded down")
+end
+
+function tests.shopStockRollsAffordableWares()
+  local wares = Shop.stock(Rng.new(7))
+  ok(#wares >= 3 and #wares <= 5, "a shop rolls three to five wares")
+  for _, item in ipairs(wares) do
+    ok(Shop.priceOf(item) > 0, "every ware has a positive price")
+  end
+end
+
+function tests.goldPickupAddsToWalletNotInventory()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  local before = #game.player.inventory
+  local goldBefore = game.player.gold
+  game.level.floorItems = { { x = 4, y = 3, item = Items.gold(35) } }
+  game:movePlayer(1, 0)
+  eq(game.player.gold, goldBefore + 35, "walking onto gold adds it to the wallet")
+  eq(#game.player.inventory, before, "gold never occupies an inventory slot")
+  eq(#game.level.floorItems, 0, "the gold pile is removed from the floor")
+end
+
+function tests.affordableWareIsBoughtAutomaticallyOnPickup()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  local keeper = Monsters.create(Monsters.byKey.shopkeeper, 1, 10, 10, 4)
+  game.level.entities = { keeper }
+  game.player.gold = 50
+  local before = #game.player.inventory
+  game.level.floorItems = { { x = 4, y = 3, item = Items.potionOf("heal"), price = 15, shopId = keeper.id } }
+  game:movePlayer(1, 0)
+  eq(game.player.gold, 35, "the ware's stamped price is deducted from the wallet")
+  eq(#game.player.inventory, before + 1, "the bought ware joins the inventory")
+  eq(#game.level.floorItems, 0, "the purchased ware leaves the ground")
+end
+
+function tests.unaffordableWareStaysOnTheGround()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  local keeper = Monsters.create(Monsters.byKey.shopkeeper, 1, 10, 10, 4)
+  game.level.entities = { keeper }
+  game.player.gold = 5
+  local before = #game.player.inventory
+  game.level.floorItems = { { x = 4, y = 3, item = Items.potionOf("heal"), price = 15, shopId = keeper.id } }
+  game:movePlayer(1, 0)
+  eq(game.player.gold, 5, "an unaffordable ware is never bought, so no gold changes hands")
+  eq(#game.player.inventory, before, "the ware never reaches the inventory")
+  eq(#game.level.floorItems, 1, "the unbought ware is left in place")
+end
+
+function tests.deadKeeperMakesWaresFreeToLoot()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  local keeper = Monsters.create(Monsters.byKey.shopkeeper, 1, 10, 10, 4)
+  keeper.hp = 0
+  game.level.entities = { keeper }
+  game.player.gold = 0
+  local before = #game.player.inventory
+  game.level.floorItems = { { x = 4, y = 3, item = Items.potionOf("heal"), price = 15, shopId = keeper.id } }
+  game:movePlayer(1, 0)
+  eq(game.player.gold, 0, "looting a dead keeper's stock costs nothing")
+  eq(#game.player.inventory, before + 1, "the ware is picked up normally once its keeper is dead")
+end
+
+function tests.stealingFromShopTurnsTheKeeperHostile()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  local keeper = Monsters.create(Monsters.byKey.shopkeeper, 1, 10, 10, 4)
+  game.level.entities = { keeper }
+  game.player.gold = 0
+  local before = #game.player.inventory
+  game.level.floorItems = { { x = 4, y = 3, item = Items.scroll("identify"), price = 18, shopId = keeper.id } }
+  local stolen = game:stealFromShop(1)
+  eq(stolen, true, "stealing succeeds against a live keeper's ware")
+  eq(game.player.gold, 0, "theft costs no gold")
+  eq(#game.player.inventory, before + 1, "the stolen item joins the inventory")
+  eq(keeper.hostile, true, "the keeper turns hostile after the theft")
+  ok(contains(game.log:last(), "steal"), "the theft is logged")
+end
+
+function tests.hostileShopkeeperChasesLikeAnyMonster()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local keeper = Monsters.create(Monsters.byKey.shopkeeper, 1, 8, 6, 4)
+  keeper.hostile = true
+  game.level.entities = { keeper }
+  Ai.act(game, keeper)
+  eq(keeper.x, 7, "a hostile shopkeeper closes in on the player like a chaser")
+end
+
+function tests.passiveShopkeeperIgnoresTheAdjacentPlayer()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local keeper = Monsters.create(Monsters.byKey.shopkeeper, 1, 4, 6, 4)
+  game.level.entities = { keeper }
+  local hpBefore = game.player.hp
+  Ai.act(game, keeper)
+  eq(keeper.x, 4, "an un-robbed shopkeeper does not move")
+  eq(game.player.hp, hpBefore, "an un-robbed shopkeeper does not attack even when adjacent")
+end
+
 end
 
 local order = {
