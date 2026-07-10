@@ -4800,6 +4800,179 @@ function tests.bossesStayOffFloorsAboveDepthSix()
     for depth = 1, 5 do
       local level = Builder.build(depth, Rng.new(seed), {})
       for _, entity in ipairs(level.entities) do
+        ok(not entity.isBoss, "no boss appears above depth 6")
+      end
+    end
+  end
+end
+
+function tests.takeMonsterTurnEnragesABloodiedBossBeforeItsAiActs()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local warlord = Bosses.create(Bosses.byKey.warlord, 1, 4, 6)
+  warlord.hp = math.floor(warlord.maxHp * Bosses.byKey.warlord.enrageAt)
+  game.level.entities = { warlord }
+  game:takeMonsterTurn(warlord)
+  eq(warlord.enraged, true, "a bloodied boss enrages the moment its turn comes up")
+  local found = false
+  for _, line in ipairs(game.log.lines) do
+    if line:find("rage", 1, true) then found = true end
+  end
+  ok(found, "the enrage line is written to the message log")
+end
+
+function tests.defeatingABossGrantsBossXpAndDropsItsGuaranteedArtifact()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local lich = Bosses.create(Bosses.byKey.lich, 1, 4, 6)
+  lich.hp = 1
+  game.level.entities = { lich }
+  local levelBefore = game.player.level
+  local essenceBefore = game.player.essence
+  game:playerAttack(lich)
+  -- A boss's xp reward is large enough to roll the player's level past its
+  -- current threshold, so plain "xp increased by exactly N" arithmetic
+  -- (which the leveling loop resets on every level-up) does not apply here -
+  -- see progression.lua's levelUp. Essence, unlike xp, is a plain running
+  -- total, so it still checks the exact catalog reward directly.
+  ok(game.player.level > levelBefore, "a boss's xp reward is enough to level the player up")
+  eq(game.player.essence, essenceBefore + Crafting.essenceFor(Bosses.xpFor(lich)),
+    "felling a boss grants essence scaled to its catalog xp, not a plain monster's")
+  local dropped
+  for _, ground in ipairs(game.level.floorItems) do
+    if ground.item.artifact == "lich_phylactery" then dropped = ground.item end
+  end
+  ok(dropped ~= nil, "the boss's guaranteed artifact lands on the floor where it died")
+end
+
+function tests.bossFieldsSurviveSerialization()
+  local game = stagedGame(3, arena(21, 11), 5, 5)
+  local warlord = Bosses.create(Bosses.byKey.warlord, 1, 6, 5)
+  warlord.hp = math.floor(warlord.maxHp * Bosses.byKey.warlord.enrageAt)
+  Bosses.tryEnrage(warlord)
+  game.level.entities = { warlord }
+  local restoredLevel = Level.fromData(game.level:toData())
+  eq(#restoredLevel.entities, 1, "the boss survives a level round trip")
+  eq(restoredLevel.entities[1].isBoss, true, "the boss's isBoss flag survives a round trip")
+  eq(restoredLevel.entities[1].bossKey, "warlord", "the boss's catalog key survives a round trip")
+  eq(restoredLevel.entities[1].enraged, true, "the boss's enraged flag survives a round trip")
+end
+
+function tests.phasesTickIsANoOpForAPlainMonsterOrABossStillAboveItsDesperateThreshold()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 10, 6, 1)
+  local line, consumed = Phases.tick(game, orc)
+  eq(line, nil, "a plain monster never enters a desperation phase")
+  eq(consumed, false, "a plain monster's turn is never consumed by Phases")
+
+  local warlord = Bosses.create(Bosses.byKey.warlord, 2, 5, 6)
+  line, consumed = Phases.tick(game, warlord)
+  eq(line, nil, "a boss above its desperateAt threshold does not brace")
+  eq(consumed, false, "an untouched boss's turn is never consumed by Phases")
+end
+
+function tests.phasesTickBracesOnceABloodiedBossCrossesDesperateAtSpikingDefenseAndConsumingTheTurn()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local spec = Bosses.byKey.warlord
+  local warlord = Bosses.create(spec, 1, 5, 6)
+  warlord.enraged = true -- already past enrage so its heal cannot mask the desperate check below
+  warlord.hp = math.floor(warlord.maxHp * spec.desperateAt)
+  local defenseBefore = warlord.defense
+
+  local line, consumed = Phases.tick(game, warlord)
+  ok(line ~= nil and line:find("channel", 1, true) ~= nil, "a bloodied boss logs that it begins channeling")
+  eq(consumed, true, "bracing consumes the boss's entire turn")
+  eq(warlord.desperate, true, "the boss is now flagged desperate")
+  eq(warlord.channeling, true, "the boss is now flagged channeling, awaiting its next turn to unleash")
+  eq(warlord.defense, defenseBefore + spec.desperateDefenseBonus, "bracing spikes defense by the catalog's flat bonus")
+  eq(warlord.baseDefense, spec.defense + spec.desperateDefenseBonus, "bracing also lifts the boss's base defense")
+end
+
+function tests.phasesTickUnleashesOnTheTurnAfterBracingHittingThePlayerAndRevertingDefense()
+  local game = stagedGame(1, arena(21, 11), 4, 6)
+  local spec = Bosses.byKey.lich
+  local lich = Bosses.create(spec, 1, 5, 6)
+  lich.enraged = true
+  lich.hp = math.floor(lich.maxHp * spec.desperateAt)
+  Phases.tick(game, lich) -- brace
+  local defenseBraced = lich.defense
+  local hpBefore = game.player.hp
+
+  local line, consumed = Phases.tick(game, lich)
+  eq(consumed, true, "unleashing also consumes the boss's entire turn")
+  eq(lich.channeling, false, "unleashing clears the channeling flag")
+  eq(lich.novaSpent, true, "unleashing latches novaSpent permanently")
+  eq(lich.defense, defenseBraced - spec.desperateDefenseBonus, "unleashing reverts the braced defense spike")
+  eq(lich.defense, spec.defense, "the reverted defense lands back on the boss's unmodified catalog value")
+  eq(game.player.hp, hpBefore - spec.novaDamage, "the cataclysm deals the catalog's flat nova damage to the player")
+  ok(line:find("cataclysm", 1, true) ~= nil, "the unleash line names the cataclysm")
+end
+
+function tests.phasesUnleashHitsCompanionsAndHirelingsInRadiusButLeavesAWildMonsterUntouched()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  local spec = Bosses.byKey.bonequeen
+  local queen = Bosses.create(spec, 1, 10, 6)
+  queen.enraged = true
+  queen.hp = math.floor(queen.maxHp * spec.desperateAt)
+  local ally = Entity.new({
+    id = 2, x = 11, y = 6, glyph = "d", name = "wolf", kind = "companion",
+    hp = 10, maxHp = 10, attack = 2, defense = 0, speed = 100,
+  })
+  local hireling = Entity.new({
+    id = 3, x = 9, y = 7, glyph = "@", name = "sellsword", kind = "hireling",
+    hp = 10, maxHp = 10, attack = 2, defense = 0, speed = 100,
+  })
+  local bystander = Monsters.create(Monsters.byKey.rat, 4, 10, 5, 1)
+  game.level.entities = { queen, ally, hireling, bystander }
+  game.player.x, game.player.y = 20, 10 -- far outside novaRadius
+
+  Phases.tick(game, queen) -- brace
+  Phases.tick(game, queen) -- unleash
+
+  eq(ally.hp, 10 - spec.novaDamage, "a companion within radius takes the cataclysm's nova damage")
+  eq(hireling.hp, 10 - spec.novaDamage, "a hireling within radius takes the cataclysm's nova damage")
+  eq(bystander.hp, bystander.maxHp, "a wild monster caught nearby is never a cataclysm target")
+end
+
+function tests.phasesUnleashHitsAReanimatedThrallInRadiusJustLikeACompanionOrHireling()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  local spec = Bosses.byKey.bonequeen
+  local queen = Bosses.create(spec, 1, 10, 6)
+  queen.enraged = true
+  queen.hp = math.floor(queen.maxHp * spec.desperateAt)
+  local thrall = Entity.new({
+    id = 2, x = 11, y = 6, glyph = "Z", name = "rat thrall", kind = "thrall",
+    hp = 10, maxHp = 10, attack = 2, defense = 0, speed = 100,
+  })
+  game.level.entities = { queen, thrall }
+  game.player.x, game.player.y = 20, 10 -- far outside novaRadius, only the thrall is in range
+
+  Phases.tick(game, queen) -- brace
+  Phases.tick(game, queen) -- unleash
+
+  eq(thrall.hp, 10 - spec.novaDamage,
+    "a player-raised thrall is just as much the boss's cornered party as a companion or hireling")
+end
+
+function tests.phasesNovaFiresAtMostOncePerBossThenFallsBackToItsOrdinaryAbility()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local spec = Bosses.byKey.warlord
+  local warlord = Bosses.create(spec, 1, 5, 6)
+  warlord.enraged = true
+  warlord.hp = math.floor(warlord.maxHp * spec.desperateAt)
+  Phases.tick(game, warlord) -- brace
+  Phases.tick(game, warlord) -- unleash, latches novaSpent
+
+  local line, consumed = Phases.tick(game, warlord)
+  eq(line, nil, "a boss that already spent its cataclysm never braces again")
+  eq(consumed, false, "Phases stops consuming turns once the cataclysm is spent")
+end
+
+function tests.takeMonsterTurnSkipsAbilityAndAiWhileABossBracesOrUnleashesItsCataclysm()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local spec = Bosses.byKey.warlord
+  local warlord = Bosses.create(spec, 1, 4, 6)
+  warlord.enraged = true
+  warlord.hp = math.floor(warlord.maxHp * spec.desperateAt)
+  game.level.entities = { warlord }
 end
 
 local order = {
