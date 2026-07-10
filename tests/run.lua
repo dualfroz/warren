@@ -4281,6 +4281,525 @@ function tests.mercenaryFollowsThePlayerWhenNoMonsterIsVisible()
 end
 
 -- Same wiring proof as tests.companionActConfusedCompanionSometimesStumbles
+-- InsteadOfFightingAnAdjacentHostile, but for Mercenaries.act - a distinct
+-- call site that could independently have been left off Game:allyActsConfused.
+function tests.mercenaryActConfusedHirelingSometimesStumblesInsteadOfFightingAnAdjacentHostile()
+  local sawAttack, sawStumble = false, false
+  for seed = 1, 200 do
+    local game = stagedGame(seed, arena(21, 11), 3, 6)
+    local sellsword = Mercenaries.hire(game, "sellsword")
+    local rat = Monsters.create(Monsters.byKey.rat, 50, sellsword.x + 1, sellsword.y, 1)
+    game.level.entities[#game.level.entities + 1] = rat
+    Status.apply(sellsword, Status.CONFUSE, 5, 1)
+    local hpBefore = rat.hp
+    Mercenaries.act(game, sellsword)
+    if rat.hp < hpBefore then
+      sawAttack = true
+    else
+      sawStumble = true
+    end
+    if sawAttack and sawStumble then break end
+  end
+  ok(sawAttack, "a confused hireling's roll sometimes lets it fight an adjacent hostile as normal")
+  ok(sawStumble, "a confused hireling's roll sometimes overrides even a point-blank attack")
+end
+
+function tests.fieldMedicMendsThePlayerWhenIdle()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.player.hp = game.player.maxHp - 5
+  local medic = Mercenaries.hire(game, "medic")
+  local before = game.player.hp
+  Mercenaries.act(game, medic)
+  eq(game.player.hp, before + Mercenaries.byKey.medic.heal, "a field medic mends its employer each idle turn")
+end
+
+function tests.mercenaryStopsChasingAndFollowingOnceSulking()
+  local game = stagedGame(1, arena(21, 11), 10, 5)
+  local sellsword = Mercenaries.hire(game, "sellsword")
+  sellsword.loyalty = Mercenaries.SULKING_THRESHOLD
+  sellsword.x, sellsword.y = 3, 5
+  local startX, startY = sellsword.x, sellsword.y
+  Mercenaries.act(game, sellsword)
+  eq(sellsword.x, startX, "a sulking hireling does not close in on the player it cannot reach (x)")
+  eq(sellsword.y, startY, "a sulking hireling does not close in on the player it cannot reach (y)")
+end
+
+function tests.mercenaryStillFightsAnAdjacentHostileEvenWhileSulking()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local sellsword = Mercenaries.hire(game, "sellsword")
+  sellsword.loyalty = 0
+  local rat = Monsters.create(Monsters.byKey.rat, 50, sellsword.x + 1, sellsword.y, 1)
+  game.level.entities[#game.level.entities + 1] = rat
+  Mercenaries.act(game, sellsword)
+  ok(rat.hp <= 0, "a sulking hireling still fights whatever already stands next to it")
+end
+
+function tests.mercenaryPayWagePaysWhenAffordableAndRestoresLoyalty()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local sellsword = Mercenaries.hire(game, "sellsword")
+  sellsword.loyalty = 50
+  game.player.gold = 100
+  local line = Mercenaries.payWage(game)
+  eq(game.player.gold, 100 - sellsword.wage, "an affordable wage is deducted from the wallet")
+  eq(sellsword.loyalty, 50 + Mercenaries.LOYALTY_GAIN_PAID, "paying the wage restores some loyalty")
+  ok(contains(line, "pay"), "a paid wage is logged as a payment")
+end
+
+function tests.mercenaryPayWageShortsAndDropsLoyaltyWhenGoldIsShort()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local sellsword = Mercenaries.hire(game, "sellsword")
+  game.player.gold = 0
+  local line = Mercenaries.payWage(game)
+  eq(game.player.gold, 0, "an unaffordable wage never touches the wallet")
+  eq(sellsword.loyalty, Mercenaries.START_LOYALTY - Mercenaries.LOYALTY_LOSS_UNPAID,
+    "missing a wage knocks the hireling's loyalty down")
+  ok(contains(line, "grumbles"), "a missed wage that survives is logged as a grumble")
+end
+
+function tests.mercenaryPayWageDesertsOnceLoyaltyBottomsOut()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local sellsword = Mercenaries.hire(game, "sellsword")
+  sellsword.loyalty = 20
+  game.player.gold = 0
+  local line = Mercenaries.payWage(game)
+  ok(not sellsword:isAlive(), "a hireling whose loyalty bottoms out deserts")
+  eq(#game.level.entities, 0, "a deserted hireling is swept from the level")
+  ok(contains(line, "deserts"), "desertion is logged distinctly from a mere grumble")
+end
+
+function tests.mercenaryPayWageIsANoOpWithNoHirelingOnTheLevel()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  eq(Mercenaries.payWage(game), nil, "paying a wage with no hireling present does nothing and reports nothing")
+end
+
+function tests.mercenaryDismissReleasesTheHirelingWithNoPenalty()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  Mercenaries.hire(game, "medic")
+  local name = Mercenaries.dismiss(game)
+  eq(name, "field medic", "dismissing returns the released hireling's name")
+  eq(#game.level.entities, 0, "the dismissed hireling leaves the level")
+end
+
+function tests.mercenaryDismissFailsWithNoOneUnderContract()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  eq(Mercenaries.dismiss(game), nil, "dismissing with nobody hired reports nothing")
+end
+
+function tests.useItemOnAContractHiresTheNamedMercenaryAndConsumesIt()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.player.inventory = { Items.contract("skirmisher") }
+  ok(game:useItem(1), "using a contract succeeds")
+  eq(#game.player.inventory, 0, "the contract leaves the inventory once the hireling joins")
+  eq(#game.level.entities, 1, "the hired mercenary is added to the level")
+  eq(game.level.entities[1].species, "skirmisher", "the hired mercenary matches the contract's roster key")
+end
+
+function tests.useItemOnAContractWithAnUnknownRosterKeyFailsWithoutConsumingIt()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.player.inventory = { Items.contract("dragon") }
+  eq(game:useItem(1), false, "using a contract for an unknown roster key fails")
+  eq(#game.player.inventory, 1, "a failed hire never consumes the contract")
+end
+
+function tests.takeMonsterTurnRoutesAHirelingThroughMercenariesAct()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local sellsword = Mercenaries.hire(game, "sellsword")
+  local rat = Monsters.create(Monsters.byKey.rat, 50, sellsword.x + 1, sellsword.y, 1)
+  game.level.entities[#game.level.entities + 1] = rat
+  game:takeMonsterTurn(sellsword)
+  ok(rat.hp <= 0, "the full monster-turn pipeline dispatches a hireling's turn to mercenaries.act")
+end
+
+function tests.aFallenHirelingIsLoggedAndSweptWithoutAwardingXp()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local sellsword = Mercenaries.hire(game, "sellsword")
+  sellsword.hp = 1
+  Status.apply(sellsword, Status.POISON, 1, 5)
+  local xpBefore = game.player.xp
+  game:takeMonsterTurn(sellsword)
+  eq(#game.level.entities, 0, "a hireling that dies to its own status tick is swept from the level")
+  eq(game.player.xp, xpBefore, "a fallen hireling grants the player no xp")
+  ok(contains(game.log:last(), "falls"), "a fallen hireling's death is logged")
+end
+
+function tests.gameEndPlayerTurnPaysTheHirelingWageOnceTheIntervalElapses()
+  local game = Game.new(5)
+  local sellsword = Mercenaries.hire(game, "sellsword")
+  ok(sellsword ~= nil, "the starting room around a fresh game has a free cell to hire into")
+  game.player.gold = 1000
+  game.turn = Mercenaries.WAGE_INTERVAL - 1
+  local goldBefore = game.player.gold
+  game:endPlayerTurn()
+  eq(game.player.gold, goldBefore - sellsword.wage, "the wage interval turn bills the live hireling")
+end
+
+function tests.mercenaryFieldsSurviveSerialization()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local medic = Mercenaries.hire(game, "medic")
+  medic.loyalty = 55
+  local restoredLevel = Level.fromData(game.level:toData())
+  eq(#restoredLevel.entities, 1, "the hireling survives a level round trip")
+  eq(restoredLevel.entities[1].kind, "hireling", "the hireling's kind survives a round trip")
+  eq(restoredLevel.entities[1].species, "medic", "the hireling's roster key survives a round trip")
+  eq(restoredLevel.entities[1].wage, Mercenaries.byKey.medic.wage, "the hireling's wage survives a round trip")
+  eq(restoredLevel.entities[1].loyalty, 55, "the hireling's loyalty survives a round trip")
+end
+
+function tests.shopPriceOfAContractMatchesItsRosterHireCost()
+  eq(Shop.priceOf(Items.contract("sellsword")), Mercenaries.byKey.sellsword.hireCost,
+    "a contract's catalog price matches its roster hire cost")
+end
+
+function tests.shopStockCanRollAContractWithAPositiveCatalogPrice()
+  local sawContract = false
+  for seed = 1, 40 do
+    for _, item in ipairs(Shop.stock(Rng.new(seed))) do
+      if item.kind == Items.CONTRACT then
+        sawContract = true
+        ok(Shop.priceOf(item) > 0, "a rolled contract carries a positive catalog price")
+        ok(Mercenaries.byKey[item.hireling] ~= nil, "a rolled contract names a real roster key")
+      end
+    end
+  end
+  ok(sawContract, "shop stock can roll a mercenary contract across a handful of seeds")
+end
+
+function tests.autopilotHiresACarriedContractWhenNoHirelingIsYetUnderContract()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.entities = {}
+  game.player.inventory = { Items.contract("skirmisher") }
+  game:choosePlayerAction()
+  eq(#game.player.inventory, 0, "the autopilot uses a carried contract on sight when no hireling is yet under contract")
+  local hired = false
+  for _, e in ipairs(game.level.entities) do
+    if e.kind == "hireling" then hired = true end
+  end
+  ok(hired, "the autopilot's contract use actually hires the mercenary")
+end
+
+function tests.artifactsCreateBuildsTheCatalogedItemShape()
+  local blade = Artifacts.create("bloodfang")
+  eq(blade.kind, Items.WEAPON, "bloodfang is a weapon-slot artifact")
+  eq(blade.unique, Artifacts.LIFESTEAL, "bloodfang carries the lifesteal tag")
+  eq(blade.artifact, "bloodfang", "the item remembers its catalog key")
+  local ring = Artifacts.create("ring_of_the_tide")
+  eq(ring.kind, Items.RING, "ring of the tide is a ring-slot artifact")
+  eq(ring.unique, Artifacts.REGEN, "ring of the tide carries the regen tag")
+  eq(Artifacts.create("nonexistent"), nil, "an unknown catalog key builds nothing")
+end
+
+function tests.lifestealWeaponHealsThePlayerOnAHit()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Items.equipWeapon(Artifacts.create("bloodfang"), game.player)
+  game.player.hp = game.player.maxHp - 10
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  orc.hp, orc.maxHp = 30, 30
+  game.level.entities = { orc }
+  local before = game.player.hp
+  game:playerAttack(orc)
+  ok(game.player.hp > before, "bloodfang heals the player for a share of the damage it deals")
+end
+
+function tests.thornedArmorReflectsDamageBackAtAMeleeAttacker()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Items.equipArmor(Artifacts.create("aegis_of_embers"), game.player)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  game.level.entities = { orc }
+  local before = orc.hp
+  game:monsterMelee(orc)
+  ok(orc.hp < before, "aegis of embers burns the monster that hits its wearer")
+end
+
+function tests.thornedArmorCanKillAWeakAttacker()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Items.equipArmor(Artifacts.create("aegis_of_embers"), game.player)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 4, 6, 1)
+  rat.hp, rat.maxHp = 1, 1
+  game.level.entities = { rat }
+  local xpBefore = game.player.xp
+  game:monsterMelee(rat)
+  ok(not rat:isAlive(), "a thorn burn can finish off a weak attacker")
+  ok(game.player.xp > xpBefore, "the player is credited xp for a thorn kill")
+end
+
+-- Aegis of Embers is fire damage by name ("Embers") and by its own log line
+-- ("your armor sears") - before this fix the reflect subtracted a raw amount
+-- straight off the attacker's hp with no Resistances.apply call at all, so a
+-- fire-immune dragon (bestiary-real, reachable from depth 6) burned through
+-- its own immunity attacking a thorned wearer. Same shape of bug
+-- fighterCleaveSplashRespectsAFireImmuneTargetLikeThePrimaryHitAlreadyDoes
+-- caught in skills.lua earlier the same day, this time in the thorns path.
+function tests.thornedArmorRespectsAFireImmuneAttacker()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Items.equipArmor(Artifacts.create("aegis_of_embers"), game.player)
+  local dragon = Monsters.create(Monsters.byKey.dragon, 1, 4, 6, 1)
+  game.level.entities = { dragon }
+  local before = dragon.hp
+  game:monsterMelee(dragon)
+  eq(dragon.hp, before, "a fire-immune dragon takes zero thorns reflect from a fire-flavoured artifact")
+end
+
+function tests.thornedArmorIsHalvedAgainstAFireResistantAttacker()
+  local function reflectDealt(resistant)
+    local game = stagedGame(1, arena(21, 11), 3, 6)
+    Items.equipArmor(Artifacts.create("aegis_of_embers"), game.player)
+    local orc = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+    orc.hp, orc.maxHp = 100, 100
+    if resistant then orc.resist = { fire = Resistances.RESIST } end
+    game.level.entities = { orc }
+    game:monsterMelee(orc)
+    return 100 - orc.hp
+  end
+  local plain = reflectDealt(false)
+  local resisted = reflectDealt(true)
+  ok(resisted < plain, "a fire-resistant attacker takes measurably less thorns reflect than an unresisted one")
+  eq(resisted, math.floor(plain / 2), "fire resistance halves the thorns reflect, the same mitigation Resistances.apply gives every other fire source")
+end
+
+function tests.ringOfTheTideRegeneratesHpEachTurn()
+  local game = Game.new(1)
+  Items.equipRing(Artifacts.create("ring_of_the_tide"), game.player)
+  game.player.hp = game.player.maxHp - 10
+  local before = game.player.hp
+  game:hungerTorchTick()
+  eq(game.player.hp, before + 2, "ring of the tide regenerates its fixed amount each turn")
+end
+
+function tests.piercingBowIgnoresPartOfTargetDefense()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.baseAttack = 5
+  Items.equipBow(Artifacts.create("gale_bow"), game.player)
+  game.player.inventory[#game.player.inventory + 1] = Items.ammo("arrow", 5)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  orc.defense, orc.baseDefense, orc.hp, orc.maxHp = 6, 6, 40, 40
+  game.level.entities = { orc }
+  game:fireAt(orc)
+  eq(orc.hp, 35, "a piercing bow's shot ignores a flat share of the target's defense")
+end
+
+function tests.builderOccasionallyPlacesAnArtifactFromDepthFive()
+  local level = Builder.build(5, Rng.new(4), {})
+  local found
+  for _, ground in ipairs(level.floorItems) do
+    if ground.item.artifact then found = ground.item end
+  end
+  ok(found ~= nil, "this seed's depth-5 floor places a named artifact")
+  ok(Artifacts.byKey[found.artifact] ~= nil, "the artifact names a real catalog entry")
+end
+
+function tests.artifactsStayOffFloorsAboveDepthFive()
+  for seed = 1, 4 do
+    for depth = 1, 4 do
+      local level = Builder.build(depth, Rng.new(seed), {})
+      for _, ground in ipairs(level.floorItems) do
+        ok(not ground.item.artifact, "no artifact appears above depth 5")
+      end
+    end
+  end
+end
+
+function tests.artifactFieldsSurviveSerialization()
+  local game = Game.new(3)
+  Items.equipWeapon(Artifacts.create("bloodfang"), game.player)
+  local path = os.tmpname()
+  game:save(path)
+  local restored = Game.load(path)
+  os.remove(path)
+  eq(restored.player.weapon.artifact, "bloodfang", "an equipped artifact's catalog key survives a save/load round trip")
+  eq(restored.player.weapon.unique, Artifacts.LIFESTEAL, "an equipped artifact's unique tag survives a save/load round trip")
+  eq(restored.player.weapon.value, 0.5, "an equipped artifact's tuning value survives a save/load round trip")
+end
+
+function tests.useItemOnAKitPlantsAHiddenTrapOnThePlayersTile()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.player.inventory = { Items.kit("dart") }
+  ok(game:useItem(1), "using a trap kit succeeds")
+  eq(#game.player.inventory, 0, "the kit leaves the inventory once planted")
+  local trap = game.level:trapAt(5, 5)
+  ok(trap ~= nil, "a trap is planted on the player's tile")
+  eq(trap.effect, "dart", "the planted trap matches the kit's effect")
+  eq(trap.revealed, false, "a freshly planted trap starts hidden")
+  eq(game.level.map:get(5, 5), Tiles.FLOOR, "a hidden trap does not change the tile's glyph")
+end
+
+function tests.plantingATrapWhereOneAlreadyExistsFails()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.level.traps = { { x = 5, y = 5, effect = "poison", revealed = false } }
+  game.player.inventory = { Items.kit("dart") }
+  ok(not game:useItem(1), "planting a trap on an occupied tile fails")
+  eq(#game.player.inventory, 1, "a failed planting leaves the kit in the inventory")
+end
+
+function tests.aMonsterSteppingOntoAPlayerSetTrapSpringsIt()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.traps = { { x = 6, y = 6, effect = "dart", revealed = false, placedByPlayer = true } }
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 7, 6, 1)
+  game.level.entities = { orc }
+  local hpBefore = orc.hp
+  game:stepMonsterToward(orc, game.player.x, game.player.y)
+  eq(orc.x, 6, "the orc steps onto the trapped cell while closing on the player")
+  ok(orc.hp < hpBefore, "stepping onto a player-set dart trap wounds the monster")
+  eq(game.level.traps[1].revealed, true, "the sprung trap becomes revealed")
+end
+
+-- Status.LEVITATE (see status.lua) makes Game:checkTrapFor and movePlayer's
+-- own inline trap check both bail out before springTrap ever runs - and,
+-- unlike the lava/chasm skip in checkTerrainFor, deliberately leaves the
+-- trap unrevealed: floating clear of a pressure plate buys safety, not free
+-- detection of what was under it.
+function tests.checkTrapForSkipsAndLeavesUndetectedForALevitatingMonster()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.traps = { { x = 6, y = 6, effect = "dart", revealed = false } }
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 7, 6, 1)
+  Status.apply(orc, Status.LEVITATE, 20, 1)
+  game.level.entities = { orc }
+  local hpBefore = orc.hp
+  game:stepMonsterToward(orc, game.player.x, game.player.y)
+  eq(orc.x, 6, "the levitating orc still steps onto the trapped cell while closing on the player")
+  eq(orc.hp, hpBefore, "a levitating monster drifting over a trap takes no damage from it")
+  eq(game.level.traps[1].revealed, false, "the trap it floated over is never revealed")
+end
+
+function tests.movePlayerSkipsTheInlineTrapTriggerForALevitatingPlayer()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.level.traps = { { x = 6, y = 5, effect = "dart", revealed = false } }
+  Status.apply(game.player, Status.LEVITATE, 20, 1)
+  local hpBefore = game.player.hp
+  game:movePlayer(1, 0)
+  eq(game.player.x, 6, "the levitating player still moves onto the trapped cell")
+  eq(game.player.hp, hpBefore, "a levitating player takes no damage from the trap")
+  eq(game.level.traps[1].revealed, false, "the trap the player floated over stays hidden")
+end
+
+function tests.aLethalTrapKillsAWeakMonsterAndCreditsThePlayer()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.traps = { { x = 6, y = 6, effect = "dart", revealed = false } }
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 7, 6, 1)
+  rat.hp, rat.maxHp = 1, 1
+  game.level.entities = { rat }
+  local xpBefore = game.player.xp
+  game:stepMonsterToward(rat, game.player.x, game.player.y)
+  ok(not rat:isAlive(), "a dart trap can finish off a weak monster")
+  ok(game.player.xp > xpBefore, "the player is credited xp for a trap kill")
+  eq(#game.level.entities, 0, "the fallen monster is swept from the level")
+end
+
+function tests.aTeleportTrapRelocatesTheMonsterThatSpringsIt()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.traps = { { x = 6, y = 6, effect = "teleport", revealed = false } }
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 7, 6, 1)
+  game.level.entities = { orc }
+  game:stepMonsterToward(orc, game.player.x, game.player.y)
+  ok(not (orc.x == 6 and orc.y == 6), "a teleport trap relocates the monster off the trapped cell")
+end
+
+function tests.builderOccasionallyPlacesATrapKitFromDepthTwo()
+  local level = Builder.build(3, Rng.new(3), {})
+  local found
+  for _, ground in ipairs(level.floorItems) do
+    if ground.item.kind == Items.KIT then found = ground.item end
+  end
+  ok(found ~= nil, "this seed's depth-3 floor places a trap kit")
+  local isKnownEffect = false
+  for _, effect in ipairs(Builder.TRAP_EFFECTS) do
+    if found.effect == effect then isKnownEffect = true end
+  end
+  ok(isKnownEffect, "the kit's effect is one of Builder.TRAP_EFFECTS")
+end
+
+function tests.kitsStayOffTheEntranceFloor()
+  for seed = 1, 5 do
+    local level = Builder.build(1, Rng.new(seed), {})
+    for _, ground in ipairs(level.floorItems) do
+      ok(ground.item.kind ~= Items.KIT, "no trap kit appears on the entrance floor")
+    end
+  end
+end
+
+function tests.plantedTrapFieldsSurviveSerialization()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.player.inventory = { Items.kit("poison") }
+  game:useItem(1)
+  local restoredLevel = Level.fromData(game.level:toData())
+  eq(#restoredLevel.traps, 1, "the planted trap survives a level round trip")
+  eq(restoredLevel.traps[1].effect, "poison", "the planted trap's effect survives a round trip")
+  eq(restoredLevel.traps[1].placedByPlayer, true, "the planted trap's origin flag survives a round trip")
+end
+
+function tests.bossCreateBuildsAFreshUnenragedBoss()
+  local warlord = Bosses.create(Bosses.byKey.warlord, 9, 4, 6)
+  eq(warlord.isBoss, true, "a created boss is flagged isBoss")
+  eq(warlord.bossKey, "warlord", "a created boss remembers its catalog key")
+  eq(warlord.enraged, false, "a freshly created boss has not yet enraged")
+  eq(warlord.hp, warlord.maxHp, "a created boss starts at full hp")
+  eq(warlord.species, "boss_warlord", "a created boss's species is namespaced away from Monsters.byKey")
+end
+
+function tests.bossAtFullHealthDoesNotEnrage()
+  local warlord = Bosses.create(Bosses.byKey.warlord, 1, 1, 1)
+  local before = warlord.attack
+  local line = Bosses.tryEnrage(warlord)
+  eq(line, nil, "a boss above its enrage threshold does not enrage")
+  eq(warlord.enraged, false, "the boss is still marked as not enraged")
+  eq(warlord.attack, before, "an unenraged boss keeps its base attack")
+end
+
+function tests.bossEnragesOncePastItsHalfHpThresholdAndOnlyOnce()
+  local warlord = Bosses.create(Bosses.byKey.warlord, 1, 1, 1)
+  local spec = Bosses.byKey.warlord
+  warlord.hp = math.floor(warlord.maxHp * spec.enrageAt)
+  local attackBefore, speedBefore = warlord.attack, warlord.speed
+  local line = Bosses.tryEnrage(warlord)
+  ok(line ~= nil, "a bloodied boss enrages and logs a line")
+  eq(warlord.enraged, true, "the boss is now flagged enraged")
+  eq(warlord.attack, attackBefore + spec.enrageAttack, "enraging adds the catalog's flat attack bonus")
+  eq(warlord.baseAttack, attackBefore + spec.enrageAttack, "enraging also lifts the boss's base attack")
+  eq(warlord.speed, speedBefore + spec.enrageSpeed, "enraging adds the catalog's flat speed bonus")
+  local hpAfterFirst = warlord.hp
+  local second = Bosses.tryEnrage(warlord)
+  eq(second, nil, "an already-enraged boss does not enrage a second time")
+  eq(warlord.attack, attackBefore + spec.enrageAttack, "a second call never stacks the attack bonus again")
+  eq(warlord.hp, hpAfterFirst, "a second call grants no further heal")
+end
+
+function tests.bossLootMatchesItsCatalogEntry()
+  local lich = Bosses.create(Bosses.byKey.lich, 1, 1, 1)
+  local loot = Bosses.lootFor(lich)
+  ok(loot ~= nil, "a boss with a valid bossKey drops its catalog loot")
+  eq(loot.artifact, "lich_phylactery", "the dropped item is the boss's exact catalog artifact")
+  eq(loot.unique, Artifacts.REGEN, "the boss loot carries its unique mechanic tag")
+  local unknown = Bosses.create({ key = "ghost" }, 1, 1, 1)
+  unknown.bossKey = "ghost"
+  eq(Bosses.lootFor(unknown), nil, "a boss with no catalog entry drops nothing")
+end
+
+function tests.bossOnlyArtifactsAreExcludedFromTheRandomBuilderRoll()
+  local bossOnlyKeys = { "warlords_cleaver", "lich_phylactery", "bone_queen_carapace" }
+  for _, key in ipairs(bossOnlyKeys) do
+    ok(Artifacts.byKey[key] ~= nil, key .. " is a real catalog entry")
+    local inOrder = false
+    for _, orderKey in ipairs(Artifacts.order) do
+      if orderKey == key then inOrder = true end
+    end
+    ok(not inOrder, key .. " never appears in the builder's random artifact roll")
+  end
+end
+
+function tests.builderOccasionallyPlacesABossFromDepthSix()
+  local level = Builder.build(6, Rng.new(8), {})
+  local found
+  for _, entity in ipairs(level.entities) do
+    if entity.isBoss then found = entity end
+  end
+  ok(found ~= nil, "this seed's depth-6 floor places a named boss")
+  eq(found.bossKey, "warlord", "the only boss eligible at depth 6 is the warlord")
+end
+
+function tests.bossesStayOffFloorsAboveDepthSix()
+  for seed = 1, 5 do
+    for depth = 1, 5 do
+      local level = Builder.build(depth, Rng.new(seed), {})
+      for _, entity in ipairs(level.entities) do
 end
 
 local order = {
