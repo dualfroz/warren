@@ -5146,6 +5146,1736 @@ function tests.autopilotDoesNotStackASecondBountyWhileOneIsActive()
   local held = Quests.generate(Rng.new(1), 4, 10)
   game.player.quest = held
   game.level.questBoards = { { x = 5, y = 5, claimed = false, quest = Quests.generate(Rng.new(2), 4, 10) } }
+  game:choosePlayerAction()
+  eq(game.player.quest, held, "the autopilot keeps its held bounty rather than swapping to a new one")
+  eq(game.level.questBoards[1].claimed, false, "a board it cannot bind to stays unclaimed for later")
+end
+
+function tests.questBoardRendersItsGlyphAndFlipsOnceClaimed()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local board = { x = 5, y = 6, claimed = false, quest = Quests.generate(Rng.new(2), 4, 10) }
+  game.level.questBoards = { board }
+  game:computeVisible()
+  ok(game:render():find("&", 1, true) ~= nil, "an unclaimed bounty board renders its glyph")
+  board.claimed = true
+  ok(game:render():find("=", 1, true) ~= nil, "a claimed bounty board renders a different glyph")
+end
+
+function tests.questFieldsSurviveSerialization()
+  local level = arena(21, 11)
+  level.questBoards = { { x = 4, y = 4, claimed = true, quest = Quests.generate(Rng.new(2), 4, 10) } }
+  local restored = Level.fromData(level:toData())
+  eq(#restored.questBoards, 1, "the quest board list survives a level round trip")
+  eq(restored.questBoards[1].claimed, true, "a board's claimed flag survives a round trip")
+  eq(restored.questBoards[1].quest.kind, Quests.CULL, "a board's bounty kind survives a round trip")
+  eq(restored.questBoards[1].quest.need, 4, "a board's bounty tally survives a round trip")
+
+  local game = Game.new(6)
+  game.player.quest = { kind = Quests.HOARD, need = 200, rewardGold = 50, rewardXp = 20 }
+  local path = os.tmpname()
+  game:save(path)
+  local restoredGame = Game.load(path)
+  os.remove(path)
+  eq(restoredGame.player.quest.kind, Quests.HOARD, "the player's own bound bounty survives a save/load round trip")
+  eq(restoredGame.player.quest.need, 200, "the bound bounty's target survives a save/load round trip")
+end
+
+function tests.builderOccasionallyPlacesAQuestBoardFromDepthTwo()
+  local level = Builder.build(2, Rng.new(11), {})
+  eq(#level.questBoards, 1, "this seed's depth-2 floor places a bounty board")
+  eq(level.questBoards[1].claimed, false, "a freshly built board starts unclaimed")
+  ok(level.questBoards[1].quest ~= nil, "a freshly built board already carries its one bounty")
+end
+
+function tests.questBoardsStayOffTheEntranceFloor()
+  for seed = 1, 5 do
+    local level = Builder.build(1, Rng.new(seed), {})
+    eq(#level.questBoards, 0, "no bounty board appears on the entrance floor")
+  end
+end
+
+function tests.metaFreshStateHasNoRenownRunsOrAchievements()
+  local meta = Meta.new()
+  eq(meta.renown, 0, "a fresh meta state banks no renown")
+  eq(meta.totalRuns, 0, "a fresh meta state has recorded no runs")
+  eq(meta.wins, 0, "a fresh meta state has recorded no wins")
+  eq(meta.bestDepth, 0, "a fresh meta state has no best depth yet")
+  eq(next(meta.achievements), nil, "a fresh meta state has unlocked nothing")
+  eq(next(meta.perks), nil, "a fresh meta state owns no perks")
+end
+
+function tests.metaRenownForScalesWithDepthBossesAndQuestsAndAddsAWinBonus()
+  local base = Meta.renownFor({ deepestDepth = 3, bossKills = 0, questsCompleted = 0, won = false })
+  eq(base, 12, "renown scales with deepest depth alone")
+  local withBosses = Meta.renownFor({ deepestDepth = 3, bossKills = 2, questsCompleted = 0, won = false })
+  eq(withBosses, base + 30, "each felled boss adds a fixed renown bonus")
+  local withQuests = Meta.renownFor({ deepestDepth = 3, bossKills = 0, questsCompleted = 4, won = false })
+  eq(withQuests, base + 32, "each resolved bounty adds a fixed renown bonus")
+  local won = Meta.renownFor({ deepestDepth = 3, bossKills = 0, questsCompleted = 0, won = true })
+  eq(won, base + 100, "escaping with the amulet adds a large flat bonus")
+end
+
+function tests.metaRecordRunBanksRenownAndAdvancesTallies()
+  local meta = Meta.new()
+  Meta.recordRun(meta, { deepestDepth = 4, kills = 2, bossKills = 0, questsCompleted = 0, artifactsFound = 0, won = false })
+  eq(meta.totalRuns, 1, "recordRun advances the run tally")
+  eq(meta.wins, 0, "an unwon run does not advance the win tally")
+  eq(meta.bestDepth, 4, "recordRun raises the best depth to this run's own")
+  eq(meta.renown, Meta.renownFor({ deepestDepth = 4, bossKills = 0, questsCompleted = 0, won = false }),
+    "recordRun banks exactly the renown this run's tally is worth")
+  Meta.recordRun(meta, { deepestDepth = 2, kills = 0, bossKills = 0, questsCompleted = 0, artifactsFound = 0, won = true })
+  eq(meta.totalRuns, 2, "a second run advances the run tally again")
+  eq(meta.wins, 1, "a won run advances the win tally")
+  eq(meta.bestDepth, 4, "a shallower later run does not lower the best depth")
+end
+
+function tests.metaRecordRunUnlocksMatchingAchievementsOnlyOnce()
+  local meta = Meta.new()
+  local stats = { deepestDepth = 5, kills = 1, bossKills = 1, questsCompleted = 3, artifactsFound = 1, won = true }
+  local unlocked = Meta.recordRun(meta, stats)
+  table.sort(unlocked)
+  local expected = { "Amulet Bearer", "Artificer", "Boss Slayer", "Bounty Hunter", "Deep Delver", "First Blood" }
+  table.sort(expected)
+  eq(table.concat(unlocked, ","), table.concat(expected, ","),
+    "a run meeting every threshold unlocks every achievement at once")
+  for _, key in ipairs({ "first_blood", "boss_slayer", "deep_delver", "bounty_hunter", "artificer", "amulet_bearer" }) do
+    eq(meta.achievements[key], true, key .. " is marked unlocked")
+  end
+  local again = Meta.recordRun(meta, stats)
+  eq(#again, 0, "an already-unlocked achievement is not re-announced on a later run")
+end
+
+function tests.metaPurchaseSpendsRenownAndMarksThePerkOwned()
+  local meta = Meta.new()
+  meta.renown = 30
+  local success, message = Meta.purchase(meta, "vigor")
+  eq(success, true, "purchase succeeds with enough banked renown")
+  eq(message, "unlocked Vigor", "purchase reports the perk it unlocked")
+  eq(meta.renown, 0, "purchase spends exactly the perk's cost")
+  eq(Meta.isOwned(meta, "vigor"), true, "the purchased perk is marked owned")
+end
+
+function tests.metaPurchaseFailsWithoutEnoughRenown()
+  local meta = Meta.new()
+  meta.renown = 5
+  local success, message = Meta.purchase(meta, "vigor")
+  eq(success, false, "purchase fails without enough banked renown")
+  eq(message, "not enough renown", "purchase explains why it failed")
+  eq(meta.renown, 5, "a failed purchase spends nothing")
+end
+
+function tests.metaPurchaseFailsForAnAlreadyOwnedPerk()
+  local meta = Meta.new()
+  meta.renown = 100
+  Meta.purchase(meta, "vigor")
+  local renownAfterFirst = meta.renown
+  local success, message = Meta.purchase(meta, "vigor")
+  eq(success, false, "purchase refuses to sell the same perk twice")
+  eq(message, "already owned", "purchase explains why it failed")
+  eq(meta.renown, renownAfterFirst, "a refused repurchase spends nothing further")
+end
+
+function tests.metaPurchaseFailsForAnUnknownPerk()
+  local meta = Meta.new()
+  meta.renown = 100
+  local success, message = Meta.purchase(meta, "not_a_real_perk")
+  eq(success, false, "purchase fails for a key outside the catalog")
+  eq(message, "no such perk", "purchase explains why it failed")
+  eq(meta.renown, 100, "a failed purchase spends nothing")
+end
+
+function tests.metaApplyAllAppliesEveryOwnedPerkToAFreshPlayer()
+  local meta = Meta.new()
+  meta.renown = 200
+  Meta.purchase(meta, "vigor")
+  Meta.purchase(meta, "purse")
+  local game = Game.new(1, { meta = meta })
+  eq(game.player.maxHp, 30 + 5, "the owned vigor perk raises max hp before class deltas")
+  eq(game.player.hp, 30 + 5, "the owned vigor perk raises current hp to match")
+  eq(game.player.gold, 20 + 25, "the owned deep pockets perk raises starting gold")
+  local plain = Game.new(1)
+  eq(plain.player.maxHp, 30, "a game started without a meta table gets no perk bonus")
+end
+
+function tests.metaAppliedPerksLandBeneathAClassDelta()
+  local meta = Meta.new()
+  meta.renown = 200
+  Meta.purchase(meta, "vigor")
+  local game = Game.new(1, { meta = meta, class = "fighter" })
+  eq(game.player.maxHp, 30 + 5 + 8, "a fighter's class bonus stacks on top of an owned perk's bonus")
+end
+
+function tests.metaLoadReturnsFreshStateForAMissingFile()
+  local meta = Meta.load("/tmp/warren_meta_does_not_exist_12345.sav")
+  eq(meta.renown, 0, "loading a missing meta file yields a fresh state")
+  eq(meta.totalRuns, 0, "a freshly defaulted meta state has recorded no runs")
+end
+
+function tests.metaSaveLoadRoundTrip()
+  local meta = Meta.new()
+  meta.renown = 42
+  Meta.recordRun(meta, { deepestDepth = 6, kills = 5, bossKills = 1, questsCompleted = 2, artifactsFound = 1, won = false })
+  Meta.purchase(meta, "focus")
+  local path = os.tmpname()
+  Meta.save(meta, path)
+  local restored = Meta.load(path)
+  os.remove(path)
+  eq(restored.renown, meta.renown, "renown survives a save/load round trip")
+  eq(restored.totalRuns, meta.totalRuns, "run tally survives a save/load round trip")
+  eq(restored.bestDepth, meta.bestDepth, "best depth survives a save/load round trip")
+  eq(restored.achievements.boss_slayer, true, "achievements survive a save/load round trip")
+  eq(restored.perks.focus, true, "owned perks survive a save/load round trip")
+end
+
+function tests.gameAwardKillTracksKillsAndBossKillsForMetaStats()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 4, 6, 1)
+  rat.hp = 1
+  game.level.entities = { rat }
+  game:playerAttack(rat)
+  eq(game.stats.kills, 1, "felling a plain monster counts toward the kill tally")
+  eq(game.stats.bossKills, 0, "a plain monster does not count as a boss kill")
+
+  local lich = Bosses.create(Bosses.byKey.lich, 2, 4, 6)
+  lich.hp = 1
+  game.level.entities = { lich }
+  game:playerAttack(lich)
+  eq(game.stats.kills, 2, "felling a boss also counts toward the plain kill tally")
+  eq(game.stats.bossKills, 1, "felling a boss counts toward the boss-kill tally")
+end
+
+function tests.gameResolveQuestTracksQuestsCompletedForMetaStats()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.player.quest = { kind = Quests.CULL, species = "rat", need = 1, have = 0, rewardGold = 30, rewardXp = 15 }
+  game:resolveQuest()
+  eq(game.stats.questsCompleted, 0, "an unmet bounty does not count toward quests completed")
+  game.player.quest = { kind = Quests.CULL, species = "rat", need = 1, have = 1, rewardGold = 30, rewardXp = 15 }
+  game:resolveQuest()
+  eq(game.stats.questsCompleted, 1, "resolving a bounty counts toward quests completed")
+end
+
+function tests.gamePickupTracksArtifactsFoundForMetaStats()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.level.floorItems = { { x = 5, y = 5, item = Artifacts.create("bloodfang") } }
+  game:pickupHere()
+  eq(game.stats.artifactsFound, 1, "picking up an artifact counts toward artifacts found")
+  ok(game.player.weapon == nil, "picking up an artifact only stashes it in inventory, it is not auto-equipped")
+end
+
+function tests.gameDescendTracksDeepestDepthEvenAfterAscending()
+  local game = Game.new(9, { maxDepth = 4 })
+  eq(game.deepestDepth, 1, "a fresh game's deepest depth is its starting depth")
+  game.player.x, game.player.y = game.level.downX, game.level.downY
+  game:descend()
+  game.player.x, game.player.y = game.level.downX, game.level.downY
+  game:descend()
+  eq(game.deepestDepth, 3, "descending twice raises the deepest depth to the floor just reached")
+  game.player.x, game.player.y = game.level.upX, game.level.upY
+  game:ascend()
+  eq(game.depth, 2, "ascending drops the live depth")
+  eq(game.deepestDepth, 3, "ascending back up does not erase the deepest depth already reached")
+end
+
+function tests.gameMetaStatsFieldsSurviveSerialization()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 4, 6, 1)
+  rat.hp = 1
+  game.level.entities = { rat }
+  game:playerAttack(rat)
+  game.deepestDepth = 3
+  local restored = Game.fromData(game:toData())
+  eq(restored.stats.kills, game.stats.kills, "the kill tally survives a save/load round trip")
+  eq(restored.deepestDepth, game.deepestDepth, "the deepest depth survives a save/load round trip")
+  local snapshot = restored:metaStats()
+  eq(snapshot.kills, 1, "metaStats reads the restored kill tally")
+  eq(snapshot.deepestDepth, 3, "metaStats reads the restored deepest depth")
+end
+
+-- Elemental resistance (resistances.lua): a damage-type layer that sits
+-- underneath every existing damage pipeline. Default behaviour (no resist
+-- table anywhere) must stay perfectly transparent - that is what every test
+-- above this point already relies on - so these tests build entities and
+-- gear with resist tables explicitly rather than reaching for bestiary data.
+
+function tests.resistancesDefaultTierPassesDamageThroughUnchanged()
+  local plain = Entity.new({ x = 1, y = 1, glyph = "r", name = "rat", kind = "monster", hp = 10, maxHp = 10, attack = 2, defense = 0 })
+  eq(Resistances.tierOf(plain, Resistances.FIRE), Resistances.NORMAL, "an entity with no resist table is normal to every type")
+  eq(Resistances.apply(plain, 7, Resistances.FIRE), 7, "normal tier leaves the amount untouched")
+  eq(Resistances.apply(plain, 0, Resistances.FIRE), 0, "zero damage stays zero regardless of tier")
+end
+
+function tests.resistancesResistHalvesAndFloors()
+  local warded = Entity.new({ x = 1, y = 1, glyph = "@", name = "warded one", kind = "monster", hp = 20, maxHp = 20, attack = 2, defense = 0 })
+  warded.resist = { fire = Resistances.RESIST }
+  eq(Resistances.apply(warded, 9, Resistances.FIRE), 4, "resist halves and floors an odd amount")
+  eq(Resistances.apply(warded, 1, Resistances.FIRE), 0, "resist can floor a small hit all the way to zero")
+  eq(Resistances.apply(warded, 9, Resistances.COLD), 9, "a resist entry for one type does not bleed into another")
+end
+
+function tests.resistancesWeakAmplifies()
+  local frail = Entity.new({ x = 1, y = 1, glyph = "@", name = "frail one", kind = "monster", hp = 20, maxHp = 20, attack = 2, defense = 0 })
+  frail.resist = { cold = Resistances.WEAK }
+  eq(Resistances.apply(frail, 4, Resistances.COLD), 6, "weak deals 1.5x, floored")
+  eq(Resistances.apply(frail, 4, Resistances.FIRE), 4, "an unrelated type is unaffected by a cold weakness")
+end
+
+function tests.resistancesImmuneZeroesEvenAHugeHit()
+  local warded = Entity.new({ x = 1, y = 1, glyph = "@", name = "warded one", kind = "monster", hp = 20, maxHp = 20, attack = 2, defense = 0 })
+  warded.resist = { poison = Resistances.IMMUNE }
+  eq(Resistances.apply(warded, 500, Resistances.POISON), 0, "immune drops even a massive hit to nothing")
+end
+
+function tests.resistancesEquipmentGrantsATierOnTopOfABaseProfile()
+  local wearer = Entity.new({ x = 1, y = 1, glyph = "@", name = "you", kind = "player", hp = 20, maxHp = 20, attack = 5, defense = 1 })
+  eq(Resistances.tierOf(wearer, Resistances.COLD), Resistances.NORMAL, "an unequipped entity has no resist from thin air")
+  wearer.ring = Items.ring("frost band", 0, 0)
+  wearer.ring.resist = { cold = Resistances.RESIST }
+  eq(Resistances.tierOf(wearer, Resistances.COLD), Resistances.RESIST, "a worn ring grants its resist tier")
+  eq(Resistances.apply(wearer, 10, Resistances.COLD), 5, "the granted tier scales incoming damage of that type")
+  wearer.armor = Items.armor("plate", 2)
+  wearer.armor.resist = { cold = Resistances.IMMUNE }
+  eq(Resistances.tierOf(wearer, Resistances.COLD), Resistances.IMMUNE, "the best tier across every equipped slot wins")
+end
+
+function tests.resistancesInnateWeaknessIsMaskedByAResistantItem()
+  local dragon = Entity.new({ x = 1, y = 1, glyph = "D", name = "young dragon", kind = "monster", hp = 30, maxHp = 30, attack = 8, defense = 3 })
+  dragon.resist = { cold = Resistances.WEAK }
+  eq(Resistances.tierOf(dragon, Resistances.COLD), Resistances.WEAK, "the innate weakness applies with nothing worn")
+  dragon.ring = Items.ring("frost band", 0, 0)
+  dragon.ring.resist = { cold = Resistances.RESIST }
+  eq(Resistances.tierOf(dragon, Resistances.COLD), Resistances.RESIST, "a resistant ring outranks and masks an innate weakness")
+end
+
+function tests.combatDefenderResistanceHalvesTheFinalBlow()
+  local attacker = Entity.new({ x = 1, y = 1, glyph = "@", name = "you", kind = "player", hp = 20, maxHp = 20, attack = 10, defense = 1 })
+  local defender = Entity.new({ x = 2, y = 1, glyph = "o", name = "orc", kind = "monster", hp = 30, maxHp = 30, attack = 4, defense = 2 })
+  local baseline = Combat.damage(attacker, defender)
+  defender.resist = { physical = Resistances.RESIST }
+  local resisted = Combat.damage(attacker, defender)
+  eq(resisted, math.floor(baseline / 2), "a physical resist halves combat.damage's own output for the same matchup")
+end
+
+function tests.combatWeaponElementOverridesPhysicalAndCanBeFullyImmune()
+  local attacker = Entity.new({ x = 1, y = 1, glyph = "@", name = "you", kind = "player", hp = 20, maxHp = 20, attack = 10, defense = 1 })
+  attacker.weapon = Affixes.decorate(Items.weapon("dagger", 2), Affixes.weapon[3])
+  eq(attacker.weapon.damageType, "fire", "a flaming affix retags the weapon's own damage type")
+  local mundane = Entity.new({ x = 2, y = 1, glyph = "o", name = "orc", kind = "monster", hp = 30, maxHp = 30, attack = 4, defense = 2 })
+  ok(Combat.damage(attacker, mundane) > 0, "a flaming weapon still hurts an ordinary target")
+  local salamander = Entity.new({ x = 2, y = 1, glyph = "s", name = "salamander", kind = "monster", hp = 30, maxHp = 30, attack = 4, defense = 2 })
+  salamander.resist = { fire = Resistances.IMMUNE }
+  eq(Combat.damage(attacker, salamander), 0, "the same flaming weapon does nothing at all against a fire-immune target")
+end
+
+function tests.statusPoisonAndBurningTicksRespectResistance()
+  local immunePoison = Entity.new({ x = 1, y = 1, glyph = "z", name = "zombie", kind = "monster", hp = 10, maxHp = 10, attack = 2, defense = 0 })
+  immunePoison.resist = { poison = Resistances.IMMUNE }
+  Status.apply(immunePoison, Status.POISON, 3, 4)
+  local lines = Status.tick(immunePoison)
+  eq(immunePoison.hp, 10, "a poison-immune entity takes no damage from a poison tick")
+  ok(contains(lines[1], "shrugs off"), "the immune tick logs a distinct shrug-off line")
+
+  local frailToFire = Entity.new({ x = 1, y = 1, glyph = "T", name = "troll", kind = "monster", hp = 20, maxHp = 20, attack = 6, defense = 2 })
+  frailToFire.resist = { fire = Resistances.WEAK }
+  Status.apply(frailToFire, Status.BURNING, 3, 2)
+  Status.tick(frailToFire)
+  eq(frailToFire.hp, 17, "a fire-weak entity takes 1.5x the tick's potency, floored")
+end
+
+function tests.hazardsAfflictAppliesTargetResistance()
+  local level = arena(21, 11)
+  Hazards.ignite(level, 5, 5, 3, 4)
+  local salamander = Monsters.create(Monsters.byKey.rat, 1, 5, 5, 1)
+  salamander.resist = { fire = Resistances.RESIST }
+  local hpBefore = salamander.hp
+  Hazards.afflict(level, salamander)
+  eq(salamander.hp, hpBefore - 2, "standing in fire as fire-resistant halves the usual potency")
+end
+
+function tests.spellMissileAndFireballRespectTargetResistance()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local wisp = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  wisp.hp, wisp.maxHp = 40, 40
+  wisp.resist = { arcane = Resistances.IMMUNE }
+  game.level.entities = { wisp }
+  game:castSpell("missile", wisp)
+  eq(wisp.hp, 40, "an arcane-immune target takes no damage from magic missile")
+
+  local blastGame = stagedGame(2, arena(21, 11), 5, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 6, 6, 1)
+  orc.hp, orc.maxHp = 20, 20
+  orc.resist = { fire = Resistances.RESIST }
+  blastGame.level.entities = { orc }
+  Effects.apply("fireball", blastGame, blastGame.player, {})
+  eq(orc.hp, 16, "a fire-resistant target only takes half of fireball's flat burn")
+end
+
+function tests.throwingAndRangedDamageRespectResistance()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local flamingDagger = Affixes.decorate(Items.weapon("dagger", 3), Affixes.weapon[3])
+  game.player.inventory[#game.player.inventory + 1] = flamingDagger
+  local salamander = Monsters.create(Monsters.byKey.orc, 1, 6, 6, 1)
+  salamander.hp, salamander.maxHp = 40, 40
+  salamander.resist = { fire = Resistances.IMMUNE }
+  game.level.entities = { salamander }
+  local success = game:throwAt(#game.player.inventory, salamander)
+  ok(success, "the throw itself still leaves the thrower's hand")
+  eq(salamander.hp, 40, "a fire-immune target takes no damage from a thrown flaming weapon")
+
+  local rangedGame = stagedGame(1, arena(21, 11), 3, 6)
+  rangedGame.player.bow = Items.bow("longbow", 3, 6)
+  rangedGame.player.inventory[#rangedGame.player.inventory + 1] = Items.ammo("arrow", 5)
+  local armored = Monsters.create(Monsters.byKey.orc, 1, 6, 6, 1)
+  armored.hp, armored.maxHp = 40, 40
+  armored.resist = { physical = Resistances.RESIST }
+  rangedGame.level.entities = { armored }
+  rangedGame:fireAt(armored)
+  eq(armored.hp, 37, "physical resistance halves the arrow's already-defense-reduced damage")
+end
+
+function tests.equippingCinderplateAndFrostbandGrantsTheirResist()
+  local wearer = Entity.new({ x = 1, y = 1, glyph = "@", name = "you", kind = "player", hp = 20, maxHp = 20, attack = 5, defense = 1 })
+  Items.equipArmor(Artifacts.create("cinderplate"), wearer)
+  eq(Resistances.tierOf(wearer, Resistances.FIRE), Resistances.RESIST, "cinderplate grants fire resist while worn")
+  Items.equipRing(Artifacts.create("frostband"), wearer)
+  eq(Resistances.tierOf(wearer, Resistances.COLD), Resistances.RESIST, "frostband grants cold resist while worn")
+  eq(Resistances.tierOf(wearer, Resistances.POISON), Resistances.NORMAL, "neither artifact grants a resist it was not built for")
+end
+
+function tests.disenchantingAnElementalAffixClearsItsDamageType()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local weapon = Affixes.decorate(Items.weapon("dagger", 2), Affixes.weapon[4])
+  Items.equipWeapon(weapon, game.player)
+  eq(weapon.damageType, "poison", "venomed tags the weapon as poison-typed")
+  Crafting.disenchant(game.player, weapon)
+  eq(weapon.damageType, nil, "disenchanting clears the elemental typing along with the affix")
+end
+
+function tests.bossBreathDamageTypeMatchesTheMonsterAndCanBeShruggedOff()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local dragon = Monsters.create(Monsters.byKey.dragon, 1, 6, 6, 1)
+  game.level.entities = { dragon }
+  eq(Resistances.tierOf(dragon, Resistances.FIRE), Resistances.IMMUNE, "the bestiary dragon is immune to its own breath element")
+  eq(Resistances.tierOf(dragon, Resistances.COLD), Resistances.WEAK, "the bestiary dragon is innately weak to cold")
+
+  game.player.resist = { fire = Resistances.IMMUNE }
+  local hpBefore = game.player.hp
+  game:monsterShoot(dragon)
+  eq(game.player.hp, hpBefore, "a fire-immune player takes no damage from dragon breath")
+  eq(Status.has(game.player, Status.BURNING), false, "a fire-immune player never catches alight from the breath")
+end
+
+function tests.resistFieldsSurviveEntitySerialization()
+  local dragon = Monsters.create(Monsters.byKey.dragon, 1, 5, 5, 6)
+  local restored = Entity.fromData(dragon:toData())
+  eq(Resistances.tierOf(restored, Resistances.FIRE), Resistances.IMMUNE, "a restored entity keeps its innate resist profile")
+end
+
+function tests.factionsTierBoundariesReflectReputationScore()
+  eq(Factions.tier(0), "neutral", "a fresh reputation reads neutral")
+  eq(Factions.tier(-10), "unfriendly", "the unfriendly ceiling is inclusive")
+  eq(Factions.tier(-9), "neutral", "one point above the unfriendly ceiling is still neutral")
+  eq(Factions.tier(-30), "hostile", "the hostile ceiling is inclusive")
+  eq(Factions.tier(25), "friendly", "the friendly floor is inclusive")
+  eq(Factions.tier(60), "honored", "the honored floor is inclusive")
+end
+
+function tests.factionsAdjustAccumulatesAndClampsToTheHundredBounds()
+  local player = {}
+  Factions.adjust(player, Factions.GOBLINOID, -40)
+  eq(Factions.reputationFor(player, Factions.GOBLINOID), -40, "a first adjustment lands from the implicit zero baseline")
+  Factions.adjust(player, Factions.GOBLINOID, -80)
+  eq(Factions.reputationFor(player, Factions.GOBLINOID), -100, "reputation floors at -100")
+  Factions.adjust(player, Factions.GOBLINOID, 500)
+  eq(Factions.reputationFor(player, Factions.GOBLINOID), 100, "reputation caps at 100")
+  eq(Factions.reputationFor(player, Factions.MERCHANT), 0, "an untouched faction still reads neutral zero")
+end
+
+function tests.factionsRegisterKillSoursOnlyTheFallensFaction()
+  local player = {}
+  local goblin = Monsters.create(Monsters.byKey.goblin, 1, 1, 1, 2)
+  Factions.registerKill(player, goblin)
+  eq(Factions.reputationFor(player, Factions.GOBLINOID), -5, "felling a goblin sours goblinoid standing")
+  eq(Factions.reputationFor(player, Factions.VERMIN), 0, "an unrelated faction is left untouched")
+end
+
+function tests.factionsRegisterKillPenalizesABossFarMoreThanARegularKill()
+  local player = {}
+  local dragon = Monsters.create(Monsters.byKey.dragon, 1, 1, 1, 6)
+  dragon.isBoss = true
+  Factions.registerKill(player, dragon)
+  eq(Factions.reputationFor(player, Factions.DRAKE), -15, "a boss kill costs three times a rank-and-file kill")
+end
+
+function tests.factionsRegisterKillIgnoresAFactionlessTarget()
+  local player = {}
+  Factions.registerKill(player, { faction = nil })
+  eq(player.reputation, nil, "a factionless kill never even creates a reputation table")
+end
+
+function tests.factionsPriceMultiplierScalesFromHostileToHonored()
+  local player = {}
+  eq(Factions.priceMultiplier(player, Factions.MERCHANT), 1.0, "a fresh, neutral standing charges catalog price")
+  Factions.adjust(player, Factions.MERCHANT, -40)
+  eq(Factions.priceMultiplier(player, Factions.MERCHANT), 1.5, "a hostile guild marks its prices up")
+  Factions.adjust(player, Factions.MERCHANT, 100)
+  eq(Factions.priceMultiplier(player, Factions.MERCHANT), 0.65, "an honored guild discounts its prices")
+end
+
+function tests.factionsIsWaryTrueForAFreshGoblinoidAndFalseOnceProvoked()
+  local player = {}
+  local kobold = Monsters.create(Monsters.byKey.kobold, 1, 1, 1, 1)
+  eq(Factions.isWary(player, kobold), true, "an unprovoked goblinoid starts wary of a stranger")
+  kobold.provoked = true
+  eq(Factions.isWary(player, kobold), false, "a provoked goblinoid is no longer wary")
+end
+
+function tests.factionsIsWaryIsFalseForNonTribalFactionsAndOnceTheTribeGoesHostile()
+  local player = {}
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 1, 1, 1)
+  eq(Factions.isWary(player, rat), false, "vermin were never a wary tribe to begin with")
+  local kobold = Monsters.create(Monsters.byKey.kobold, 2, 1, 1, 1)
+  Factions.adjust(player, Factions.GOBLINOID, -40)
+  eq(Factions.isWary(player, kobold), false, "a tribe hated into hostility stops holding back even for a fresh member")
+end
+
+function tests.factionsAppeaseSpendsGoldAndRaisesReputationOrFailsWithoutFunds()
+  local player = { gold = 10 }
+  local success, cost = Factions.appease(player, Factions.GOBLINOID)
+  eq(success, false, "an empty purse cannot buy any goodwill")
+  eq(cost, 20, "the failure reports the base tribute cost at neutral standing")
+  eq(player.gold, 10, "a failed tribute spends nothing")
+  player.gold = 100
+  local success2, cost2 = Factions.appease(player, Factions.GOBLINOID)
+  eq(success2, true, "a well-stocked purse can pay the tribute")
+  eq(cost2, 20, "the neutral tribute costs its base amount")
+  eq(player.gold, 80, "the tribute's cost is deducted")
+  eq(Factions.reputationFor(player, Factions.GOBLINOID), 15, "the tribute raises standing by its fixed amount")
+end
+
+function tests.factionsAppeaseCostsMoreTheDeeperTheGrudge()
+  local player = { gold = 1000 }
+  Factions.adjust(player, Factions.BANDIT, -30)
+  local _, cost = Factions.appease(player, Factions.BANDIT)
+  eq(cost, 80, "the tribute cost climbs with how negative the standing already is")
+end
+
+function tests.factionsAppeaseFailsOnceAFactionIsAlreadyMaxedOut()
+  local player = { gold = 1000, reputation = { [Factions.GOBLINOID] = 100 } }
+  local success, cost = Factions.appease(player, Factions.GOBLINOID)
+  eq(success, false, "an already-maxed relationship has nothing left to buy")
+  eq(cost, 0, "the failure reports there was no cost, not an unaffordable one")
+  eq(player.gold, 1000, "nothing is spent when there is nothing to buy")
+end
+
+function tests.factionAndProvokedFieldsSurviveEntitySerialization()
+  local kobold = Monsters.create(Monsters.byKey.kobold, 1, 1, 1, 1)
+  kobold.provoked = true
+  local restored = Entity.fromData(kobold:toData())
+  eq(restored.faction, Factions.GOBLINOID, "a monster's faction tag survives a round trip")
+  eq(restored.provoked, true, "a monster's provoked flag survives a round trip")
+end
+
+function tests.gameTakeMonsterTurnLeavesAWaryGoblinoidAloneUntilProvoked()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local kobold = Monsters.create(Monsters.byKey.kobold, 1, 4, 6, 1)
+  game.level.entities = { kobold }
+  local hpBefore = game.player.hp
+  game:takeMonsterTurn(kobold)
+  eq(kobold.x, 4, "an unprovoked kobold does not close in")
+  eq(game.player.hp, hpBefore, "an unprovoked kobold does not attack even when adjacent")
+end
+
+function tests.gamePlayerAttackProvokesAWaryGoblinoidSoItFightsBackNextTurn()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local kobold = Monsters.create(Monsters.byKey.kobold, 1, 4, 6, 1)
+  kobold.hp = 100
+  game.level.entities = { kobold }
+  game:playerAttack(kobold)
+  eq(kobold.provoked, true, "aiming a melee attack at a wary goblinoid provokes it")
+  local hpBefore = game.player.hp
+  game:takeMonsterTurn(kobold)
+  ok(game.player.hp < hpBefore, "a provoked, adjacent kobold now fights back")
+end
+
+function tests.gameAwardKillSoursFactionReputationWithTheFallensFaction()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  orc.hp = 1
+  game.level.entities = { orc }
+  game:playerAttack(orc)
+  eq(orc:isAlive(), false, "the orc dies to the hit")
+  eq(Factions.reputationFor(game.player, Factions.ORCISH), -5, "the kill sours standing with the orc's faction")
+end
+
+function tests.shopBuyIsMarkedUpWhenMerchantsAreHostile()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  local keeper = Monsters.create(Monsters.byKey.shopkeeper, 1, 10, 10, 4)
+  game.level.entities = { keeper }
+  game.player.gold = 100
+  Factions.adjust(game.player, Factions.MERCHANT, -40)
+  game.level.floorItems = { { x = 4, y = 3, item = Items.potionOf("heal"), price = 15, shopId = keeper.id } }
+  game:movePlayer(1, 0)
+  eq(game.player.gold, 78, "a hostile guild marks the stamped price up by half, floored")
+end
+
+function tests.shopBuyIsDiscountedWhenMerchantsAreHonored()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  local keeper = Monsters.create(Monsters.byKey.shopkeeper, 1, 10, 10, 4)
+  game.level.entities = { keeper }
+  game.player.gold = 100
+  Factions.adjust(game.player, Factions.MERCHANT, 60)
+  game.level.floorItems = { { x = 4, y = 3, item = Items.potionOf("heal"), price = 15, shopId = keeper.id } }
+  game:movePlayer(1, 0)
+  eq(game.player.gold, 91, "an honored guild discounts the stamped price, floored")
+end
+
+function tests.shopSellValueRisesWithMerchantStanding()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  game.player.inventory = { Items.potionOf("heal") }
+  local goldBefore = game.player.gold
+  Factions.adjust(game.player, Factions.MERCHANT, 60)
+  local value = game:sellItem(1)
+  eq(value, 10, "an honored guild pays more than the neutral half-price for the same ware")
+  eq(game.player.gold, goldBefore + 10, "the sale proceeds land in the wallet")
+end
+
+function tests.stealingFromShopAlsoSoursMerchantReputation()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  local keeper = Monsters.create(Monsters.byKey.shopkeeper, 1, 10, 10, 4)
+  game.level.entities = { keeper }
+  game.level.floorItems = { { x = 4, y = 3, item = Items.scroll("identify"), price = 18, shopId = keeper.id } }
+  game:stealFromShop(1)
+  eq(Factions.reputationFor(game.player, Factions.MERCHANT), -20, "a theft sours the merchant guild's opinion of the player")
+end
+
+function tests.resolveQuestNudgesMerchantReputationUpward()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.player.quest = { kind = Quests.CULL, species = "rat", need = 1, have = 1, rewardGold = 30, rewardXp = 15 }
+  game:resolveQuest()
+  eq(Factions.reputationFor(game.player, Factions.MERCHANT), 3, "turning in a bounty pads the merchant guild's opinion of the player")
+end
+
+function tests.gameAppeaseFactionSpendsGoldAndLogsTheOutcome()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  game.player.gold = 100
+  local success = game:appeaseFaction(Factions.GOBLINOID)
+  eq(success, true, "a well-funded tribute succeeds")
+  eq(game.player.gold, 80, "the tribute's cost is deducted from the wallet")
+  eq(Factions.reputationFor(game.player, Factions.GOBLINOID), 15, "the tribute raises standing")
+  ok(contains(game.log:last(), "goblinoid"), "the successful tribute is logged")
+
+  game.player.gold = 0
+  local failure = game:appeaseFaction(Factions.BANDIT)
+  eq(failure, false, "an empty purse cannot pay any tribute")
+  ok(contains(game.log:last(), "gold"), "the failed tribute explains the shortfall")
+end
+
+function tests.playerReputationSurvivesGameSaveLoadRoundTrip()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  Factions.adjust(game.player, Factions.GOBLINOID, -40)
+  Factions.adjust(game.player, Factions.MERCHANT, 10)
+  local restored = Game.fromData(game:toData())
+  eq(Factions.reputationFor(restored.player, Factions.GOBLINOID), -40, "goblinoid standing survives a save/load round trip")
+  eq(Factions.reputationFor(restored.player, Factions.MERCHANT), 10, "merchant standing survives a save/load round trip")
+end
+
+-- Carry weight (encumbrance.lua): a hoard heavy enough to cross a capacity
+-- threshold slows the carrier down, and a wide overage on top of that also
+-- costs defense. Weight is derived purely from inventory/equipped items and
+-- level, so nothing here needs its own save-format handling.
+
+function tests.encumbranceItemWeightScalesWithGearPower()
+  eq(Encumbrance.itemWeight(Items.weapon("dagger", 2)), 6, "a weak weapon carries close to its flat base weight")
+  eq(Encumbrance.itemWeight(Items.weapon("greatsword", 9)), 9, "a powerful weapon weighs more than a weak one of the same kind")
+  eq(Encumbrance.itemWeight(Items.armor("padded vest", 0)), 9, "armor has its own, heavier, flat base")
+end
+
+function tests.encumbranceAmmoWeightScalesWithStackCount()
+  eq(Encumbrance.itemWeight(Items.ammo("arrow", 1)), 1, "a single arrow weighs its unit weight")
+  eq(Encumbrance.itemWeight(Items.ammo("arrow", 5)), 5, "a stack of arrows weighs the unit weight times the count")
+end
+
+function tests.encumbranceCapacityGrowsWithLevel()
+  eq(Encumbrance.capacityFor({ level = 1 }), 16, "a level 1 carrier's capacity is the flat base plus one level's worth")
+  eq(Encumbrance.capacityFor({ level = 5 }), 32, "capacity scales linearly with level")
+  eq(Encumbrance.capacityFor({}), 16, "a missing level defaults to level 1's capacity")
+end
+
+function tests.encumbranceEquippedGearCountsTowardCarriedWeight()
+  local carrier = {
+    inventory = {},
+    weapon = Items.weapon("sword", 3), armor = Items.armor("mail", 6),
+    ring = Items.ring("band", 1, 1), bow = Items.bow("bow", 2, 3),
+  }
+  eq(Encumbrance.carriedWeight(carrier), 26, "worn and wielded gear counts exactly like the same items in the pack")
+end
+
+function tests.encumbranceLightLoadHasNoPenalty()
+  local game = Game.new(1)
+  eq(game.player:encumbranceTier(), Encumbrance.LIGHT, "a fresh player's starting kit is well under capacity")
+  eq(game.player:effectiveSpeed(), 100, "a light load never slows the carrier down")
+  eq(game.player:effectiveDefense(), 1, "a light load never costs defense")
+end
+
+-- Each padding armor has zero power (so bestUpgrade never mistakes it for an
+-- upgrade) and so weighs exactly the base 9.
+local function padWith(entity, count)
+  for _ = 1, count do
+    entity.inventory[#entity.inventory + 1] = Items.armor("lockbox", 0)
+  end
+end
+
+function tests.encumbranceBurdenedSlowsMovementButNotDefense()
+  local game = Game.new(1)
+  game.player.inventory = {}
+  padWith(game.player, 2)
+  ok(Encumbrance.carriedWeight(game.player) > Encumbrance.capacityFor(game.player),
+    "two heavy armors alone clear the fresh player's capacity")
+  eq(game.player:encumbranceTier(), Encumbrance.BURDENED, "a moderate overage is merely burdened")
+  eq(game.player:effectiveSpeed(), 80, "a burdened carrier loses a flat chunk of speed")
+  eq(game.player:effectiveDefense(), 1, "a burdened carrier's defense is untouched")
+end
+
+function tests.encumbranceOverloadedSlowsMovementAndWeakensDefense()
+  local game = Game.new(1)
+  game.player.inventory = {}
+  padWith(game.player, 3)
+  eq(game.player:encumbranceTier(), Encumbrance.OVERLOADED, "a wide overage is overloaded")
+  eq(game.player:effectiveSpeed(), 55, "an overloaded carrier loses far more speed than a merely burdened one")
+  eq(game.player:effectiveDefense(), -1, "an overloaded carrier also fumbles, losing defense")
+end
+
+function tests.gameDropItemReturnsItemToTheFloorAndFreesCapacity()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  game.player.inventory = { Items.potionOf("heal") }
+  local before = Encumbrance.carriedWeight(game.player)
+  local dropped = game:dropItem(1)
+  eq(dropped.effect, "heal", "dropItem returns the item that was shed")
+  eq(#game.player.inventory, 0, "the item leaves the inventory")
+  eq(#game.level.floorItems, 1, "the item lands on the floor")
+  eq(game.level.floorItems[1].x, game.player.x, "the dropped item lands exactly at the player's feet")
+  eq(game.level.floorItems[1].y, game.player.y, "the dropped item lands exactly at the player's feet")
+  ok(Encumbrance.carriedWeight(game.player) < before, "dropping an item frees up carried weight")
+  ok(contains(game.log:last(), "drop"), "dropping an item is logged")
+end
+
+function tests.gamePickupWarnsWhenNewWeightTipsIntoOverloaded()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  game.player.inventory = {}
+  padWith(game.player, 1)
+  eq(game.player:encumbranceTier(), Encumbrance.LIGHT, "one heavy armor alone still fits under capacity")
+  game.level.floorItems = {}
+  for _ = 1, 2 do
+    game.level.floorItems[#game.level.floorItems + 1] = { x = 3, y = 3, item = Items.armor("lockbox", 0) }
+  end
+  game:pickupHere()
+  eq(game.player:encumbranceTier(), Encumbrance.OVERLOADED, "the pickup tips the total weight past the overloaded threshold")
+  ok(contains(game.log:last(), "overloaded"), "tipping straight into overloaded is called out by name")
+end
+
+function tests.gamePickupWarnsWithALighterMessageWhenOnlyTippingIntoBurdened()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  game.player.inventory = {}
+  game.level.floorItems = {}
+  for _ = 1, 2 do
+    game.level.floorItems[#game.level.floorItems + 1] = { x = 3, y = 3, item = Items.armor("lockbox", 0) }
+  end
+  game:pickupHere()
+  eq(game.player:encumbranceTier(), Encumbrance.BURDENED, "two heavy armors in one pickup lands in the burdened band")
+  ok(contains(game.log:last(), "heavy"), "tipping only into burdened gets the softer warning")
+end
+
+function tests.autopilotDropsCheapestJunkWhenOverloadedAndSafe()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  game.level.entities = {}
+  game.player.inventory = {}
+  padWith(game.player, 3)
+  local amulet, key = Items.amulet(), Items.key()
+  game.player.inventory[#game.player.inventory + 1] = amulet
+  game.player.inventory[#game.player.inventory + 1] = key
+  local countBefore = #game.player.inventory
+  eq(game:encumbranceTier(), Encumbrance.OVERLOADED, "the staged inventory is overloaded before the autopilot acts")
+  game:choosePlayerAction()
+  eq(#game.player.inventory, countBefore - 1, "the autopilot sheds exactly one item while overloaded and safe")
+  ok(contains(game.log:last(), "drop"), "the shed item is logged as a drop")
+  ok(game:findInInventory(function(item) return item == amulet end) ~= nil, "the amulet is never sacrificed to encumbrance")
+  ok(game:findInInventory(function(item) return item == key end) ~= nil, "a key is never sacrificed to encumbrance")
+end
+
+function tests.encumbranceTierIsDerivedAcrossASaveLoadRoundTrip()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  game.player.inventory = {}
+  padWith(game.player, 2)
+  local tierBefore = game:encumbranceTier()
+  local restored = Game.fromData(game:toData())
+  eq(restored:encumbranceTier(), tierBefore, "the same inventory yields the same tier after a save/load round trip")
+end
+
+function tests.renderPanelShowsCarriedLoad()
+  local game = Game.new(1)
+  local panel = Render.panel(game)
+  ok(contains(panel, "load light ("), "the status panel reports the carrier's current load tier and weight")
+end
+
+function tests.tilesClassifyVolatileTerrain()
+  eq(Tiles.isLava(Tiles.LAVA), true, "isLava recognizes the lava glyph")
+  eq(Tiles.isLava(Tiles.FLOOR), false, "isLava rejects plain floor")
+  eq(Tiles.isChasm(Tiles.CHASM), true, "isChasm recognizes the chasm glyph")
+  eq(Tiles.isChasm(Tiles.FLOOR), false, "isChasm rejects plain floor")
+  eq(Tiles.isIce(Tiles.ICE), true, "isIce recognizes the ice glyph")
+  eq(Tiles.isIce(Tiles.FLOOR), false, "isIce rejects plain floor")
+  eq(Tiles.isWalkable(Tiles.LAVA), true, "lava is walkable at the player's own risk")
+  eq(Tiles.isWalkable(Tiles.CHASM), true, "a chasm is walkable right up until it swallows you")
+  eq(Tiles.isWalkable(Tiles.ICE), true, "ice is walkable, if slippery")
+end
+
+function tests.terrainAfflictLavaDoesNothingOffLava()
+  local level = arena(21, 11)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 5, 5, 1)
+  eq(Terrain.afflictLava(level, rat), nil, "afflictLava does nothing to an entity off any lava cell")
+end
+
+function tests.terrainLavaRespectsFireResistanceAndImmunity()
+  local level = arena(21, 11)
+  level.map:set(5, 5, Tiles.LAVA)
+
+  local resistant = Monsters.create(Monsters.byKey.rat, 1, 5, 5, 1)
+  resistant.resist = { fire = Resistances.RESIST }
+  local hpBefore = resistant.hp
+  local line = Terrain.afflictLava(level, resistant)
+  eq(resistant.hp, hpBefore - math.floor(Terrain.LAVA_DAMAGE / 2),
+    "lava damage is halved for a fire-resistant target")
+  ok(contains(line, "sears"), "a damaging lava tick describes itself as searing")
+  eq(Status.has(resistant, Status.BURNING), true, "a scorched target is also set alight")
+
+  local immune = Monsters.create(Monsters.byKey.rat, 2, 5, 5, 1)
+  immune.resist = { fire = Resistances.IMMUNE }
+  local hpBefore2 = immune.hp
+  local immuneLine = Terrain.afflictLava(level, immune)
+  eq(immune.hp, hpBefore2, "a fire-immune target takes no damage from lava")
+  ok(contains(immuneLine, "unharmed"), "a harmless lava tick says so")
+  eq(Status.has(immune, Status.BURNING), false, "a fire-immune target is not set alight by lava")
+end
+
+function tests.terrainLavaBurnsAndIgnitesAPlayerWhoStepsOnIt()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.map:set(4, 6, Tiles.LAVA)
+  local hpBefore = game.player.hp
+  game:movePlayer(1, 0)
+  eq(game.player.hp, hpBefore - Terrain.LAVA_DAMAGE,
+    "stepping onto lava deals its full damage to an unresistant player")
+  eq(Status.has(game.player, Status.BURNING), true, "lava also sets the player alight")
+  ok(contains(game.log:last(), "sears"), "the burn is logged")
+end
+
+function tests.terrainLavaCanKillAWeakMonsterAndCreditsThePlayer()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.map:set(5, 6, Tiles.LAVA)
+  local bat = Monsters.create(Monsters.byKey.bat, 1, 4, 6, 1)
+  bat.hp, bat.maxHp = 3, 3
+  game.level.entities = { bat }
+  local killsBefore = game.stats.kills
+  game:moveMonster(bat, 1, 0)
+  eq(#game.level.entities, 0, "a monster killed by lava is removed from the level")
+  eq(game.stats.kills, killsBefore + 1, "a lava death still credits the player with a kill")
+end
+
+function tests.terrainChasmDropsThePlayerToTheFloorBelowWithFallDamage()
+  local game = stagedGame(3, arena(21, 11), 5, 6)
+  game.level.map:set(6, 6, Tiles.CHASM)
+  local hpBefore = game.player.hp
+  local depthBefore = game.depth
+  game:movePlayer(1, 0)
+  ok(game.player.hp < hpBefore, "falling into a chasm deals fall damage")
+  eq(game.depth, depthBefore + 1, "falling into a chasm advances to the floor below")
+  eq(game.deepestDepth, depthBefore + 1, "falling into a chasm counts toward the deepest depth reached")
+  ok(contains(game.log:last(), "plunge"), "the fall is logged")
+end
+
+function tests.terrainChasmSwallowsAMonsterAndCreditsTheKill()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.map:set(5, 6, Tiles.CHASM)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 4, 6, 1)
+  game.level.entities = { rat }
+  local killsBefore = game.stats.kills
+  game:moveMonster(rat, 1, 0)
+  eq(#game.level.entities, 0, "a monster that falls into a chasm is removed from the level")
+  eq(game.stats.kills, killsBefore + 1, "a chasm death still credits the player with a kill, like a lethal trap")
+end
+
+function tests.terrainIceSlidesATravellerUntilSomethingStopsIt()
+  local game = stagedGame(1, arena(21, 11), 2, 6)
+  for x = 3, 6 do game.level.map:set(x, 6, Tiles.ICE) end
+  game:movePlayer(1, 0)
+  eq(game.player.x, 7, "stepping onto ice slides the player through every consecutive ice tile")
+  eq(game.player.y, 6, "sliding on ice does not drift off the axis of travel")
+end
+
+function tests.terrainIceSlideStopsBeforeAWall()
+  local game = stagedGame(1, arena(21, 11), 2, 6)
+  game.level.map:set(3, 6, Tiles.ICE)
+  game.level.map:set(4, 6, Tiles.ICE)
+  game.level.map:set(5, 6, Tiles.WALL)
+  game:movePlayer(1, 0)
+  eq(game.player.x, 4, "an ice slide stops on the last ice tile before a wall")
+end
+
+function tests.terrainIceSlideStopsAtAnOccupiedCell()
+  local game = stagedGame(1, arena(21, 11), 2, 6)
+  game.level.map:set(3, 6, Tiles.ICE)
+  game.level.map:set(4, 6, Tiles.ICE)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 5, 6, 1)
+  game.level.entities = { rat }
+  game:movePlayer(1, 0)
+  eq(game.player.x, 4, "an ice slide stops just short of another actor")
+end
+
+-- Status.LEVITATE (see status.lua and Game:checkTerrainFor) short-circuits
+-- every branch below before any of it runs - no burn, no fall, no slide -
+-- so these mirror the three terrain tests directly above/below them with
+-- one difference: the mover carries the status first.
+function tests.checkTerrainForSkipsLavaDamageAndIgnitionForALevitatingPlayer()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.map:set(4, 6, Tiles.LAVA)
+  Status.apply(game.player, Status.LEVITATE, 20, 1)
+  local hpBefore = game.player.hp
+  game:movePlayer(1, 0)
+  eq(game.player.hp, hpBefore, "a levitating player takes no damage crossing lava")
+  eq(Status.has(game.player, Status.BURNING), false, "a levitating player is never set alight by lava")
+  ok(contains(game.log:last(), "drift"), "the skip over a visible hazard is still logged, not silent")
+end
+
+function tests.checkTerrainForSkipsTheChasmFallForALevitatingPlayer()
+  local game = stagedGame(3, arena(21, 11), 5, 6)
+  game.level.map:set(6, 6, Tiles.CHASM)
+  Status.apply(game.player, Status.LEVITATE, 20, 1)
+  local hpBefore = game.player.hp
+  local depthBefore = game.depth
+  game:movePlayer(1, 0)
+  eq(game.player.x, 6, "a levitating player actually reaches the chasm cell instead of refusing to enter it")
+  eq(game.player.hp, hpBefore, "a levitating player takes no fall damage over a chasm")
+  eq(game.depth, depthBefore, "a levitating player drifts over a chasm instead of dropping to the floor below")
+end
+
+function tests.checkTerrainForSkipsTheIceSlideForALevitatingPlayer()
+  local game = stagedGame(1, arena(21, 11), 2, 6)
+  for x = 3, 6 do game.level.map:set(x, 6, Tiles.ICE) end
+  Status.apply(game.player, Status.LEVITATE, 20, 1)
+  game:movePlayer(1, 0)
+  eq(game.player.x, 3, "a levitating player enters the first ice cell but never slides across the rest")
+end
+
+function tests.checkTerrainForSkipsLavaForALevitatingMonsterToo()
+  local game = stagedGame(1, arena(21, 11), 2, 2)
+  game.level.map:set(6, 6, Tiles.LAVA)
+  local bat = Monsters.create(Monsters.byKey.bat, 1, 5, 6, 1)
+  Status.apply(bat, Status.LEVITATE, 20, 1)
+  game.level.entities = { bat }
+  local hpBefore = bat.hp
+  game:moveMonster(bat, 1, 0)
+  eq(bat.x, 6, "the levitating monster still moves onto the lava cell")
+  eq(bat.hp, hpBefore, "a levitating monster crossing lava takes no damage either - the guard is not player-only")
+end
+
+function tests.terrainGlyphsSurviveMapSerialization()
+  local map = Map.new(10, 6)
+  for y = 2, 5 do for x = 2, 9 do map:set(x, y, Map.FLOOR) end end
+  map:set(4, 4, Tiles.LAVA)
+  map:set(5, 4, Tiles.CHASM)
+  map:set(6, 4, Tiles.ICE)
+  local restored = Map.fromData(map:toData())
+  eq(restored:get(4, 4), Tiles.LAVA, "a lava tile survives a map round trip")
+  eq(restored:get(5, 4), Tiles.CHASM, "a chasm tile survives a map round trip")
+  eq(restored:get(6, 4), Tiles.ICE, "an ice tile survives a map round trip")
+end
+
+function tests.chasmFallFieldsSurviveGameSaveLoad()
+  local game = stagedGame(3, arena(21, 11), 5, 6)
+  game.level.map:set(6, 6, Tiles.CHASM)
+  game:movePlayer(1, 0)
+  local path = os.tmpname()
+  game:save(path)
+  local restored = Game.load(path)
+  os.remove(path)
+  eq(restored.depth, game.depth, "the depth reached by falling survives a save/load round trip")
+  eq(restored.player.hp, game.player.hp, "hp after a chasm fall survives a save/load round trip")
+end
+
+function tests.lavaChasmAndIceStayOffTheShallowFloors()
+  for seed = 1, 5 do
+    for depth = 1, 3 do
+      local level = Builder.build(depth, Rng.new(seed), {})
+      for _, tile in ipairs(level.map.tiles) do
+        ok(tile ~= Tiles.LAVA and tile ~= Tiles.CHASM and tile ~= Tiles.ICE,
+          "no volatile terrain appears above depth 4")
+      end
+    end
+  end
+end
+
+function tests.builderOccasionallyPlacesLavaChasmAndIceFromDepthFour()
+  local sawLava, sawChasm, sawIce = false, false, false
+  for seed = 1, 60 do
+    local level = Builder.build(4, Rng.new(seed), {})
+    for _, tile in ipairs(level.map.tiles) do
+      if tile == Tiles.LAVA then sawLava = true end
+      if tile == Tiles.CHASM then sawChasm = true end
+      if tile == Tiles.ICE then sawIce = true end
+    end
+    if sawLava and sawChasm and sawIce then break end
+  end
+  ok(sawLava, "a depth-4 floor eventually places lava on some seed")
+  ok(sawChasm, "a depth-4 floor eventually places a chasm on some seed")
+  ok(sawIce, "a depth-4 floor eventually places ice on some seed")
+end
+
+function tests.chasmNeverAppearsOnTheFinalFloor()
+  for seed = 1, 30 do
+    local level = Builder.build(Builder.MAX_DEPTH, Rng.new(seed), {})
+    for _, tile in ipairs(level.map.tiles) do
+      ok(tile ~= Tiles.CHASM, "no chasm appears on the final floor since there is no floor below it")
+    end
+  end
+end
+
+function tests.eliteNeverPromotesBelowMinDepth()
+  for seed = 1, 40 do
+    local orc = Monsters.create(Monsters.byKey.orc, 1, 5, 5, 2)
+    Elites.maybePromote(Rng.new(seed), orc, 2)
+    ok(not orc.elite, "no promotion below depth 3 regardless of the roll")
+  end
+end
+
+function tests.eliteEligibleExcludesBossesAndTheShopkeeper()
+  local boss = Bosses.create(Bosses.byKey.warlord, 1, 5, 5)
+  local keeper = Monsters.create(Monsters.byKey.shopkeeper, 2, 6, 5, 4)
+  local orc = Monsters.create(Monsters.byKey.orc, 3, 7, 5, 3)
+  ok(not Elites.eligible(boss), "a boss is never eligible for elite promotion")
+  ok(not Elites.eligible(keeper), "the shopkeeper is never eligible for elite promotion")
+  ok(Elites.eligible(orc), "a plain bestiary spawn is eligible for elite promotion")
+end
+
+function tests.eliteArmoredAffixAddsFlatDefenseAndPrefixesTheName()
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 5, 5, 3)
+  local baseDefense = orc.defense
+  Elites.maybePromote(Rng.new(8), orc, 3)
+  eq(orc.eliteTier, "elite", "a single-affix promotion is a plain elite, not a champion")
+  eq(orc.eliteAffixes[1], "armored", "seed 8 rolls the armored affix at depth 3")
+  eq(orc.defense, baseDefense + 3, "armored adds its flat defense bonus")
+  eq(orc.baseDefense, baseDefense + 3, "armored's bonus also lands on baseDefense")
+  eq(orc.name, "armored orc", "the affix name prefixes the species name")
+end
+
+function tests.eliteChampionTierAtDeepDepthRollsTwoDistinctAffixes()
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 5, 5, 7)
+  Elites.maybePromote(Rng.new(9), orc, 7)
+  eq(orc.eliteTier, "champion", "seed 9 at depth 7 rolls a champion")
+  eq(#orc.eliteAffixes, 2, "a champion carries exactly two affixes")
+  ok(orc.eliteAffixes[1] ~= orc.eliteAffixes[2], "a champion never doubles up on the same affix")
+end
+
+function tests.eliteFieldsSurviveSerialization()
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 5, 5, 3)
+  Elites.maybePromote(Rng.new(2), orc, 3)
+  local restored = Entity.fromData(orc:toData())
+  eq(restored.elite, true, "the elite flag survives serialization")
+  eq(restored.eliteTier, "elite", "the elite tier survives serialization")
+  eq(restored.eliteAffixes[1], "swift", "the rolled affix list survives serialization")
+  eq(restored.speed, orc.speed, "the swift affix's speed bonus survives serialization")
+end
+
+-- monsters.lua: Monsters.create must hand every entity its own resist
+-- table, never Monsters.byKey[species].resist itself - applyAffix above
+-- mutates a promoted elite's entity.resist[element] in place the instant it
+-- rolls "warded", and a shared reference there would leak that bump onto
+-- every future spawn of the same species (and the catalog itself) for the
+-- rest of the process, not just the one entity actually promoted. Found via
+-- examine.lua's own test suite: a plain, unpromoted troll built late in a
+-- long test run reported "fire resist" instead of its catalog "fire weak"
+-- because an earlier test's elite promotion (through Builder.build, not
+-- shown here) had already corrupted the shared table.
+function tests.monstersCreateNeverAliasesTheSpeciesCatalogsInnateResistTable()
+  local first = Monsters.create(Monsters.byKey.troll, 1, 5, 5, 1)
+  local second = Monsters.create(Monsters.byKey.troll, 2, 6, 5, 1)
+  ok(first.resist ~= Monsters.byKey.troll.resist, "an entity's resist table is its own, not the catalog's")
+  first.resist.fire = Resistances.RESIST
+  eq(second.resist.fire, "weak", "mutating one troll's resist never leaks onto another troll of the same species")
+  eq(Monsters.byKey.troll.resist.fire, "weak", "mutating an entity's resist never corrupts the species catalog itself")
+end
+
+function tests.builderOccasionallyPromotesAMonsterToEliteFromDepthThree()
+  local level = Builder.build(3, Rng.new(1), {})
+  local found
+  for _, e in ipairs(level.entities) do
+    if e.elite then found = e end
+  end
+  ok(found ~= nil, "this seed's depth-3 floor promotes a monster to elite")
+  eq(found.eliteTier, "elite", "a depth-3 promotion is a plain elite, never a champion")
+end
+
+function tests.elitesNeverAppearOnTheShallowestTwoFloors()
+  for seed = 1, 20 do
+    for depth = 1, 2 do
+      local level = Builder.build(depth, Rng.new(seed), {})
+      for _, e in ipairs(level.entities) do
+        ok(not e.elite, "no elite appears above depth 3")
+      end
+    end
+  end
+end
+
+function tests.eliteVampiricMonsterDrainsHpFromThePlayerOnAMeleeHit()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  orc.elite, orc.eliteAffixes = true, { "vampiric" }
+  orc.hp = orc.maxHp - 5
+  game.level.entities = { orc }
+  local before = orc.hp
+  game:monsterMelee(orc)
+  ok(orc.hp > before, "a vampiric elite heals on the melee hit it lands")
+end
+
+function tests.eliteChillingMonsterSlowsThePlayerOnAMeleeHit()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  orc.elite, orc.eliteAffixes = true, { "chilling" }
+  game.level.entities = { orc }
+  ok(not Status.has(game.player, Status.SLOW), "the player starts unslowed")
+  game:monsterMelee(orc)
+  ok(Status.has(game.player, Status.SLOW), "a chilling elite's hit leaves the player slowed")
+end
+
+function tests.eliteVolatileMonsterExplodesOnDeathDamagingAnAdjacentPlayer()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 4, 6, 1)
+  rat.elite, rat.eliteAffixes = true, { "volatile" }
+  rat.hp = 0
+  game.level.entities = { rat }
+  local before = game.player.hp
+  game:awardKill(rat)
+  ok(game.player.hp < before, "a volatile elite's corpse bursts, damaging the adjacent player")
+  ok(contains(table.concat(game.log:recent(10), " "), "bursts"), "the burst is logged")
+end
+
+function tests.eliteVolatileMonsterDoesNotBurstAnythingBeyondItsBlastRadius()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 8, 6, 1)
+  rat.elite, rat.eliteAffixes = true, { "volatile" }
+  rat.hp = 0
+  game.level.entities = { rat }
+  local before = game.player.hp
+  game:awardKill(rat)
+  eq(game.player.hp, before, "a volatile corpse two cells away leaves the player untouched")
+end
+
+function tests.eliteKillGrantsBonusXpOverThePlainSpeciesReward()
+  local game = stagedGame(9, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 4, 6, 1)
+  rat.hp = 1
+  rat.elite, rat.eliteTier, rat.eliteAffixes = true, "elite", { "brutal" }
+  game.level.entities = { rat }
+  local baseXp = Monsters.xpFor(rat)
+  local bonus = Elites.xpBonus(rat, baseXp)
+  ok(bonus > 0, "the elite bonus is a real, nonzero amount")
+  local xpBefore = game.player.xp
+  game:playerAttack(rat)
+  eq(game.player.xp, xpBefore + baseXp + bonus, "felling an elite grants a bonus over its plain species xp")
+end
+
+-- Vaults (vaults.lua): a lever puzzle gating a guaranteed treasure. Levers
+-- and the door they share an id with are plain data on the level, exactly
+-- like shrines and cauldrons above, so most of these tests build that data
+-- directly rather than waiting on a builder roll.
+
+function tests.vaultsPullThrowsALeverAndOpensASingleLeverVaultImmediately()
+  local level = { vaultLevers = {}, vaultDoors = {} }
+  local lever = { x = 1, y = 1, id = "v1", pulled = false }
+  level.vaultLevers = { lever }
+  level.vaultDoors = { { x = 2, y = 2, id = "v1", opened = false } }
+  local pulled, door = Vaults.pull(level, lever)
+  eq(pulled, true, "pulling a fresh lever succeeds")
+  eq(lever.pulled, true, "the lever is marked pulled")
+  ok(door ~= nil, "a single-lever vault's door opens on its only pull")
+  eq(door.id, "v1", "the returned door is the one this puzzle actually gates")
+  local pulledAgain, doorAgain = Vaults.pull(level, lever)
+  eq(pulledAgain, false, "pulling an already-thrown lever reports failure")
+  eq(doorAgain, nil, "a no-op pull reports no door")
+end
+
+function tests.vaultsPullOpensTheDoorOnlyOnceEveryLeverIsThrown()
+  local level = { vaultLevers = {}, vaultDoors = {} }
+  local leverA = { x = 1, y = 1, id = "v2", pulled = false }
+  local leverB = { x = 1, y = 2, id = "v2", pulled = false }
+  level.vaultLevers = { leverA, leverB }
+  level.vaultDoors = { { x = 3, y = 3, id = "v2", opened = false } }
+  local pulledA, doorA = Vaults.pull(level, leverA)
+  eq(pulledA, true, "pulling the first of two levers succeeds")
+  eq(doorA, nil, "the door stays shut until every lever sharing its id is thrown")
+  local pulledB, doorB = Vaults.pull(level, leverB)
+  eq(pulledB, true, "pulling the second lever succeeds")
+  ok(doorB ~= nil, "the door opens the instant the last lever is thrown")
+end
+
+function tests.vaultsTreasureRollsAGuaranteedAffixOnABaseStrongerThanAnyFloorDrop()
+  for seed = 1, 20 do
+    local item = Vaults.treasure(Rng.new(seed), 5)
+    ok(item.kind == Items.WEAPON or item.kind == Items.ARMOR,
+      "vault treasure is always a weapon or a suit of armor")
+    ok(item.affix ~= nil, "vault treasure always carries a guaranteed affix")
+    ok(item.power >= 7, "vault treasure's power exceeds anything the depth-5 floor loot table can roll")
+  end
+end
+
+function tests.gamePullLeverOpensASingleLeverVaultAndTracksTheStat()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.map:set(6, 6, Tiles.LEVER)
+  game.level.map:set(10, 6, Tiles.VAULT_DOOR)
+  local lever = { x = 6, y = 6, id = "v3", pulled = false }
+  game.level.vaultLevers = { lever }
+  game.level.vaultDoors = { { x = 10, y = 6, id = "v3", opened = false } }
+  eq(game.stats.vaultsOpened, 0, "a fresh run has opened no vaults")
+  local pulled = game:pullLever(lever)
+  eq(pulled, true, "pulling the lever succeeds")
+  eq(game.level.map:get(6, 6), Tiles.LEVER_PULLED, "the lever's own tile flips to its pulled glyph")
+  eq(game.level.map:get(10, 6), Tiles.DOOR_OPEN, "the vault door swings open once its only lever is thrown")
+  eq(game.stats.vaultsOpened, 1, "opening a vault advances the run's vault tally")
+  ok(contains(game.log:last(), "grinds open"), "opening the vault is logged")
+end
+
+function tests.gamePullLeverOnATwoLeverVaultWaitsForTheSecondPull()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.map:set(6, 6, Tiles.LEVER)
+  game.level.map:set(7, 6, Tiles.LEVER)
+  game.level.map:set(10, 6, Tiles.VAULT_DOOR)
+  local leverA = { x = 6, y = 6, id = "v4", pulled = false }
+  local leverB = { x = 7, y = 6, id = "v4", pulled = false }
+  game.level.vaultLevers = { leverA, leverB }
+  game.level.vaultDoors = { { x = 10, y = 6, id = "v4", opened = false } }
+  game:pullLever(leverA)
+  eq(game.level.map:get(10, 6), Tiles.VAULT_DOOR, "the door stays sealed with a lever still unthrown")
+  eq(game.stats.vaultsOpened, 0, "the vault tally does not advance until the puzzle is fully solved")
+  ok(contains(game.log:last(), "clunks into place"), "a partial pull is logged as a clunk, not an opening")
+  game:pullLever(leverB)
+  eq(game.level.map:get(10, 6), Tiles.DOOR_OPEN, "the door opens the instant the last lever is thrown")
+  eq(game.stats.vaultsOpened, 1, "the vault tally advances exactly once, on the pull that completes the puzzle")
+end
+
+function tests.pullingAnAlreadyThrownLeverAgainDoesNotInflateTheVaultTally()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.map:set(6, 6, Tiles.LEVER)
+  game.level.map:set(10, 6, Tiles.VAULT_DOOR)
+  local lever = { x = 6, y = 6, id = "v5", pulled = false }
+  game.level.vaultLevers = { lever }
+  game.level.vaultDoors = { { x = 10, y = 6, id = "v5", opened = false } }
+  game:pullLever(lever)
+  eq(game.stats.vaultsOpened, 1, "the first pull opens the vault")
+  local pulledAgain = game:pullLever(lever)
+  eq(pulledAgain, false, "re-pulling an already-thrown lever reports failure")
+  eq(game.stats.vaultsOpened, 1, "re-pulling an already-thrown lever does not inflate the vault tally")
+end
+
+function tests.movePlayerAutoPullsALeverItStepsOnto()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.level.map:set(6, 5, Tiles.LEVER)
+  local lever = { x = 6, y = 5, id = "v6", pulled = false }
+  game.level.vaultLevers = { lever }
+  game.level.vaultDoors = { { x = 15, y = 5, id = "v6", opened = false } }
+  game:movePlayer(1, 0)
+  eq(game.player.x, 6, "the player actually steps onto the lever's cell")
+  eq(lever.pulled, true, "stepping onto a lever automatically throws it")
+end
+
+function tests.vaultDoorBlocksMovementUntilItsLeversOpenIt()
+  local game = stagedGame(1, arena(21, 11), 9, 5)
+  game.level.map:set(10, 5, Tiles.VAULT_DOOR)
+  local moved = game:movePlayer(1, 0)
+  eq(moved, false, "an unopened vault door blocks the step onto it")
+  eq(game.player.x, 9, "the player does not pass through a sealed vault door")
+  game.level.map:set(10, 5, Tiles.DOOR_OPEN)
+  local movedAfter = game:movePlayer(1, 0)
+  eq(movedAfter, true, "once opened, the door's tile behaves like any plain open door")
+  eq(game.player.x, 10, "the player steps onto the formerly sealed cell")
+end
+
+function tests.builderOccasionallyPlacesAVaultFromDepthFive()
+  -- Seed 41, not 1: adding the banshee species (minDepth 5) to Monsters.species
+  -- shifts Monsters.forDepth's eligible count for every depth-5+ monster spawn
+  -- roll, which desyncs Rng.new(1)'s stream from the very first monster onward -
+  -- seed 1 no longer rolls a vault onto this floor at all. Recomputed by
+  -- brute-force search (seeds 1-50) for one that still places exactly one
+  -- vault door with its treasure, same as every other assertion below expects.
+  local level = Builder.build(5, Rng.new(41), {})
+  eq(#level.vaultDoors, 1, "this seed's depth-5 floor places exactly one vault door")
+  ok(#level.vaultLevers >= 2, "the vault's puzzle has at least two levers")
+  local door = level.vaultDoors[1]
+  eq(level.map:get(door.x, door.y), Tiles.VAULT_DOOR, "the vault door's own tile matches its sealed glyph")
+  for _, lever in ipairs(level.vaultLevers) do
+    eq(lever.id, door.id, "every placed lever shares the door's own vault id")
+    eq(level.map:get(lever.x, lever.y), Tiles.LEVER, "each lever's tile matches its unpulled glyph")
+  end
+  local found
+  for _, ground in ipairs(level.floorItems) do
+    if ground.item.name and ground.item.name:find("vault", 1, true) then found = ground.item end
+  end
+  ok(found ~= nil, "the vault's guaranteed treasure is placed somewhere on the floor")
+end
+
+function tests.vaultsStayOffFloorsAboveDepthFive()
+  for seed = 1, 4 do
+    for depth = 1, 4 do
+      local level = Builder.build(depth, Rng.new(seed), {})
+      eq(#level.vaultDoors, 0, "no vault door appears above depth five")
+      eq(#level.vaultLevers, 0, "no vault lever appears above depth five")
+    end
+  end
+end
+
+-- Every vault the builder actually places must be genuinely solvable: each
+-- of its levers sits somewhere already reachable from the entrance without
+-- crossing a locked door or the vault door itself (see builder.lua's
+-- fallback to a plain closed door whenever that cannot be guaranteed).
+function tests.builderOnlyEverPlacesASolvableVaultPuzzle()
+  local checked = 0
+  for seed = 1, 200 do
+    local level = Builder.build(5, Rng.new(seed), {})
+    if #level.vaultDoors == 1 then
+      checked = checked + 1
+      for _, lever in ipairs(level.vaultLevers) do
+        local path = Astar.find(level.map, level.upX, level.upY, lever.x, lever.y, function(x, y)
+          if x == lever.x and y == lever.y then return false end
+          return not level.map:isPassable(x, y, false)
+        end)
+        ok(path ~= nil, "seed " .. seed .. ": every vault lever is reachable without a key or the vault door")
+      end
+    end
+  end
+  ok(checked > 0, "at least one of the sampled seeds actually placed a vault to check")
+end
+
+function tests.vaultFieldsSurviveSerialization()
+  local level = arena(21, 11)
+  level.map:set(6, 6, Tiles.LEVER_PULLED)
+  level.map:set(10, 6, Tiles.DOOR_OPEN)
+  level.vaultLevers = { { x = 6, y = 6, id = "v7", pulled = true } }
+  level.vaultDoors = { { x = 10, y = 6, id = "v7", opened = true } }
+  local restored = Level.fromData(level:toData())
+  eq(#restored.vaultLevers, 1, "the vault lever list survives a round trip")
+  eq(restored.vaultLevers[1].pulled, true, "a lever's pulled state survives a round trip")
+  eq(#restored.vaultDoors, 1, "the vault door list survives a round trip")
+  eq(restored.vaultDoors[1].opened, true, "a door's opened state survives a round trip")
+end
+
+function tests.gameVaultsOpenedStatSurvivesSaveLoad()
+  local game = Game.new(1)
+  local lx, ly = game.player.x + 1, game.player.y
+  game.level.map:set(lx, ly, Tiles.LEVER)
+  local lever = { x = lx, y = ly, id = "v8", pulled = false }
+  game.level.vaultLevers = { lever }
+  game.level.vaultDoors = { { x = game.player.x + 2, y = game.player.y, id = "v8", opened = false } }
+  game:pullLever(lever)
+  eq(game.stats.vaultsOpened, 1, "pulling the lever opens the vault")
+  local path = os.tmpname()
+  game:save(path)
+  local restored = Game.load(path)
+  os.remove(path)
+  eq(restored.stats.vaultsOpened, 1, "the vault-opened tally survives a save/load round trip")
+  eq(#restored.level.vaultLevers, 1, "the level's vault lever list survives a save/load round trip")
+  eq(restored.level.vaultLevers[1].pulled, true, "a pulled lever's state survives a save/load round trip")
+end
+
+function tests.metaRenownForScalesWithVaultsOpened()
+  local base = Meta.renownFor({ deepestDepth = 3, bossKills = 0, questsCompleted = 0, vaultsOpened = 0, won = false })
+  local withVault = Meta.renownFor({ deepestDepth = 3, bossKills = 0, questsCompleted = 0, vaultsOpened = 2, won = false })
+  eq(withVault, base + 20, "each opened vault adds a fixed renown bonus")
+end
+
+function tests.metaRecordRunUnlocksVaultBreakerOnceAVaultOpens()
+  local meta = Meta.new()
+  local stats = {
+    deepestDepth = 1, kills = 0, bossKills = 0, questsCompleted = 0,
+    artifactsFound = 0, vaultsOpened = 1, won = false,
+  }
+  local unlocked = Meta.recordRun(meta, stats)
+  eq(unlocked[1], "Vault Breaker", "opening a vault for the first time unlocks Vault Breaker")
+  eq(meta.achievements.vault_breaker, true, "vault_breaker is marked unlocked")
+  local again = Meta.recordRun(meta, stats)
+  eq(#again, 0, "an already-unlocked Vault Breaker is not re-announced on a later run")
+end
+
+-- Runewords (runewords.lua): rune stones socket into a weapon or armor's
+-- rune chain in order; an exact match against the catalog grants a fixed
+-- attack/defense bonus read live by combat.lua, exactly like a skill bonus.
+
+function tests.runewordsSocketAppendsToTheChainInOrderAndCapsAtMaxRunes()
+  local sword = Items.weapon("sword", 4)
+  ok(Runewords.socket(sword, Runewords.rune("sol")), "socketing a rune into a bare weapon succeeds")
+  ok(Runewords.socket(sword, Runewords.rune("ith")), "a second rune joins the same chain")
+  eq(table.concat(sword.runes, "-"), "sol-ith", "the chain records runes in the order they were socketed")
+  ok(Runewords.socket(sword, Runewords.rune("tal")), "a third rune still fits under the cap")
+  local success, reason = Runewords.socket(sword, Runewords.rune("ral"))
+  eq(success, false, "a fourth rune overflows the chain")
+  eq(reason, "the rune chain is full", "socket explains why a full chain refuses another rune")
+end
+
+function tests.runewordsSocketRefusesAnythingThatIsNotWeaponOrArmor()
+  local potion = Items.potion(10)
+  local success, reason = Runewords.socket(potion, Runewords.rune("sol"))
+  eq(success, false, "a potion cannot hold a rune chain")
+  eq(reason, "cannot hold runes", "socket explains why a non-gear item refuses a rune")
+end
+
+function tests.runewordsActiveWordMatchesOnlyAnExactChain()
+  local sword = Items.weapon("sword", 4)
+  eq(Runewords.activeWord(sword), nil, "a bare weapon forms no runeword")
+  Runewords.socket(sword, Runewords.rune("sol"))
+  eq(Runewords.activeWord(sword), nil, "a single rune alone matches no cataloged word")
+  Runewords.socket(sword, Runewords.rune("ith"))
+  local word = Runewords.activeWord(sword)
+  ok(word ~= nil, "sol then ith completes the Zenith runeword")
+  eq(word.name, "Zenith", "the matched word is the cataloged Zenith")
+  Runewords.socket(sword, Runewords.rune("tal"))
+  eq(Runewords.activeWord(sword), nil, "a third rune growing past Zenith's length breaks its match")
+end
+
+function tests.runewordsAttackAndDefenseBonusReadTheWielderSGearLive()
+  local player = { weapon = Items.weapon("sword", 4), armor = Items.armor("chain mail", 2) }
+  eq(Runewords.attackBonus(player), 0, "no bonus applies before any runeword completes")
+  eq(Runewords.defenseBonus(player), 0, "no defense bonus applies before any runeword completes")
+  Runewords.socket(player.weapon, Runewords.rune("sol"))
+  Runewords.socket(player.weapon, Runewords.rune("ith"))
+  eq(Runewords.attackBonus(player), 3, "a completed Zenith on the weapon grants its flat attack bonus")
+  Runewords.socket(player.armor, Runewords.rune("tal"))
+  Runewords.socket(player.armor, Runewords.rune("ral"))
+  eq(Runewords.defenseBonus(player), 3, "a completed Bastion on the armor grants its flat defense bonus")
+  eq(Runewords.attackBonus(player), 3, "the armor's runeword does not leak an attack bonus")
+end
+
+function tests.gameSocketRuneAppliesItsRunewordBonusInActualCombat()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Items.equipWeapon(Items.weapon("sword", 4), game.player)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  orc.defense, orc.baseDefense, orc.hp, orc.maxHp = 0, 0, 40, 40
+  game.level.entities = { orc }
+  local before = orc.hp
+  game:playerAttack(orc)
+  local plainDamage = before - orc.hp
+
+  local game2 = stagedGame(1, arena(21, 11), 3, 6)
+  Items.equipWeapon(Items.weapon("sword", 4), game2.player)
+  local orc2 = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  orc2.defense, orc2.baseDefense, orc2.hp, orc2.maxHp = 0, 0, 40, 40
+  game2.level.entities = { orc2 }
+  game2.player.inventory = { Runewords.rune("sol"), Runewords.rune("ith") }
+  ok(game2:socketRune("weapon", 1), "socketing the first rune into the equipped weapon succeeds")
+  ok(game2:socketRune("weapon", 1), "socketing the second rune completes the runeword")
+  eq(#game2.player.inventory, 0, "both runes leave the inventory once socketed")
+  ok(contains(game2.log:last(), "Zenith"), "completing a runeword is announced by name")
+  local before2 = orc2.hp
+  game2:playerAttack(orc2)
+  local runewordDamage = before2 - orc2.hp
+  ok(runewordDamage > plainDamage, "a completed Zenith runeword deals more damage than the bare weapon")
+  eq(runewordDamage - plainDamage, 3, "the extra damage matches Zenith's exact flat attack bonus")
+end
+
+function tests.gameSocketRuneFailsOnAnUnknownTargetOrANonRuneItem()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Items.equipWeapon(Items.weapon("sword", 4), game.player)
+  game.player.inventory = { Items.potion(10) }
+  eq(game:socketRune("weapon", 1), false, "socketing a non-rune item fails")
+  game.player.inventory = { Runewords.rune("sol") }
+  eq(game:socketRune("armor", 1), false, "socketing into gear the player has not equipped fails")
+  eq(#game.player.inventory, 1, "a failed socket attempt leaves the rune in inventory")
+end
+
+function tests.builderOccasionallyPlacesARuneFromDepthThree()
+  local level = Builder.build(3, Rng.new(1), {})
+  local found
+  for _, ground in ipairs(level.floorItems) do
+    if ground.item.kind == Items.RUNE then found = ground.item end
+  end
+  ok(found ~= nil, "this seed's depth-3 floor places a rune stone")
+  ok(found.rune ~= nil, "the placed rune names a real catalog key")
+end
+
+function tests.runesStayOffTheShallowestTwoFloors()
+  for seed = 1, 6 do
+    for depth = 1, 2 do
+      local level = Builder.build(depth, Rng.new(seed), {})
+      for _, ground in ipairs(level.floorItems) do
+        ok(ground.item.kind ~= Items.RUNE, "no rune appears on the shallowest two floors")
+      end
+    end
+  end
+end
+
+function tests.runeChainFieldsSurviveSerialization()
+  local game = Game.new(3)
+  local sword = Items.weapon("sword", 4)
+  Items.equipWeapon(sword, game.player)
+  Runewords.socket(sword, Runewords.rune("sol"))
+  Runewords.socket(sword, Runewords.rune("ith"))
+  local path = os.tmpname()
+  game:save(path)
+  local restored = Game.load(path)
+  os.remove(path)
+  eq(table.concat(restored.player.weapon.runes, "-"), "sol-ith", "a weapon's rune chain survives a save/load round trip")
+  ok(Runewords.activeWord(restored.player.weapon) ~= nil, "the restored chain still forms its runeword")
+end
+
+-- Atmosphere (atmosphere.lua): a single floor-wide weather condition drawn
+-- once at generation, distinct from terrain.lua's per-cell hazards - every
+-- hook here is a flat modifier applying to the whole floor for its lifetime.
+
+function tests.atmosphereHooksAreZeroForAnyConditionTheyDoNotGovern()
+  eq(Atmosphere.sightPenalty(Atmosphere.CONSECRATED), 0, "consecrated ground carries no sight penalty")
+  eq(Atmosphere.regenBonus(Atmosphere.FOGGY), 0, "fog carries no regen bonus")
+  eq(Atmosphere.monsterAttackBonus(Atmosphere.FOGGY), 0, "fog carries no monster attack bonus")
+  eq(Atmosphere.sightPenalty(nil), 0, "a clear floor (no weather) carries no sight penalty")
+end
+
+function tests.atmosphereFoggyShrinksSightRadiusButNeverBelowOne()
+  eq(Atmosphere.sightPenalty(Atmosphere.FOGGY), 2, "fog carries a fixed sight penalty")
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local clear = game:effectiveRadius()
+  game.level.weather = Atmosphere.FOGGY
+  eq(game:effectiveRadius(), clear - 2, "fog shaves its fixed penalty off the floor's own sight radius")
+
+  local darkGame = stagedGame(1, arenaDark(21, 11), 3, 6)
+  darkGame.player.light.fuel = 0
+  darkGame.level.weather = Atmosphere.FOGGY
+  eq(darkGame:effectiveRadius(), 1, "fog on an already-dark, torchless floor floors out at a minimum radius of one")
+end
+
+function tests.atmosphereConsecratedRegeneratesThePlayerEachTurn()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.weather = Atmosphere.CONSECRATED
+  game.player.hp = game.player.maxHp - 10
+  local before = game.player.hp
+  game:hungerTorchTick()
+  eq(game.player.hp, before + 1, "consecrated ground regenerates its fixed amount each turn")
+end
+
+function tests.atmosphereConsecratedNeverRegeneratesPastMaxHp()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.weather = Atmosphere.CONSECRATED
+  game.player.hp = game.player.maxHp
+  game:hungerTorchTick()
+  eq(game.player.hp, game.player.maxHp, "consecrated regen never lifts hp past its maximum")
+end
+
+function tests.builderOccasionallyDrawsEachWeatherConditionFromDepthTwo()
+  local infested = Builder.build(2, Rng.new(1), {})
+  eq(infested.weather, Atmosphere.INFESTED, "this seed's depth-2 floor draws an infested reading")
+  local rat
+  for _, entity in ipairs(infested.entities) do
+    if entity.species == "rat" then rat = entity end
+  end
+  ok(rat ~= nil, "an infested floor still places its usual monsters")
+  eq(rat.attack, Monsters.byKey.rat.attack + Atmosphere.monsterAttackBonus(Atmosphere.INFESTED),
+    "an infested floor bakes its attack bonus into every monster placed on it")
+
+  local consecrated = Builder.build(2, Rng.new(3), {})
+  eq(consecrated.weather, Atmosphere.CONSECRATED, "this seed's depth-2 floor draws a consecrated reading")
+  local foggy = Builder.build(2, Rng.new(6), {})
+  eq(foggy.weather, Atmosphere.FOGGY, "this seed's depth-2 floor draws a foggy reading")
+end
+
+function tests.weatherNeverAppearsOnTheEntranceFloor()
+  for seed = 1, 20 do
+    local level = Builder.build(1, Rng.new(seed), {})
+    eq(level.weather, nil, "no weather condition is ever drawn for the entrance floor")
+  end
+end
+
+function tests.weatherFieldSurvivesSerialization()
+  local level = arena(21, 11)
+  level.weather = Atmosphere.FOGGY
+  local restored = Level.fromData(level:toData())
+  eq(restored.weather, Atmosphere.FOGGY, "a floor's weather survives a round trip")
+end
+
+function tests.renderPanelReportsTheFloorSWeatherWhenPresent()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.weather = Atmosphere.INFESTED
+  ok(contains(Render.panel(game), "infested"), "the status panel names an active weather condition")
+end
+
+-- Biomes: a fixed, seed-independent theme per depth (contrast with
+-- Atmosphere's own dice-rolled weather above), read by the builder's biome
+-- pass to occasionally reinforce a floor with one more native monster or
+-- bloom a small pocket of its own hazard kind.
+
+function tests.biomesForDepthCyclesThroughTheCatalogInOrder()
+  for i, biome in ipairs(Biomes.CATALOG) do
+    eq(Biomes.forDepth(i), biome, "depth " .. i .. " maps to the catalog's own entry in order")
+  end
+  eq(Biomes.forDepth(#Biomes.CATALOG + 1), Biomes.CATALOG[1],
+    "depth wraps back to the first biome once the catalog is exhausted")
+  eq(Biomes.forDepth(3 * #Biomes.CATALOG), Biomes.CATALOG[#Biomes.CATALOG],
+    "depth keeps cycling any number of catalog lengths deep")
+end
+
+function tests.biomesDescribeNamesTheBiomeAndItsAmbientText()
+  eq(Biomes.describe(Biomes.byKey.warrens), "the mossy warrens: damp stone and skittering claws",
+    "describe joins a biome's own name and ambient line")
+end
+
+function tests.biomesCatalogEveryEntryNamesARealFactionAndHazardKind()
+  local realFactions = {}
+  for _, faction in pairs(Factions) do
+    if type(faction) == "string" then realFactions[faction] = true end
+  end
+  for _, biome in ipairs(Biomes.CATALOG) do
+    ok(realFactions[biome.favoredFaction], biome.key .. " names a real faction")
+    ok(biome.hazardKind == Hazards.FIRE or biome.hazardKind == Hazards.GAS,
+      biome.key .. " names a real hazard kind")
+  end
+end
+
+function tests.biomesNativesAmongFiltersToTheFavoredFactionAndExcludesRangedSpecs()
+  local crypts = Biomes.byKey.crypts
+  local deepRoster = Monsters.forDepth(6)
+  local natives = Biomes.nativesAmong(crypts, deepRoster)
+  ok(#natives > 0, "crypts finds at least one native among a deep enough roster")
+  for _, spec in ipairs(natives) do
+    eq(spec.faction, Factions.UNDEAD, "every native belongs to the biome's own faction")
+    ok(spec.ai ~= "ranged", "no native reinforcement is ever a ranged specialist")
+  end
+  local shallowRoster = Monsters.forDepth(1)
+  eq(#Biomes.nativesAmong(crypts, shallowRoster), 0,
+    "no undead have surfaced yet this shallow, so crypts finds no native at depth one")
+end
+
+function tests.builderLevelsCarryTheBiomeMatchingTheirDepthRegardlessOfSeed()
+  for depth = 1, 8 do
+    local expected = Biomes.forDepth(depth).key
+    for seed = 1, 3 do
+      local level = Builder.build(depth, Rng.new(seed), {})
+      eq(level.biome, expected, "depth " .. depth .. " always carries its own fixed biome no matter the seed")
+    end
+  end
+end
+
+function tests.builderOccasionallyReinforcesAFloorWithADormantNativeMonster()
+  local level = Builder.build(1, Rng.new(7), {})
+  ok(#level.entities > 7, "this seed's entrance floor carries one more monster than the ordinary roster ever places")
+  local reinforcement = level.entities[#level.entities]
+  eq(reinforcement.faction, Factions.VERMIN, "the extra monster belongs to the entrance floor's own biome")
+  eq(reinforcement.awareness, Stealth.DORMANT, "the reinforcement starts dormant like every other wild monster")
+end
+
+function tests.builderOccasionallyBloomsAHazardMatchingTheFloorSBiome()
+  local warrens = Builder.build(1, Rng.new(7), {})
+  eq(warrens.hazards[1].kind, Hazards.GAS, "a gas-favoring biome only ever blooms gas at generation")
+  local warcamp = Builder.build(4, Rng.new(11), {})
+  eq(warcamp.hazards[1].kind, Hazards.FIRE, "a fire-favoring biome only ever blooms fire at generation")
+end
+
+function tests.biomeFieldSurvivesSerialization()
+  local level = arena(21, 11)
+  level.biome = "crypts"
+  local restored = Level.fromData(level:toData())
+  eq(restored.biome, "crypts", "a floor's biome survives a round trip")
+end
+
+-- Stealth: monster alertness (asleep/hunting/searching), sneak attacks.
+
+local function wallSplitArena()
+  local map = Map.new(21, 11)
+  for y = 2, 10 do for x = 2, 20 do map:set(x, y, Map.FLOOR) end end
+  for y = 2, 10 do map:set(11, y, Map.WALL) end
+  return Level.new({
+    depth = 1, generator = "arena", map = map,
+    entities = {}, floorItems = {}, traps = {}, lights = {}, dark = false, explored = {},
+    upX = 2, upY = 2, downX = 20, downY = 10,
+  })
+end
+
+function tests.stealthHandBuiltMonsterDefaultsToAlertWhenAwarenessIsUnset()
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 5, 5, 1)
+  eq(orc.awareness, nil, "a monster built directly carries no awareness field at all")
+  ok(not Stealth.isUnaware(orc), "an unset awareness field is treated as already alert, not asleep")
+  eq(Stealth.sneakMultiplier(orc), 1, "no sneak bonus applies against an already-alert target")
+end
+
+function tests.builderPlacesWildDepthOneMonstersAsleepByDefault()
+  local game = Game.new(9)
+  ok(#game.level.entities > 0, "the opening floor spawns at least one wild monster")
+  for _, entity in ipairs(game.level.entities) do
+    eq(entity.awareness, Stealth.DORMANT, "every builder-placed wild monster on the opening floor starts asleep")
+  end
+end
+
+function tests.stealthBossesStartFullyAlertRatherThanDormant()
+  local warlord = Bosses.create(Bosses.byKey.warlord, 1, 5, 5)
+  ok(not Stealth.isUnaware(warlord), "a named boss is never asleep, unlike a wild monster")
+  eq(warlord.awareness, Stealth.HUNTING, "a boss starts directly in the hunting state")
+end
+
+function tests.stealthSpawnedMinionsStartHuntingRatherThanDormant()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local minion = game:spawnMinion("zombie", 10, 6)
+  eq(minion.awareness, Stealth.HUNTING, "a minion summoned or split mid-fight is already aware, never asleep")
+end
+
+function tests.stealthDormantMonsterWakesImmediatelyWhenThePlayerStandsNextToIt()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  orc.awareness = Stealth.DORMANT
+  game.level.entities = { orc }
+  local hpBefore = game.player.hp
+  game:takeMonsterTurn(orc)
+  eq(orc.awareness, Stealth.HUNTING, "a monster right next to the player always notices it")
+  ok(game.player.hp < hpBefore, "the freshly woken monster still gets to act on the very same turn")
+end
+
+function tests.stealthDormantMonsterBeyondItsWakeRadiusNeverStirs()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 19, 6, 1)
+  orc.awareness = Stealth.DORMANT
+  game.level.entities = { orc }
+  for _ = 1, 10 do
+    game:takeMonsterTurn(orc)
+  end
+  eq(orc.awareness, Stealth.DORMANT, "a monster far outside its wake radius stays asleep no matter how many turns pass")
+  eq(orc.x, 19, "an asleep monster that never wakes does not move")
+  eq(orc.y, 6, "an asleep monster that never wakes does not move either")
+end
+
+function tests.stealthDormantMonsterWithinRangeEventuallyWakesOnASuccessfulRoll()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 6, 6, 1)
+  orc.awareness = Stealth.DORMANT
+  game.level.entities = { orc }
+  local woke = false
+  for _ = 1, 20 do
+    game:takeMonsterTurn(orc)
+    if orc.awareness ~= Stealth.DORMANT then woke = true; break end
+  end
+  ok(woke, "a monster well within its wake radius eventually notices the player across enough turns")
+end
+
+function tests.stealthMeleeAttackOnADormantMonsterDealsATripledSneakBonus()
+  local sneakGame = stagedGame(1, arena(21, 11), 3, 6)
+  local sneakOrc = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  sneakOrc.awareness = Stealth.DORMANT
+  sneakGame.level.entities = { sneakOrc }
+  local before = sneakOrc.hp
+  sneakGame:playerAttack(sneakOrc)
+  local sneakDamage = before - sneakOrc.hp
+  eq(sneakOrc.awareness, Stealth.HUNTING, "landing the blow wakes the target immediately")
+  ok(contains(table.concat(sneakGame.log:recent(6), "\n"), "unaware"), "the log calls out the sneak attack")
+
+  local plainGame = stagedGame(1, arena(21, 11), 3, 6)
+  local plainOrc = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  plainGame.level.entities = { plainOrc }
+  local plainBefore = plainOrc.hp
+  plainGame:playerAttack(plainOrc)
+  local plainDamage = plainBefore - plainOrc.hp
+  eq(sneakDamage, plainDamage * 3, "a sneak attack deals exactly triple the damage of the same hit thrown while already noticed")
+end
+
+function tests.stealthHuntingMonsterLosesTrackAndSwitchesToSearching()
 end
 
 local order = {
