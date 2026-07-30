@@ -6876,6 +6876,179 @@ function tests.stealthMeleeAttackOnADormantMonsterDealsATripledSneakBonus()
 end
 
 function tests.stealthHuntingMonsterLosesTrackAndSwitchesToSearching()
+  local game = stagedGame(1, wallSplitArena(), 15, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 5, 6, 1)
+  orc.awareness = Stealth.HUNTING
+  orc.lastKnownX, orc.lastKnownY = 8, 6
+  game.level.entities = { orc }
+  for _ = 1, Stealth.LOST_TURNS_LIMIT do
+    game:takeMonsterTurn(orc)
+  end
+  eq(orc.awareness, Stealth.SEARCHING, "losing sight of the player for several turns in a row switches a hunter to searching")
+  eq(orc.x, 6, "the newly searching monster immediately takes its first step toward the last known position")
+  eq(orc.y, 6, "the search movement heads straight down the open corridor")
+end
+
+function tests.stealthSearchingMonsterReacquiresThePlayerAndReturnsToHunting()
+  local game = stagedGame(1, wallSplitArena(), 15, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 5, 6, 1)
+  orc.awareness = Stealth.HUNTING
+  orc.lastKnownX, orc.lastKnownY = 8, 6
+  game.level.entities = { orc }
+  for _ = 1, Stealth.LOST_TURNS_LIMIT do
+    game:takeMonsterTurn(orc)
+  end
+  game.player.x, game.player.y = 7, 6
+  game:takeMonsterTurn(orc)
+  eq(orc.awareness, Stealth.HUNTING, "regaining line of sight during a search snaps the monster straight back to hunting")
+  eq(orc.lastKnownX, 7, "hunting again refreshes the last-known position to where the player actually is")
+end
+
+function tests.stealthSearchingMonsterGivesUpAndReturnsToDormant()
+  local game = stagedGame(1, wallSplitArena(), 15, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 5, 6, 1)
+  orc.awareness = Stealth.HUNTING
+  orc.lastKnownX, orc.lastKnownY = 8, 6
+  game.level.entities = { orc }
+  for _ = 1, 15 do
+    game:takeMonsterTurn(orc)
+  end
+  eq(orc.awareness, Stealth.DORMANT, "abandoning a fruitless search puts the monster back to sleep")
+  eq(orc.lastKnownX, nil, "a monster back asleep no longer remembers where it last saw the player")
+end
+
+function tests.stealthAwarenessFieldsSurviveASaveLoadRoundTrip()
+  local orc = Monsters.create(Monsters.byKey.orc, 5, 6, 6, 1)
+  orc.awareness = Stealth.SEARCHING
+  orc.lastKnownX, orc.lastKnownY = 12, 9
+  orc.lostTurns = 2
+  orc.searchTurns = 1
+  local restored = Entity.fromData(orc:toData())
+  eq(restored.awareness, Stealth.SEARCHING, "the awareness state survives a round trip")
+  eq(restored.lastKnownX, 12, "the last-known x coordinate survives a round trip")
+  eq(restored.lastKnownY, 9, "the last-known y coordinate survives a round trip")
+  eq(restored.lostTurns, 2, "the lost-turn counter survives a round trip")
+  eq(restored.searchTurns, 1, "the search-turn counter survives a round trip")
+end
+
+function tests.renderPanelFlagsSleepingFoesSeparatelyFromAwakeOnes()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local sleeper = Monsters.create(Monsters.byKey.orc, 1, 10, 6, 1)
+  sleeper.awareness = Stealth.DORMANT
+  game.level.entities = { sleeper }
+  ok(contains(Render.panel(game), "1 asleep"), "the status panel tallies how many visible foes are still asleep")
+
+  local awake = Monsters.create(Monsters.byKey.orc, 2, 11, 6, 1)
+  game.level.entities = { awake }
+  ok(not contains(Render.panel(game), "asleep"), "the panel omits the asleep tally once every foe is awake")
+end
+
+-- Compendium: cross-run bestiary of sightings and kills.
+
+function tests.compendiumNoteSightingReturnsTrueOnlyOnTheFirstSighting()
+  local compendium = Compendium.new()
+  eq(Compendium.noteSighting(compendium, "rat"), true, "the very first sighting of a species reports true")
+  eq(Compendium.noteSighting(compendium, "rat"), false, "a repeat sighting of the same species reports false")
+  ok(Compendium.hasSeen(compendium, "rat"), "the species is recorded as seen")
+  ok(not Compendium.hasSeen(compendium, "bat"), "an entirely different species is unaffected")
+end
+
+function tests.compendiumNoteKillAccumulatesAcrossMultipleKills()
+  local compendium = Compendium.new()
+  eq(Compendium.killCount(compendium, "goblin"), 0, "a species starts with zero recorded kills")
+  Compendium.noteKill(compendium, "goblin")
+  Compendium.noteKill(compendium, "goblin")
+  Compendium.noteKill(compendium, "goblin")
+  eq(Compendium.killCount(compendium, "goblin"), 3, "kills accumulate one at a time")
+end
+
+function tests.compendiumEntriesListsEveryWildSpeciesAndEveryBoss()
+  local entries = Compendium.entries(Compendium.new())
+  eq(#entries, #Monsters.species + #Bosses.catalog, "the compendium lists every wild species and every named boss")
+  local byKey = {}
+  for _, entry in ipairs(entries) do byKey[entry.key] = entry end
+  ok(byKey.orc ~= nil, "a wild species keys its entry by its plain species key")
+  ok(byKey.boss_warlord ~= nil, "a boss keys its entry with the same boss_ prefix game.lua stamps onto its entity")
+  eq(byKey.orc.seen, false, "a freshly created compendium has not seen anything yet")
+  ok(byKey.orc.flavor ~= nil, "every catalogued species carries a flavor line")
+end
+
+function tests.gameRecordsASightingTheFirstTimeAMonsterBecomesVisible()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 9, 6, 1)
+  game.level.entities = { orc }
+  game:computeVisible()
+  ok(Compendium.hasSeen(game.compendium, "orc"),
+    "a monster within sight is recorded into the compendium the moment it is seen")
+
+  local rat = Monsters.create(Monsters.byKey.rat, 2, 19, 10, 1)
+  game.level.entities = { rat }
+  game:computeVisible()
+  ok(not Compendium.hasSeen(game.compendium, "rat"),
+    "a species standing far outside sight range is never recorded just because it exists on the level")
+end
+
+function tests.gameRecordsAKillIntoItsCompendiumOnAwardKill()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  game.level.entities = { orc }
+  eq(Compendium.killCount(game.compendium, "orc"), 0, "no kills recorded before the fight starts")
+  game:awardKill(orc)
+  eq(Compendium.killCount(game.compendium, "orc"), 1, "felling a monster records exactly one kill for its species")
+  game:awardKill(Monsters.create(Monsters.byKey.orc, 3, 4, 6, 1))
+  eq(Compendium.killCount(game.compendium, "orc"), 2, "kill counts accumulate across separate kills of the same species")
+end
+
+function tests.compendiumFieldsSurviveAGameSaveLoadRoundTrip()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 9, 6, 1)
+  game.level.entities = { orc }
+  game:computeVisible()
+  game:awardKill(orc)
+  local restored = Game.fromData(game:toData())
+  eq(Compendium.killCount(restored.compendium, "orc"), 1, "a recorded kill survives a save/load round trip")
+  ok(Compendium.hasSeen(restored.compendium, "orc"), "a recorded sighting survives a save/load round trip too")
+end
+
+function tests.gameReusesThePassedMetaSCompendiumByReference()
+  local meta = Meta.new()
+  local game = Game.new(1, { meta = meta })
+  local orc = Monsters.create(Monsters.byKey.orc, 1, game.player.x + 1, game.player.y, 1)
+  game.level.entities = { orc }
+  game:awardKill(orc)
+  eq(Compendium.killCount(meta.compendium, "orc"), 1,
+    "a kill recorded mid-run is already sitting in the exact meta table warren.lua will save back out")
+end
+
+function tests.setsCreateBuildsTheCatalogedItemShape()
+  local blade = Sets.create("ironclad", "weapon")
+  eq(blade.kind, Items.WEAPON, "the ironclad weapon piece is a weapon")
+  eq(blade.set, "ironclad", "the item remembers its set key")
+  eq(blade.name, "Ironclad Greatsword", "the item takes the catalog's exact name")
+  local ring = Sets.create("duskrunner", "ring")
+  eq(ring.kind, Items.RING, "the duskrunner ring piece is a ring")
+  eq(ring.set, "duskrunner", "a second set tags its own pieces with its own key")
+  eq(Sets.create("nonexistent", "weapon"), nil, "an unknown set key builds nothing")
+  eq(Sets.create("ironclad", "bow"), nil, "a slot ironclad does not define builds nothing")
+end
+
+function tests.setsAttackAndDefenseBonusEscalateAsMorePiecesAreEquipped()
+  local player = { weapon = Sets.create("ironclad", "weapon") }
+  eq(Sets.attackBonus(player), 0, "a single piece grants no bonus below the 2-piece threshold")
+  eq(Sets.defenseBonus(player), 0, "a single piece grants no defense bonus either")
+  player.armor = Sets.create("ironclad", "armor")
+  eq(Sets.attackBonus(player), 1, "two matching pieces grant the 2-piece attack bonus")
+  eq(Sets.defenseBonus(player), 1, "two matching pieces grant the 2-piece defense bonus")
+  eq(Sets.regenAmount(player), 0, "the 2-piece tier grants no regen")
+  player.ring = Sets.create("ironclad", "ring")
+  eq(Sets.attackBonus(player), 2, "the full 3-piece bonus replaces the 2-piece total rather than adding to it")
+  eq(Sets.defenseBonus(player), 3, "the full set's defense bonus also replaces rather than stacks")
+  eq(Sets.regenAmount(player), 1, "only the full set grants its regen bonus")
+end
+
+function tests.setsBonusDropsBackWhenAPieceIsUnequipped()
+  local player = {
+    weapon = Sets.create("ironclad", "weapon"),
 end
 
 local order = {
