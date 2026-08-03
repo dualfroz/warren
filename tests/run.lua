@@ -7049,6 +7049,525 @@ end
 function tests.setsBonusDropsBackWhenAPieceIsUnequipped()
   local player = {
     weapon = Sets.create("ironclad", "weapon"),
+    armor = Sets.create("ironclad", "armor"),
+    ring = Sets.create("ironclad", "ring"),
+  }
+  eq(Sets.attackBonus(player), 2, "the full set starts active")
+  player.ring = Items.ring("plain band", 0, 0)
+  eq(Sets.attackBonus(player), 1, "losing a piece drops the bonus back to the 2-piece tier")
+  player.armor = Items.armor("plain mail", 2)
+  eq(Sets.attackBonus(player), 0, "a single remaining piece grants no bonus at all")
+end
+
+function tests.setsDoNotCrossTalkBetweenDifferentSets()
+  local player = { weapon = Sets.create("ironclad", "weapon"), bow = Sets.create("duskrunner", "bow") }
+  eq(Sets.attackBonus(player), 0, "one piece from each of two different sets completes neither")
+end
+
+function tests.gameEquippingASetPieceAppliesItsBonusInActualCombat()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Items.equipWeapon(Items.weapon("sword", 4), game.player)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  orc.defense, orc.baseDefense, orc.hp, orc.maxHp = 0, 0, 40, 40
+  game.level.entities = { orc }
+  local before = orc.hp
+  game:playerAttack(orc)
+  local plainDamage = before - orc.hp
+
+  local game2 = stagedGame(1, arena(21, 11), 3, 6)
+  Items.equipWeapon(Sets.create("ironclad", "weapon"), game2.player)
+  Items.equipArmor(Sets.create("ironclad", "armor"), game2.player)
+  local orc2 = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  orc2.defense, orc2.baseDefense, orc2.hp, orc2.maxHp = 0, 0, 40, 40
+  game2.level.entities = { orc2 }
+  local before2 = orc2.hp
+  game2:playerAttack(orc2)
+  local setDamage = before2 - orc2.hp
+  -- The ironclad weapon's own power (3) is one below the plain sword's (4),
+  -- but the completed 2-piece bonus adds back exactly +1 attack, landing on
+  -- the same total damage - proof the bonus reads live in actual combat.
+  eq(setDamage, plainDamage, "a 2-piece Ironclad bonus makes up for the set piece's own weaker power")
+end
+
+function tests.gameEquippingTheSecondSetPieceLogsTheSetAwakening()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.inventory = { Sets.create("ironclad", "weapon"), Sets.create("ironclad", "armor") }
+  ok(game:useItem(1), "equipping the first ironclad piece succeeds")
+  ok(not contains(game.log:last(), "awakens"), "a lone set piece does not announce a bonus")
+  ok(game:useItem(1), "equipping the second ironclad piece succeeds")
+  ok(contains(game.log:last(), "Ironclad") and contains(game.log:last(), "awakens"),
+    "completing the 2-piece threshold announces the set by name")
+end
+
+function tests.setsRegenerationAppliesEachTurnAtTheFullIroncladSet()
+  local game = Game.new(1)
+  Items.equipWeapon(Sets.create("ironclad", "weapon"), game.player)
+  Items.equipArmor(Sets.create("ironclad", "armor"), game.player)
+  Items.equipRing(Sets.create("ironclad", "ring"), game.player)
+  game.player.hp = game.player.maxHp - 10
+  local before = game.player.hp
+  game:hungerTorchTick()
+  eq(game.player.hp, before + 1, "the full ironclad set regenerates its fixed amount each turn")
+end
+
+function tests.builderOccasionallyPlacesASetPieceFromDepthThree()
+  local found
+  for seed = 1, 20 do
+    local level = Builder.build(3, Rng.new(seed), {})
+    for _, ground in ipairs(level.floorItems) do
+      if ground.item.set then found = ground.item end
+    end
+    if found then break end
+  end
+  ok(found ~= nil, "a depth-3 floor eventually places a set piece across a handful of seeds")
+  ok(Sets.byKey[found.set] ~= nil, "the placed piece names a real catalog set")
+end
+
+function tests.setPiecesStayOffTheShallowestTwoFloors()
+  for seed = 1, 6 do
+    for depth = 1, 2 do
+      local level = Builder.build(depth, Rng.new(seed), {})
+      for _, ground in ipairs(level.floorItems) do
+        ok(not ground.item.set, "no set piece appears on depth 1 or 2")
+      end
+    end
+  end
+end
+
+function tests.setFieldsSurviveSerialization()
+  local game = Game.new(3)
+  Items.equipWeapon(Sets.create("ironclad", "weapon"), game.player)
+  local path = os.tmpname()
+  game:save(path)
+  local restored = Game.load(path)
+  os.remove(path)
+  eq(restored.player.weapon.set, "ironclad", "an equipped set piece's set key survives a save/load round trip")
+end
+
+function tests.gamePickupTracksSetPiecesFoundForMetaStats()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.level.floorItems = { { x = 5, y = 5, item = Sets.create("ironclad", "ring") } }
+  game:pickupHere()
+  eq(game.stats.setPiecesFound, 1, "picking up a set piece counts toward set pieces found")
+  ok(game.player.ring == nil, "picking up a set piece only stashes it in inventory, it is not auto-equipped")
+end
+
+function tests.metaRenownForScalesWithSetPiecesFound()
+  local base = Meta.renownFor({ deepestDepth = 3, bossKills = 0, questsCompleted = 0, setPiecesFound = 0, won = false })
+  local withPieces = Meta.renownFor({ deepestDepth = 3, bossKills = 0, questsCompleted = 0, setPiecesFound = 2, won = false })
+  eq(withPieces, base + 6, "each set piece found adds a fixed renown bonus")
+end
+
+function tests.metaRecordRunUnlocksSetCollectorOnceThreePiecesFound()
+  local meta = Meta.new()
+  local stats = {
+    deepestDepth = 1, kills = 0, bossKills = 0, questsCompleted = 0,
+    artifactsFound = 0, vaultsOpened = 0, setPiecesFound = 3, won = false,
+  }
+  local unlocked = Meta.recordRun(meta, stats)
+  eq(unlocked[1], "Set Collector", "finding three set pieces in a run unlocks Set Collector")
+  eq(meta.achievements.set_collector, true, "set_collector is marked unlocked")
+  local again = Meta.recordRun(meta, stats)
+  eq(#again, 0, "an already-unlocked Set Collector is not re-announced on a later run")
+end
+
+function tests.renderPanelShowsTheActiveSetBonusWhenOneApplies()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  ok(not contains(Render.panel(game), "set "), "the panel omits the set line without an active bonus")
+  Items.equipWeapon(Sets.create("ironclad", "weapon"), game.player)
+  Items.equipArmor(Sets.create("ironclad", "armor"), game.player)
+  ok(contains(Render.panel(game), "Ironclad 2pc"), "the panel names the active set and its piece count")
+end
+
+function tests.mimicsFloorItemBuildsADisguisedLootShape()
+  local item = Mimics.floorItem(Rng.new(1))
+  eq(item.kind, "mimic", "a mimic's floor item is its own kind, not a real item kind")
+  eq(item.mimic, true, "a mimic's floor item is tagged so pickupHere knows to unmask it")
+  local matched
+  for _, disguise in ipairs(Mimics.DISGUISES) do
+    if disguise.name == item.name and disguise.glyph == item.glyph then matched = true end
+  end
+  ok(matched, "the rolled disguise's name and glyph both come from the catalog")
+end
+
+function tests.mimicsRevealBuildsAHostileMonsterScaledByDepth()
+  local shallow = Mimics.reveal(1, 4, 6, 1)
+  eq(shallow.kind, "monster", "a revealed mimic is a genuine monster entity")
+  eq(shallow.glyph, "M", "a revealed mimic shows its own glyph, not a disguise")
+  eq(shallow.mimic, true, "a revealed mimic stays tagged as a mimic")
+  eq(shallow.hp, 12, "a depth-1 mimic has its base hp with no bonus")
+  local deep = Mimics.reveal(2, 4, 6, 5)
+  eq(deep.hp, 16, "a mimic's hp scales with depth the same way Monsters.create scales a wild species")
+end
+
+function tests.gamePickupHereRevealsAMimicAndAmbushesThePlayer()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.player.defense, game.player.baseDefense = 0, 0
+  game.level.floorItems = { { x = 5, y = 5, item = Mimics.floorItem(Rng.new(1)) } }
+  local hpBefore = game.player.hp
+  game:pickupHere()
+  eq(#game.level.floorItems, 0, "the disguised item leaves the floor the instant it is disturbed")
+  eq(#game.level.entities, 1, "a revealed mimic joins the level as a real hostile monster")
+  eq(game.level.entities[1].mimic, true, "the spawned monster is tagged as a mimic")
+  eq(game.player.hp, hpBefore - 5, "the mimic lands one free ambush hit for its full attack")
+  ok(contains(game.log:last(), "damage"), "the ambush hit is logged")
+end
+
+function tests.gameKillingARevealedMimicGrantsItsFixedEssenceReward()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local mimic = Mimics.reveal(1, 4, 6, 1)
+  mimic.hp = 1
+  game.level.entities = { mimic }
+  local essenceBefore = game.player.essence
+  game:playerAttack(mimic)
+  eq(game.player.essence, essenceBefore + Crafting.essenceFor(Mimics.xpFor()),
+    "felling a mimic grants essence scaled to its own fixed xp reward, not a plain monster's")
+end
+
+function tests.builderOccasionallyPlacesAMimicFromDepthTwo()
+  local found
+  for seed = 1, 20 do
+    local level = Builder.build(2, Rng.new(seed), {})
+    for _, ground in ipairs(level.floorItems) do
+      if ground.item.mimic then found = ground.item end
+    end
+    if found then break end
+  end
+  ok(found ~= nil, "a depth-2 floor eventually places a disguised mimic across a handful of seeds")
+end
+
+function tests.mimicsNeverAppearOnTheEntranceFloor()
+  for seed = 1, 6 do
+    local level = Builder.build(1, Rng.new(seed), {})
+    for _, ground in ipairs(level.floorItems) do
+      ok(not ground.item.mimic, "no mimic appears on the entrance floor")
+    end
+  end
+end
+
+function tests.mimicFieldSurvivesSerialization()
+  local mimic = Mimics.reveal(1, 4, 6, 1)
+  local restored = Entity.fromData(mimic:toData())
+  eq(restored.mimic, true, "a revealed mimic's tag survives a save/load round trip")
+  eq(restored.glyph, "M", "a revealed mimic's glyph survives a save/load round trip too")
+end
+
+function tests.cursesRollRespectsItsOneInEightChanceAcrossSeedsAndKnownSlots()
+  local hit, miss = false, false
+  for seed = 1, 60 do
+    local curse = Curses.roll(Rng.new(seed), "weapon")
+    if curse then hit = true else miss = true end
+    if hit and miss then break end
+  end
+  ok(hit, "a weapon curse fires on at least one seed in the first 60")
+  ok(miss, "a weapon curse also misses on at least one seed in the first 60")
+  eq(Curses.roll(Rng.new(1), "amulet"), nil, "an unsupported slot never rolls a curse")
+end
+
+function tests.cursesAfflictFoldsThePenaltyIntoTheItemAndKeepsItHidden()
+  local weapon = Items.weapon("dagger", 5)
+  Curses.afflict(weapon, Curses.pool.weapon[1])
+  eq(weapon.power, 3, "a weakness curse folds its penalty directly into the weapon's power")
+  eq(weapon.cursed, true, "the item is marked cursed")
+  eq(weapon.curseRevealed, false, "the curse starts hidden")
+  eq(weapon.name, "dagger", "an unrevealed curse never touches the item's displayed name")
+
+  local bow = Items.bow("short bow", 2, 5)
+  Curses.afflict(bow, Curses.pool.bow[1])
+  eq(bow.power, 1, "a faulty curse also taxes a bow's power")
+  eq(bow.range, 3, "a faulty curse shortens a bow's range")
+
+  local ring = Items.ring("ring of power", 1, 1)
+  Curses.afflict(ring, Curses.pool.ring[1])
+  eq(ring.attack, 1, "an affliction curse leaves a ring's own stats untouched")
+  eq(ring.curseDrain, 1, "an affliction curse instead sets a per-turn drain")
+end
+
+function tests.cursesAfflictNeverDropsPowerOrRangeBelowItsFloor()
+  local dagger = Items.weapon("dagger", 1)
+  Curses.afflict(dagger, { key = "test", powerPenalty = 5 })
+  eq(dagger.power, 0, "power never drops below zero even with an oversized penalty")
+
+  local bow = Items.bow("short bow", 2, 1)
+  Curses.afflict(bow, { key = "test", rangePenalty = 5 })
+  eq(bow.range, 1, "range never drops below one even with an oversized penalty")
+end
+
+function tests.cursesIsCursedAndIsRevealedReadEmptyOrCleanGearSafely()
+  eq(Curses.isCursed(nil), false, "a nil slot is never cursed")
+  local clean = Items.weapon("sword", 4)
+  eq(Curses.isCursed(clean), false, "a plain item is never cursed")
+  eq(Curses.isRevealed(clean), false, "a plain item has nothing to reveal")
+  Curses.afflict(clean, Curses.pool.weapon[1])
+  eq(Curses.isCursed(clean), true, "afflict marks the item cursed")
+  eq(Curses.isRevealed(clean), false, "afflict alone does not reveal the curse")
+  Curses.reveal(clean)
+  eq(Curses.isRevealed(clean), true, "reveal flips the item to known")
+  Curses.reveal(nil)
+  ok(true, "revealing a nil item is a safe no-op")
+end
+
+function tests.cursesIsBoundInChecksASpecificEquippedSlot()
+  local entity = { weapon = Items.weapon("sword", 4), armor = nil }
+  eq(Curses.isBoundIn(entity, "weapon"), false, "a clean equipped weapon is not bound")
+  eq(Curses.isBoundIn(entity, "armor"), false, "an empty slot is never bound")
+  Curses.afflict(entity.weapon, Curses.pool.weapon[1])
+  eq(Curses.isBoundIn(entity, "weapon"), true, "a cursed equipped weapon reads as bound")
+end
+
+function tests.cursesTryReleaseRevealsAndRefusesABoundSlotButPassesACleanOne()
+  local entity = { weapon = Items.weapon("sword", 4) }
+  eq(Curses.tryRelease(entity, "weapon"), true, "a clean weapon releases without resistance")
+  eq(Curses.tryRelease(entity, "armor"), true, "an empty slot always releases")
+  Curses.afflict(entity.weapon, Curses.pool.weapon[1])
+  eq(Curses.tryRelease(entity, "weapon"), false, "a bound weapon refuses to release")
+  eq(Curses.isRevealed(entity.weapon), true, "the failed release reveals the curse")
+end
+
+function tests.cursesCleanseUndoesThePenaltyAndClearsEveryField()
+  local weapon = Items.weapon("dagger", 5)
+  Curses.afflict(weapon, Curses.pool.weapon[1])
+  eq(Curses.cleanse(weapon), true, "cleansing a cursed weapon reports success")
+  eq(weapon.power, 5, "cleansing restores the weapon's original power")
+  eq(weapon.cursed, nil, "cleansing clears the cursed flag")
+  eq(weapon.curseKind, nil, "cleansing clears the curse kind")
+  eq(weapon.curseRevealed, nil, "cleansing clears the revealed flag")
+  eq(weapon.cursePenalty, nil, "cleansing clears the stored penalty")
+  eq(Curses.cleanse(weapon), false, "cleansing an already-clean item is a no-op")
+
+  local ring = Items.ring("ring of power", 0, 0)
+  Curses.afflict(ring, Curses.pool.ring[1])
+  Curses.cleanse(ring)
+  eq(ring.curseDrain, nil, "cleansing a ring also drops its drain")
+end
+
+function tests.cursesCleanseWornLiftsEveryCursedSlotAndCountsThem()
+  local entity = {
+    weapon = Curses.afflict(Items.weapon("dagger", 5), Curses.pool.weapon[1]),
+    armor = Items.armor("leather armor", 1),
+    ring = Curses.afflict(Items.ring("ring of power", 0, 0), Curses.pool.ring[1]),
+  }
+  eq(Curses.cleanseWorn(entity), 2, "cleanseWorn reports exactly the cursed pieces it lifted")
+  eq(Curses.isCursed(entity.weapon), false, "the cursed weapon is clean afterward")
+  eq(Curses.isCursed(entity.ring), false, "the cursed ring is clean afterward")
+  eq(Curses.cleanseWorn(entity), 0, "a second pass finds nothing left to cleanse")
+end
+
+function tests.cursesRevealFirstUnknownFindsEarliestSlotAndAdvances()
+  local entity = {
+    weapon = Curses.afflict(Items.weapon("dagger", 5), Curses.pool.weapon[1]),
+    armor = Curses.afflict(Items.armor("leather armor", 1), Curses.pool.armor[1]),
+  }
+  local first = Curses.revealFirstUnknown(entity)
+  eq(first, entity.weapon, "weapon slot order comes before armor")
+  eq(Curses.isRevealed(entity.weapon), true, "the found curse is now revealed")
+  local second = Curses.revealFirstUnknown(entity)
+  eq(second, entity.armor, "the next call advances to the still-hidden armor curse")
+  eq(Curses.revealFirstUnknown(entity), nil, "nothing left hidden once both are revealed")
+end
+
+function tests.cursesDrainAmountOnlyReadsACursedRing()
+  local entity = {}
+  eq(Curses.drainAmount(entity), 0, "no ring means no drain")
+  entity.weapon = Curses.afflict(Items.weapon("dagger", 5), Curses.pool.weapon[1])
+  eq(Curses.drainAmount(entity), 0, "a cursed weapon never drains hp")
+  entity.ring = Items.ring("ring of power", 0, 0)
+  eq(Curses.drainAmount(entity), 0, "a clean ring drains nothing")
+  Curses.afflict(entity.ring, Curses.pool.ring[1])
+  eq(Curses.drainAmount(entity), 1, "a cursed ring's affliction drains its fixed amount")
+end
+
+function tests.cursesLabelHidesUntilRevealedThenPrefixes()
+  local weapon = Items.weapon("dagger", 5)
+  eq(Curses.label(weapon, "dagger"), "dagger", "a clean item's label is untouched")
+  Curses.afflict(weapon, Curses.pool.weapon[1])
+  eq(Curses.label(weapon, "dagger"), "dagger", "an unrevealed curse still hides behind the plain label")
+  Curses.reveal(weapon)
+  eq(Curses.label(weapon, "dagger"), "cursed dagger", "a revealed curse prefixes the label")
+end
+
+function tests.gameEquippingOverABoundCursedWeaponFailsAndRevealsTheCurse()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.weapon = Curses.afflict(Items.weapon("dagger", 2), Curses.pool.weapon[1])
+  game.player.inventory = { Items.weapon("sword", 4) }
+  local before = game.player.weapon
+  eq(game:useItem(1), false, "equipping a new weapon over a bound one fails")
+  ok(game.player.weapon == before, "the bound weapon stays equipped")
+  eq(Curses.isRevealed(before), true, "the failed swap reveals the curse")
+  eq(#game.player.inventory, 1, "the replacement weapon stays in the pack, never spent")
+  ok(contains(game.log:last(), "will not come off"), "the log explains the weapon is stuck")
+end
+
+function tests.gameEquippingAFreshCurseHidesItUntilYouTryToTakeItOff()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local cursedRing = Curses.afflict(Items.ring("ring of power", 1, 1), Curses.pool.ring[1])
+  game.player.inventory = { cursedRing }
+  ok(game:useItem(1), "equipping an empty slot with a cursed item still succeeds")
+  ok(game.player.ring == cursedRing, "the cursed ring is now equipped")
+  ok(not contains(game.log:last(), "cursed"), "the equip message never spoils an unrevealed curse")
+end
+
+function tests.gameRemoveCurseScrollLiftsEveryCurseCurrentlyWorn()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.ring = Curses.afflict(Items.ring("ring of power", 0, 0), Curses.pool.ring[1])
+  game.player.inventory = { Items.scroll("removecurse") }
+  ok(game:useItem(1), "reading the scroll succeeds")
+  eq(Curses.isCursed(game.player.ring), false, "the worn ring's curse is lifted")
+  ok(contains(game.log:last(), "lifts"), "the log reports the cleansing")
+end
+
+function tests.gameHungerTorchTickBleedsHpFromACursedRingEachTurn()
+  local game = Game.new(1)
+  game.player.ring = Curses.afflict(Items.ring("ring of power", 0, 0), Curses.pool.ring[1])
+  local before = game.player.hp
+  game:hungerTorchTick()
+  eq(game.player.hp, before - 1, "a cursed ring's affliction bleeds its fixed drain each turn")
+  ok(contains(game.log:last(), "saps"), "the drain is announced in the log")
+end
+
+function tests.shrinePrayFortuneBlessingAlsoLiftsAnyCurseCurrentlyWorn()
+  local player = shrinePlayer(50)
+  player.ring = Curses.afflict(Items.ring("ring of power", 0, 0), Curses.pool.ring[1])
+  local game = { player = player, rng = Rng.new(1) }
+  local shrine = { x = 1, y = 1, kind = Shrines.FORTUNE, uses = 0 }
+  local success, lines = Shrines.pray(game, shrine)
+  eq(success, true, "the prayer resolves")
+  eq(Curses.isCursed(player.ring), false, "fortune's blessing lifts the worn ring's curse too")
+  ok(contains(lines[2], "cleanses"), "a lifted curse counts toward the cleansing message")
+end
+
+function tests.renderPanelPrefixesCursedGearOnceRevealedButNotBefore()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.weapon = Curses.afflict(Items.weapon("dagger", 5), Curses.pool.weapon[1])
+  ok(not contains(Render.panel(game), "cursed"), "an unrevealed curse never shows in the status panel")
+  Curses.reveal(game.player.weapon)
+  ok(contains(Render.panel(game), "cursed dagger"), "a revealed curse is flagged in the status panel")
+end
+
+function tests.builderOccasionallyPlacesACursedPieceOfGear()
+  local found
+  for seed = 1, 80 do
+    local level = Builder.build(2, Rng.new(seed), {})
+    for _, ground in ipairs(level.floorItems) do
+      if ground.item.cursed then found = ground.item end
+    end
+    if found then break end
+  end
+  ok(found ~= nil, "a cursed piece of gear eventually turns up across a handful of seeds")
+  ok(found.cursePenalty ~= nil or found.curseDrain ~= nil, "a cursed drop always carries a concrete penalty")
+end
+
+function tests.builderNeverCursesAnItemThatAlreadyHasABeneficialAffix()
+  for seed = 1, 30 do
+    for depth = 1, 5 do
+      local level = Builder.build(depth, Rng.new(seed), {})
+      for _, ground in ipairs(level.floorItems) do
+        if ground.item.affix then
+          ok(not ground.item.cursed, "an item with a beneficial affix is never also cursed")
+        end
+      end
+    end
+  end
+end
+
+function tests.cursedFieldsSurviveSerialization()
+  local game = Game.new(3)
+  game.player.ring = Curses.afflict(Items.ring("ring of power", 1, 1), Curses.pool.ring[1])
+  Curses.reveal(game.player.ring)
+  local path = os.tmpname()
+  game:save(path)
+  local restored = Game.load(path)
+  os.remove(path)
+  eq(restored.player.ring.cursed, true, "a cursed ring's flag survives a save/load round trip")
+  eq(restored.player.ring.curseDrain, 1, "a cursed ring's drain survives a save/load round trip")
+  eq(restored.player.ring.curseRevealed, true, "a revealed curse stays revealed after reload")
+end
+
+function tests.momentumStacksReadsZeroForAFreshEntity()
+  eq(Momentum.stacks({}), 0, "an entity with no combo field reads as zero stacks")
+end
+
+function tests.momentumOnMeleeHitBuildsAndCapsAtItsMaxStacks()
+  local entity = {}
+  for i = 1, Momentum.MAX_STACKS do
+    Momentum.onMeleeHit(entity)
+    eq(Momentum.stacks(entity), i, "stack " .. i .. " builds one at a time")
+  end
+  Momentum.onMeleeHit(entity)
+  eq(Momentum.stacks(entity), Momentum.MAX_STACKS, "stacks never climb past the cap")
+end
+
+function tests.momentumOnDamagedSnapsTheStackBackToZero()
+  local entity = { combo = 3 }
+  Momentum.onDamaged(entity)
+  eq(Momentum.stacks(entity), 0, "taking a hit clears the whole stack outright")
+end
+
+function tests.momentumAttackBonusScalesLinearlyWithStacks()
+  local entity = {}
+  eq(Momentum.attackBonus(entity), 0, "no stacks means no bonus")
+  Momentum.onMeleeHit(entity)
+  Momentum.onMeleeHit(entity)
+  eq(Momentum.attackBonus(entity), 2 * Momentum.BONUS_PER_STACK, "the bonus scales with the current stack count")
+end
+
+function tests.entityEffectiveAttackFoldsInMomentumAlongsideStatusModifiers()
+  local entity = Entity.new({ x = 1, y = 1, glyph = "@", name = "you", kind = "player", hp = 20, attack = 6, defense = 2 })
+  eq(entity:effectiveAttack(), 6, "a fresh entity's effective attack is just its base")
+  Momentum.onMeleeHit(entity)
+  Momentum.onMeleeHit(entity)
+  eq(entity:effectiveAttack(), 8, "two momentum stacks add their flat bonus on top of base attack")
+end
+
+function tests.gamePlayerAttackBuildsMomentumAndItReadsLiveInEffectiveAttack()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  orc.hp, orc.maxHp = 100, 100
+  game.level.entities = { orc }
+  eq(game.player:effectiveAttack(), game.player.attack, "a fresh player carries no momentum bonus")
+  game:playerAttack(orc)
+  eq(game.player.combo, 1, "a landed melee hit builds one stack")
+  eq(game.player:effectiveAttack(), game.player.attack + 1,
+    "the very next read of effectiveAttack already reflects the new stack")
+end
+
+function tests.gameMonsterMeleeSnapsMomentumBackToZero()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.combo = 4
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 2, 6, 1)
+  game:monsterMelee(orc)
+  eq(game.player.combo, 0, "getting hit by a monster's melee resets momentum to zero")
+end
+
+function tests.gameEvadedMonsterAttackNeverBreaksMomentum()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.skills = { evasion = true }
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 2, 6, 1)
+  local sawEvasion = false
+  for seed = 1, 40 do
+    game.rng = Rng.new(seed)
+    game.player.combo = 3
+    game:monsterMelee(orc)
+    if game.player.combo == 3 then sawEvasion = true break end
+  end
+  ok(sawEvasion, "an evaded attack never reaches Combat.attack, so momentum survives it")
+end
+
+function tests.gameMimicAmbushAlsoBreaksMomentum()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.player.combo = 2
+  game.level.floorItems = { { x = 5, y = 5, item = Mimics.floorItem(Rng.new(1)) } }
+  game:pickupHere()
+  eq(game.player.combo, 0, "a mimic's ambush hit also breaks momentum")
+end
+
+function tests.renderPanelShowsComboOnlyOnceItIsBuilt()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  ok(not contains(Render.panel(game), "combo"), "a fresh player with no momentum shows no combo line")
+  game.player.combo = 3
+  ok(contains(Render.panel(game), "combo x3"), "a built-up combo is reported in the status panel")
+end
+
 end
 
 local order = {
