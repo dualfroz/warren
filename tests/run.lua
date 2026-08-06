@@ -7568,6 +7568,1217 @@ function tests.renderPanelShowsComboOnlyOnceItIsBuilt()
   ok(contains(Render.panel(game), "combo x3"), "a built-up combo is reported in the status panel")
 end
 
+function tests.momentumFieldSurvivesSerialization()
+  local game = Game.new(3)
+  game.player.combo = 4
+  local path = os.tmpname()
+  game:save(path)
+  local restored = Game.load(path)
+  os.remove(path)
+  eq(restored.player.combo, 4, "the player's momentum stack survives a save/load round trip")
+end
+
+function tests.conductivityIsWetReadsTheEntitysOwnWetField()
+  eq(Conductivity.isWet({}), false, "an entity with no wet field at all reads as dry")
+  eq(Conductivity.isWet({ wet = 0 }), false, "a wet counter already run down to zero reads as dry")
+  eq(Conductivity.isWet({ wet = 1 }), true, "any positive wet counter reads as wet")
+end
+
+function tests.conductivityTickSoaksOnWaterAndDecaysOneStepAtATimeOffIt()
+  local level = arena(21, 11)
+  level.map:set(6, 6, Tiles.WATER)
+  local entity = { x = 6, y = 6 }
+  Conductivity.tick(level, entity)
+  eq(entity.wet, Conductivity.SOAK_DURATION, "standing on water soaks an entity to the full duration")
+  entity.x = 7
+  for i = Conductivity.SOAK_DURATION - 1, 0, -1 do
+    Conductivity.tick(level, entity)
+    eq(entity.wet, i, "the soak counter decays by exactly one per turn spent off water")
+  end
+  eq(Conductivity.isWet(entity), false, "the counter bottoms out at zero rather than going negative")
+end
+
+function tests.conductivityTickReSoaksImmediatelyOnSteppingBackOntoWater()
+  local level = arena(21, 11)
+  level.map:set(6, 6, Tiles.WATER)
+  local entity = { x = 6, y = 6, wet = 1 }
+  Conductivity.tick(level, entity)
+  eq(entity.wet, Conductivity.SOAK_DURATION,
+    "stepping back onto water refreshes the counter to full rather than adding to it")
+end
+
+function tests.conductivityApplyFireDampensDamageOnlyOnceSoaked()
+  eq(Conductivity.applyFire({}, 10), 10, "fire damage against a dry entity is untouched")
+  eq(Conductivity.applyFire({ wet = 2 }, 10), 5,
+    "fire damage against a soaked entity is halved on top of its resistance tier")
+end
+
+function tests.conductivityApplyLightningBonusesDamageOnlyOnceSoaked()
+  eq(Conductivity.applyLightning({}, 10), 10, "lightning damage against a dry entity is untouched")
+  eq(Conductivity.applyLightning({ wet = 2 }, 10), 15,
+    "lightning damage against a soaked entity gets a 50 percent conductivity bonus")
+end
+
+function tests.conductivityNeverConjuresDamageOutOfAnImmuneResistance()
+  eq(Conductivity.applyFire({ wet = 2, resist = { fire = Resistances.IMMUNE } }, 10), 0,
+    "fire immunity still floors damage at zero even while soaked")
+  eq(Conductivity.applyLightning({ wet = 2, resist = { lightning = Resistances.IMMUNE } }, 10), 0,
+    "lightning immunity still floors damage at zero even while soaked")
+end
+
+function tests.conductivityResistsIgnitionOnlyWhileWet()
+  eq(Conductivity.resistsIgnition({}), false, "a dry entity does not resist ignition")
+  eq(Conductivity.resistsIgnition({ wet = 3 }), true, "a soaked entity resists catching fire")
+end
+
+function tests.statusApplyRefusesBurningOnlyWhileSoakedButOtherEffectsStillApply()
+  local entity = Entity.new({ x = 1, y = 1, glyph = "@", name = "you", kind = "player", hp = 20, attack = 6, defense = 2 })
+  entity.wet = 2
+  local result = Status.apply(entity, Status.BURNING, 3, 2)
+  eq(result, nil, "applying burning to a soaked entity is refused outright")
+  eq(Status.has(entity, Status.BURNING), false, "a refused burning application leaves no trace on the entity")
+  Status.apply(entity, Status.POISON, 3, 2)
+  eq(Status.has(entity, Status.POISON), true, "a soaked entity still catches every other status effect normally")
+  entity.wet = 0
+  Status.apply(entity, Status.BURNING, 3, 2)
+  eq(Status.has(entity, Status.BURNING), true, "once dry again, the same entity catches fire normally")
+end
+
+function tests.statusRemoveStripsANamedStatusRegardlessOfItsRemainingDuration()
+  local entity = Entity.new({ x = 1, y = 1, glyph = "@", name = "you", kind = "player", hp = 20, attack = 6, defense = 2 })
+  Status.apply(entity, Status.POISON, 99, 2)
+  eq(Status.remove(entity, Status.POISON), true, "removing a status that is present reports success")
+  eq(Status.has(entity, Status.POISON), false, "the removed status no longer reads as active")
+  eq(Status.remove(entity, Status.POISON), false, "removing an already-absent status reports nothing to do")
+  eq(Status.remove(entity, Status.CONFUSE), false, "removing a status that was never applied at all also reports nothing to do")
+end
+
+function tests.statusCureHostileLiftsEveryDebuffButLeavesBuffsUntouched()
+  local entity = Entity.new({ x = 1, y = 1, glyph = "@", name = "you", kind = "player", hp = 20, attack = 6, defense = 2 })
+  Status.apply(entity, Status.POISON, 5, 2)
+  Status.apply(entity, Status.CONFUSE, 6, 1)
+  Status.apply(entity, Status.STUN, 2, 1)
+  Status.apply(entity, Status.STRENGTH, 30, 3)
+  Status.apply(entity, Status.SHIELD, 15, 1)
+  local lifted = Status.cureHostile(entity)
+  eq(#lifted, 3, "cureHostile reports exactly the three debuffs it lifted")
+  eq(Status.has(entity, Status.POISON), false, "poison is gone after cureHostile")
+  eq(Status.has(entity, Status.CONFUSE), false, "confuse is gone after cureHostile")
+  eq(Status.has(entity, Status.STUN), false, "stun is gone after cureHostile")
+  ok(Status.has(entity, Status.STRENGTH), "a buff like strength survives cureHostile untouched")
+  ok(Status.has(entity, Status.SHIELD), "a buff like shield survives cureHostile untouched")
+  eq(#Status.cureHostile(entity), 0, "calling cureHostile again with nothing hostile left returns an empty list")
+end
+
+function tests.hazardsAfflictDampensFireAndBlocksIgnitionForASoakedVictim()
+  local level = arena(21, 11)
+  Hazards.ignite(level, 5, 5, 3, 4)
+  local victim = Monsters.create(Monsters.byKey.rat, 1, 5, 5, 1)
+  victim.wet = 2
+  local hpBefore = victim.hp
+  local line = Hazards.afflict(level, victim)
+  eq(victim.hp, hpBefore - 2, "standing in fire while soaked only deals half the usual potency")
+  ok(contains(line, "soaked"), "the afflict message calls out the victim's own soaked skin")
+  eq(Status.has(victim, Status.BURNING), false, "a soaked victim standing in fire never actually catches alight")
+end
+
+function tests.gameConductivityTicksAMonsterEachTurnBasedOnTheTileUnderfoot()
+  local level = arena(21, 11)
+  level.map:set(6, 6, Tiles.WATER)
+  local game = stagedGame(1, level, 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 6, 6, 1)
+  game.level.entities = { rat }
+  game:takeMonsterTurn(rat)
+  eq(rat.wet, Conductivity.SOAK_DURATION, "a monster ending its turn on water is soaked to the full duration")
+  rat.x, rat.y = 7, 6
+  game:takeMonsterTurn(rat)
+  eq(rat.wet, Conductivity.SOAK_DURATION - 1, "moving off water the following turn lets the soak counter decay by one")
+end
+
+function tests.gameConductivityTicksThePlayerEachAutoStepBasedOnTheTileUnderfoot()
+  local level = arena(21, 11)
+  level.map:set(3, 6, Tiles.WATER)
+  local game = stagedGame(1, level, 3, 6)
+  game:autoStep()
+  eq(game.player.wet, Conductivity.SOAK_DURATION, "the player ending a turn on water is soaked to the full duration")
+end
+
+function tests.spellShockBoltDealsMoreDamageToASoakedTargetThanADryOne()
+  local dryGame = stagedGame(1, arena(21, 11), 3, 6)
+  Spells.learn(dryGame.player, "shock")
+  local dry = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  dry.hp, dry.maxHp = 100, 100
+  dryGame.level.entities = { dry }
+  local castOk = dryGame:castSpell("shock", dry)
+  ok(castOk, "casting a learned, in-range shock bolt succeeds")
+  local dryDealt = 100 - dry.hp
+  ok(dryDealt > 0, "shock bolt deals real lightning damage to a dry target")
+
+  local wetGame = stagedGame(1, arena(21, 11), 3, 6)
+  Spells.learn(wetGame.player, "shock")
+  local soaked = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  soaked.hp, soaked.maxHp = 100, 100
+  soaked.wet = 2
+  wetGame.level.entities = { soaked }
+  wetGame:castSpell("shock", soaked)
+  local wetDealt = 100 - soaked.hp
+  eq(wetDealt, dryDealt + dryDealt // 2,
+    "shock bolt deals exactly its 50 percent conductivity bonus against a soaked target")
+  ok(contains(wetGame.log:last(), "water clinging"),
+    "casting shock bolt on a soaked target reports the conductivity through water")
+end
+
+function tests.renderPanelShowsWetOnlyWhileSoaked()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  ok(not contains(Render.panel(game), "wet"), "a fresh dry player shows no wet line")
+  game.player.wet = 2
+  ok(contains(Render.panel(game), "wet (2)"), "a soaked player's status panel reports the remaining soak turns")
+end
+
+function tests.builderCanRollATomeOfTheShockBoltSpell()
+  -- Range widened from 100 to 200: adding "cleanse" to Builder's `learnable`
+  -- list shifted rng:range(1, #learnable)'s result for effectively every
+  -- seed, and the nearest shock tome under the new list happens to sit at
+  -- seed 174 - still well within "a reasonable seed range".
+  local found
+  for seed = 1, 200 do
+    local level = Builder.build(6, Rng.new(seed), {})
+    for _, ground in ipairs(level.floorItems) do
+      if ground.item.kind == Items.TOME and ground.item.spell == "shock" then found = ground.item end
+    end
+    if found then break end
+  end
+  ok(found ~= nil, "the shock bolt tome is reachable dungeon loot within a reasonable seed range")
+  eq(found.name, "tome of shock", "an unnamed tome defaults its label to the spell key")
+end
+
+function tests.entityWetFieldSurvivesSerialization()
+  local game = Game.new(3)
+  game.player.wet = 2
+  local path = os.tmpname()
+  game:save(path)
+  local restored = Game.load(path)
+  os.remove(path)
+  eq(restored.player.wet, 2, "the player's soak counter survives a save/load round trip")
+end
+
+function tests.diggingCanDigAllowsOnlyWallsAndRubble()
+  local level = arena(21, 11)
+  ok(Digging.canDig(level.map, 1, 5), "the arena's own border wall is diggable")
+  ok(not Digging.canDig(level.map, 5, 5), "open floor has nothing left to dig")
+  level.map:set(5, 5, Tiles.RUBBLE)
+  ok(Digging.canDig(level.map, 5, 5), "rubble left by a prior swing is still diggable")
+  level.map:set(5, 5, Tiles.VAULT_DOOR)
+  ok(not Digging.canDig(level.map, 5, 5), "a vault's own boundary never yields to a pick")
+  ok(not Digging.canDig(level.map, 0, 5), "a cell outside the map is never diggable")
+end
+
+function tests.diggingSwingClearsAWallToRubbleOnAnOrdinarySwing()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.map:set(5, 5, Tiles.WALL)
+  game.rng = Rng.new(1)
+  local line = Digging.swing(game, game.player, 5, 5)
+  eq(game.level.map:get(5, 5), Tiles.RUBBLE, "an ordinary swing crumbles a wall to rubble, not clear")
+  ok(contains(line, "carve"), "the log line describes carving through rock")
+end
+
+function tests.diggingSwingClearsRubbleToFloorOnASecondSwing()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.map:set(5, 5, Tiles.RUBBLE)
+  game.rng = Rng.new(1)
+  local line = Digging.swing(game, game.player, 5, 5)
+  eq(game.level.map:get(5, 5), Tiles.FLOOR, "a second swing clears rubble the rest of the way to open floor")
+  ok(contains(line, "clear"), "the log line describes clearing rubble away")
+end
+
+function tests.diggingSwingCaveInHurtsTheDiggerAndLeavesTheTileUntouched()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.map:set(5, 5, Tiles.WALL)
+  game.rng = Rng.new(6)
+  local hpBefore = game.player.hp
+  local line = Digging.swing(game, game.player, 5, 5)
+  eq(game.level.map:get(5, 5), Tiles.WALL, "a cave-in wastes the swing; the wall is untouched")
+  ok(game.player.hp < hpBefore, "a cave-in deals real damage to the digger")
+  ok(contains(line, "buries you"), "the log line names the player directly, not by their entity name")
+end
+
+function tests.diggingSwingOreStrikeClearsTheWallOutrightAndPaysEssenceToATrackingDigger()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.map:set(5, 5, Tiles.WALL)
+  game.rng = Rng.new(2)
+  local essenceBefore = game.player.essence
+  local line = Digging.swing(game, game.player, 5, 5)
+  eq(game.level.map:get(5, 5), Tiles.FLOOR, "a lucky ore strike clears the wall in a single stroke")
+  ok(game.player.essence > essenceBefore, "striking a vein pays essence to a digger that tracks it")
+  ok(contains(line, "essence"), "the log line reports the essence payout")
+end
+
+function tests.diggingSwingOreStrikeSkipsTheEssenceRewardForADiggerThatDoesNotTrackIt()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.map:set(5, 5, Tiles.WALL)
+  local burrower = Entity.new({ id = 1, x = 4, y = 5, glyph = "b", name = "rock burrower", kind = "monster", hp = 12, attack = 4, defense = 2 })
+  game.rng = Rng.new(2)
+  local line = Digging.swing(game, burrower, 5, 5)
+  eq(game.level.map:get(5, 5), Tiles.FLOOR, "the same lucky strike still clears the wall for a monster")
+  eq(burrower.essence, nil, "a monster never gains an essence field it never had")
+  ok(contains(line, "vein"), "the log line still names the vein even without a payout")
+end
+
+function tests.diggingWearPickDepletesDurabilityAndBreaksAtZero()
+  local entity = { pick = Items.pick("test pick", 2) }
+  eq(Digging.wearPick(entity), nil, "the first swing just wears the edge down")
+  eq(entity.pick.uses, 1, "one use is spent")
+  local brokenLine = Digging.wearPick(entity)
+  ok(contains(brokenLine, "crumbles"), "the swing that empties the pick reports it breaking")
+  eq(entity.pick, nil, "a spent pick is discarded outright")
+end
+
+function tests.diggingWearPickIsANoOpWithoutAPickEquipped()
+  local entity = {}
+  eq(Digging.wearPick(entity), nil, "wearing down a pick that was never equipped changes nothing")
+end
+
+function tests.diggingDirectionsTowardPrefersTheLongerAxisFirst()
+  local dirs = Digging.directionsToward(10, 10, 15, 12)
+  eq(#dirs, 2, "a diagonal target yields both an x and a y candidate")
+  eq(dirs[1][1], 1, "the longer x delta is offered first")
+  eq(dirs[1][2], 0, "the first candidate is a pure x step")
+  eq(dirs[2][1], 0, "the second candidate is a pure y step")
+  eq(dirs[2][2], 1, "it steps toward the smaller but still positive y delta")
+
+  local vertical = Digging.directionsToward(10, 10, 11, 5)
+  eq(vertical[1][1], 0, "when y dominates, the y step comes first")
+  eq(vertical[1][2], -1, "stepping toward a smaller y is a negative step")
+end
+
+function tests.diggingDirectionsTowardOmitsAZeroDelta()
+  local dirs = Digging.directionsToward(10, 10, 15, 10)
+  eq(#dirs, 1, "a purely horizontal target yields only one candidate")
+  eq(dirs[1][1], 1, "the sole candidate steps toward positive x")
+  eq(dirs[1][2], 0, "the sole candidate carries no y component")
+
+  local same = Digging.directionsToward(10, 10, 10, 10)
+  eq(#same, 0, "already standing on the target yields no candidate at all")
+end
+
+function tests.itemsEquipPickSwapsAnyPriorPickBackIntoInventory()
+  local entity = { inventory = {}, pick = Items.pick("worn pick", 3) }
+  local fresh = Items.pick("fresh pick", 20)
+  Items.equipPick(fresh, entity)
+  eq(entity.pick, fresh, "the freshly equipped pick becomes the active one")
+  eq(#entity.inventory, 1, "the previously equipped pick drops back into the inventory")
+  eq(entity.inventory[1].name, "worn pick", "the displaced pick is the one that was equipped before")
+end
+
+function tests.shopPicksHaveAPositiveCatalogPrice()
+  ok(Shop.priceOf(Items.pick()) > 0, "a miner's pick has a positive catalog price")
+end
+
+function tests.gameDigFailsWithoutAPickEquipped()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.map:set(4, 6, Tiles.WALL)
+  local moved = game:dig(1, 0)
+  eq(moved, false, "digging without a pick equipped fails outright")
+  eq(game.level.map:get(4, 6), Tiles.WALL, "the wall is untouched without a pick")
+  ok(contains(game.log:last(), "nothing to dig with"), "the log explains why")
+end
+
+function tests.gameDigFailsWhenNothingAheadIsDiggable()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.pick = Items.pick()
+  local moved = game:dig(1, 0)
+  eq(moved, false, "there is nothing to dig into open floor")
+  ok(contains(game.log:last(), "nothing here to dig"), "the log explains why")
+end
+
+function tests.gameDigClearsAWallAndWearsThePickDown()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.map:set(4, 6, Tiles.WALL)
+  game.player.pick = Items.pick("miner's pick", 5)
+  game.rng = Rng.new(1)
+  local moved = game:dig(1, 0)
+  eq(moved, true, "a swing against a wall with a pick readied succeeds")
+  eq(game.level.map:get(4, 6), Tiles.RUBBLE, "the wall crumbles to rubble")
+  eq(game.player.pick.uses, 4, "the swing spends one use of the pick's durability")
+end
+
+function tests.gameDigBreaksThePickOnItsLastUse()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.map:set(4, 6, Tiles.WALL)
+  game.player.pick = Items.pick("worn pick", 1)
+  game.rng = Rng.new(1)
+  game:dig(1, 0)
+  eq(game.player.pick, nil, "the pick's last use breaks it outright")
+  ok(contains(game.log:last(), "crumbles"), "the log reports the pick breaking")
+end
+
+function tests.gameMonsterTunnelsThroughAWallToReachAndAttackThePlayer()
+  local level = arena(21, 11)
+  for y = 2, 10 do level.map:set(10, y, Tiles.WALL) end
+  local game = stagedGame(1, level, 8, 6)
+  local burrower = Entity.new({
+    id = 1, x = 12, y = 6, glyph = "b", name = "rock burrower", kind = "monster",
+    ai = "tunnel", hp = 20, maxHp = 20, attack = 5, defense = 0, speed = 100,
+  })
+  game.level.entities = { burrower }
+  local hpBefore = game.player.hp
+  local sawRubble = false
+  for _ = 1, 10 do
+    game.rng = Rng.new(1)
+    Ai.act(game, burrower)
+    if game.level.map:get(10, 6) ~= Tiles.WALL then sawRubble = true end
+    if game.player.hp < hpBefore then break end
+  end
+  ok(sawRubble, "the burrower actually carves through the partition wall")
+  ok(game.player.hp < hpBefore, "the burrower eventually reaches and melees the player through its own tunnel")
+end
+
+function tests.pickFieldSurvivesSerialization()
+  local game = Game.new(3)
+  game.player.pick = Items.pick("saved pick", 7)
+  local path = os.tmpname()
+  game:save(path)
+  local restored = Game.load(path)
+  os.remove(path)
+  eq(restored.player.pick.name, "saved pick", "the equipped pick's name survives a save/load round trip")
+  eq(restored.player.pick.uses, 7, "the equipped pick's remaining durability survives a save/load round trip")
+end
+
+function tests.builderNeverPlacesAPickBeforeDepthTwo()
+  for seed = 1, 20 do
+    local level = Builder.build(1, Rng.new(seed), {})
+    for _, ground in ipairs(level.floorItems) do
+      ok(ground.item.kind ~= Items.PICK, "a pick never turns up on the entrance floor")
+    end
+  end
+end
+
+function tests.builderOccasionallyPlacesAPickFromDepthTwo()
+  local level = Builder.build(2, Rng.new(6), {})
+  local found
+  for _, ground in ipairs(level.floorItems) do
+    if ground.item.kind == Items.PICK then found = ground.item end
+  end
+  ok(found ~= nil, "this seed's depth-2 floor places a miner's pick")
+  ok(Shop.priceOf(found) > 0, "the placed pick still carries a positive catalog price")
+end
+
+function tests.sanityCurrentDefaultsToMaxForAFreshEntity()
+  eq(Sanity.current({}), Sanity.MAX, "an entity with no sanity field reads as fully composed")
+end
+
+function tests.sanityTierOfClassifiesEachBandAtItsBoundaries()
+  eq(Sanity.tierOf({ sanity = 100 }), Sanity.COMPOSED, "a full meter is composed")
+  eq(Sanity.tierOf({ sanity = 61 }), Sanity.COMPOSED, "just above the shaken ceiling is still composed")
+  eq(Sanity.tierOf({ sanity = 60 }), Sanity.SHAKEN, "the shaken ceiling itself reads as shaken")
+  eq(Sanity.tierOf({ sanity = 31 }), Sanity.SHAKEN, "just above the terrified ceiling is still shaken")
+  eq(Sanity.tierOf({ sanity = 30 }), Sanity.TERRIFIED, "the terrified ceiling itself reads as terrified")
+  eq(Sanity.tierOf({ sanity = 1 }), Sanity.TERRIFIED, "one point above zero is still terrified, never broken")
+  eq(Sanity.tierOf({ sanity = 0 }), Sanity.BROKEN, "zero itself is broken")
+end
+
+function tests.sanityAdjustClampsToTheZeroAndMaxBounds()
+  local entity = { sanity = 95 }
+  eq(Sanity.adjust(entity, 30), Sanity.MAX, "adjusting past the ceiling clamps to max")
+  eq(Sanity.adjust(entity, -1000), 0, "adjusting far past the floor clamps to zero")
+  eq(Sanity.adjust(entity, 5), 5, "an ordinary adjustment lands exactly where expected")
+end
+
+function tests.sanityAttackAndDefensePenaltiesEscalateByTier()
+  eq(Sanity.attackPenalty({ sanity = 100 }), 0, "a composed mind carries no attack penalty")
+  eq(Sanity.attackPenalty({ sanity = 60 }), -1, "shaken costs a point of attack")
+  eq(Sanity.attackPenalty({ sanity = 30 }), -3, "terrified costs three points of attack")
+  eq(Sanity.attackPenalty({ sanity = 0 }), -5, "broken costs five points of attack")
+  eq(Sanity.defensePenalty({ sanity = 100 }), 0, "a composed mind carries no defense penalty")
+  eq(Sanity.defensePenalty({ sanity = 60 }), -1, "shaken costs a point of defense")
+  eq(Sanity.defensePenalty({ sanity = 30 }), -2, "terrified costs two points of defense")
+  eq(Sanity.defensePenalty({ sanity = 0 }), -4, "broken costs four points of defense")
+end
+
+function tests.entityEffectiveAttackAndDefenseFoldInTheSanityPenalty()
+  local entity = Entity.new({ x = 1, y = 1, glyph = "@", name = "you", kind = "player", hp = 20, attack = 6, defense = 4 })
+  eq(entity:effectiveAttack(), 6, "a fresh entity with no sanity field carries no penalty")
+  entity.sanity = 0
+  eq(entity:effectiveAttack(), 1, "a broken mind's attack penalty is live in effectiveAttack")
+  eq(entity:effectiveDefense(), 0, "a broken mind's defense penalty is live in effectiveDefense")
+end
+
+function tests.sanityDarknessDreadFiresOnlyOnADarkFloorWithASpentTorch()
+  local dark = stagedGame(1, arenaDark(21, 11), 3, 6)
+  dark.player.light.fuel = 0
+  eq(Sanity.darknessDread(dark), Sanity.DARKNESS_DREAD, "a dark floor with a spent torch dreads the mind")
+  dark.player.light.fuel = 50
+  eq(Sanity.darknessDread(dark), 0, "a lit torch on a dark floor holds the dread off entirely")
+  local lit = stagedGame(1, arena(21, 11), 3, 6)
+  lit.player.light.fuel = 0
+  eq(Sanity.darknessDread(lit), 0, "an ordinary floor never dreads the mind regardless of torch fuel")
+end
+
+function tests.sanityCorpseDreadCountsOnlyCorpsesAdjacentToThePlayer()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.corpses = { { x = 2, y = 5 } }
+  eq(Sanity.corpseDread(game), Sanity.CORPSE_DREAD_PER, "one adjacent corpse contributes its fixed share")
+  game.level.corpses[#game.level.corpses + 1] = { x = 10, y = 6 }
+  eq(Sanity.corpseDread(game), Sanity.CORPSE_DREAD_PER, "a corpse well outside arm's reach adds nothing")
+end
+
+function tests.sanityCorpseDreadCapsAtItsFixedCeiling()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.corpses = {
+    { x = 2, y = 5 }, { x = 2, y = 6 }, { x = 2, y = 7 }, { x = 3, y = 5 }, { x = 3, y = 7 },
+  }
+  eq(Sanity.corpseDread(game), Sanity.CORPSE_DREAD_CAP, "five adjacent corpses still cap at the fixed ceiling")
+end
+
+function tests.sanityUndeadDreadCountsOnlyVisibleUndeadAndCapsAtItsCeiling()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local zombie = Monsters.create(Monsters.byKey.zombie, 1, 4, 6, 1)
+  game.level.entities = { zombie }
+  eq(Sanity.undeadDread(game), Sanity.UNDEAD_DREAD_PER, "one visible undead contributes its fixed share")
+  game.visible = {}
+  eq(Sanity.undeadDread(game), 0, "an undead outside the player's sight adds nothing")
+  game:computeVisible()
+  local orc = Monsters.create(Monsters.byKey.orc, 2, 5, 6, 1)
+  game.level.entities[#game.level.entities + 1] = orc
+  eq(Sanity.undeadDread(game), Sanity.UNDEAD_DREAD_PER, "a visible living monster never counts as undead dread")
+  for i = 3, 6 do
+    game.level.entities[#game.level.entities + 1] = Monsters.create(Monsters.byKey.zombie, i, 6, 6, 1)
+  end
+  eq(Sanity.undeadDread(game), Sanity.UNDEAD_DREAD_CAP, "a crowd of visible undead still caps at the fixed ceiling")
+end
+
+function tests.sanityCurseDreadFiresOnlyForARevealedCurse()
+  local player = { ring = Curses.afflict(Items.ring("ring of power", 0, 0), Curses.pool.ring[1]) }
+  eq(Sanity.curseDread(player), 0, "a curse still hidden behind an ordinary appearance dreads nothing")
+  Curses.reveal(player.ring)
+  eq(Sanity.curseDread(player), Sanity.CURSE_DREAD, "a revealed curse gnaws at the mind")
+end
+
+function tests.sanityWeatherDreadFiresOnlyForInfestedWeather()
+  eq(Sanity.weatherDread(Atmosphere.INFESTED), Sanity.WEATHER_DREAD, "an infested floor dreads the mind")
+  eq(Sanity.weatherDread(Atmosphere.FOGGY), 0, "a merely foggy floor is not itself dreadful")
+  eq(Sanity.weatherDread(nil), 0, "a clear floor carries no weather dread")
+end
+
+function tests.sanityTotalDreadSumsEverySourceAtOnce()
+  local dark = stagedGame(1, arenaDark(21, 11), 3, 6)
+  dark.player.light.fuel = 0
+  dark.level.weather = Atmosphere.INFESTED
+  dark.level.corpses = { { x = 2, y = 5 } }
+  eq(Sanity.totalDread(dark), Sanity.DARKNESS_DREAD + Sanity.WEATHER_DREAD + Sanity.CORPSE_DREAD_PER,
+    "every currently-active dread source is summed at once")
+end
+
+function tests.sanityTickAppliesDreadAndLogsOnlyOnATierCrossing()
+  local game = stagedGame(1, arenaDark(21, 11), 3, 6)
+  game.player.light.fuel = 0
+  game.player.sanity = 63
+  eq(Sanity.tick(game), nil, "a dread turn that stays within its tier reports no line")
+  eq(game.player.sanity, 61, "the dread was still deducted even without a tier crossing")
+  eq(Sanity.tick(game), "your nerves begin to fray", "crossing down into shaken is announced")
+  eq(game.player.sanity, 59, "the meter keeps draining turn over turn")
+end
+
+function tests.sanityTickAnnouncesReachingTerrifiedAndBroken()
+  local game = stagedGame(1, arenaDark(21, 11), 3, 6)
+  game.player.light.fuel = 0
+  game.player.sanity = 32
+  eq(Sanity.tick(game), "dread claws at the edges of your sanity", "crossing down into terrified is announced")
+  game.player.sanity = 2
+  eq(Sanity.tick(game), "your mind gives way to raw terror", "crossing down into broken is announced")
+  eq(game.player.sanity, 0, "broken is a floor, not a negative value")
+end
+
+function tests.sanityTickRecoversAndAnnouncesClimbingBackOutOfBroken()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.sanity = 0
+  eq(Sanity.tick(game), "your nerves start to steady",
+    "recovering out of broken is announced as steadying, never as fresh dread")
+  eq(game.player.sanity, 1, "a calm turn only ever recovers its small fixed amount")
+end
+
+function tests.sanityTickAnnouncesFullyRegainingComposure()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.sanity = 60
+  eq(Sanity.tick(game), "your mind is your own again", "climbing back above the shaken ceiling is announced")
+end
+
+function tests.sanityTickNeverClimbsPastTheMaxOrReportsAPhantomCrossing()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.sanity = 100
+  eq(Sanity.tick(game), nil, "an already-composed mind with nothing to recover reports no line")
+  eq(game.player.sanity, 100, "recovery never climbs the meter past its own maximum")
+end
+
+function tests.sanityRollPanicNeverFiresAboveBroken()
+  local entity = { sanity = 1 }
+  for seed = 1, 50 do
+    ok(not Sanity.rollPanic(Rng.new(seed), entity), "terrified never risks losing the turn to panic")
+  end
+end
+
+function tests.sanityRollPanicRollsAgainstItsFixedChanceOnceBroken()
+  local entity = { sanity = 0 }
+  local sawPanic, sawComposure = false, false
+  for seed = 1, 50 do
+    if Sanity.rollPanic(Rng.new(seed), entity) then sawPanic = true else sawComposure = true end
+  end
+  ok(sawPanic, "broken panics on at least some rolls across a handful of seeds")
+  ok(sawComposure, "broken does not panic on every single roll")
+end
+
+function tests.sanityRollScreamNeverFiresAboveTerrified()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.sanity = 31
+  for seed = 1, 50 do
+    game.rng = Rng.new(seed)
+    ok(not Sanity.rollScream(game.rng, game), "merely shaken never risks an involuntary scream")
+  end
+end
+
+function tests.sanityRollScreamAlertsEveryDormantMonsterWithinItsRadius()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.sanity = 0
+  local zombie = Monsters.create(Monsters.byKey.zombie, 1, 5, 6, 1)
+  zombie.awareness = Stealth.DORMANT
+  game.level.entities = { zombie }
+  local triggered = false
+  for seed = 1, 80 do
+    game.rng = Rng.new(seed)
+    if Sanity.rollScream(game.rng, game) then triggered = true break end
+  end
+  ok(triggered, "a broken mind eventually screams across a handful of seeds")
+  eq(zombie.awareness, Stealth.HUNTING, "the scream startles a nearby dormant monster fully awake")
+  eq(zombie.lastKnownX, game.player.x, "the alerted monster now knows exactly where the scream came from")
+end
+
+function tests.sanityFieldSurvivesSerialization()
+  local game = Game.new(3)
+  game.player.sanity = 37
+  local path = os.tmpname()
+  game:save(path)
+  local restored = Game.load(path)
+  os.remove(path)
+  eq(restored.player.sanity, 37, "the player's sanity survives a save/load round trip")
+end
+
+function tests.gameEndPlayerTurnTicksSanityAndTheLogReportsATierCrossing()
+  local game = stagedGame(1, arenaDark(21, 11), 3, 6)
+  game.player.light.fuel = 0
+  game.player.sanity = 63
+  game:endPlayerTurn()
+  eq(game.player.sanity, 61, "ending a turn on a dark, torchless floor drains the fixed darkness dread")
+  game:endPlayerTurn()
+  ok(contains(game.log:last(), "fray"), "crossing into shaken is reported in the message log")
+  eq(game.player:effectiveAttack(), game.player.attack - 1, "the fresh shaken penalty is already live in effectiveAttack")
+end
+
+function tests.gameAutoStepSkipsThePlayerTurnWhenPanicFires()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.sanity = 0
+  local px, py = game.player.x, game.player.y
+  local sawPanic = false
+  for seed = 1, 80 do
+    game.rng = Rng.new(seed)
+    game.player.x, game.player.y = px, py
+    game.player.sanity = 0
+    -- endPlayerTurn's own Sanity.tick line (recovery or otherwise) always
+    -- lands after any panic line within the same turn, so the panic line
+    -- itself has to be found among the turn's recent lines rather than
+    -- assumed to be the very last one.
+    game:autoStep()
+    if contains(table.concat(game.log:recent(3), " "), "terror seizes you") then sawPanic = true break end
+  end
+  ok(sawPanic, "a broken mind eventually loses a whole turn to panic across a handful of seeds")
+  eq(game.player.x, px, "a panicked turn never moves the player")
+  eq(game.player.y, py, "a panicked turn never moves the player")
+end
+
+function tests.gameUseItemPotionOfClarityRestoresSanity()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.sanity = 40
+  game.player.inventory = { Items.potionOf("clarity", 30) }
+  ok(game:useItem(1), "drinking the potion of clarity succeeds")
+  eq(game.player.sanity, 70, "clarity restores its fixed power to the drinker's sanity")
+  ok(contains(game.log:last(), "steadies"), "the log reports the mind steadying")
+end
+
+function tests.renderPanelShowsSanityOnlyOnceItDropsBelowComposed()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  ok(not contains(Render.panel(game), "sanity"), "a fully composed player shows no sanity line at all")
+  game.player.sanity = 30
+  ok(contains(Render.panel(game), "sanity 30/100 (terrified)"), "a shaken mind is reported in the status panel")
+end
+
+-- Disease used to be invisible outside the transient log lines Disease.tick
+-- emits (the eruption, a damage tick, an escalation) - once one of those
+-- scrolled off the log, a player mid-incubation or mid-plague had no
+-- persistent way to check their own infection at all, unlike every timed
+-- status statusTags already folds into this same line.
+function tests.renderPanelShowsTheDiseaseStageOnceThePlayerIsInfectedAndNothingBeforeInfection()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  ok(not contains(Render.panel(game), "parasites"), "an uninfected player's status line mentions no disease")
+  Disease.infect(game.player, Disease.PARASITES)
+  ok(contains(Render.panel(game), "gut parasites(incubating)"),
+    "an incubating infection shows up in the status panel even before it erupts")
+  game.player.disease.stage = 2
+  ok(contains(Render.panel(game), "gut parasites(stage 2)"),
+    "an erupted infection reports its current stage in the status panel")
+end
+
+function tests.builderOccasionallyRollsAPotionOfClarityAsLoot()
+  local found
+  for seed = 1, 200 do
+    local level = Builder.build(2, Rng.new(seed), {})
+    for _, ground in ipairs(level.floorItems) do
+      if ground.item.kind == Items.POTION and ground.item.effect == "clarity" then found = ground.item end
+    end
+    if found then break end
+  end
+  ok(found ~= nil, "a potion of clarity eventually turns up in the depth-2 loot table across a handful of seeds")
+  ok(Shop.priceOf(found) > 0, "a found clarity potion still carries a positive catalog price")
+end
+
+function tests.builderOccasionallyRollsAPotionOfConfusionAsLoot()
+  local found
+  for seed = 1, 200 do
+    local level = Builder.build(2, Rng.new(seed), {})
+    for _, ground in ipairs(level.floorItems) do
+      if ground.item.kind == Items.POTION and ground.item.effect == "confuse" then found = ground.item end
+    end
+    if found then break end
+  end
+  ok(found ~= nil, "a potion of confusion eventually turns up in the depth-2 loot table across a handful of seeds")
+  ok(Shop.priceOf(found) > 0, "a found confusion potion still carries a positive catalog price")
+end
+
+function tests.builderOccasionallyRollsAPotionOfBlindnessAsLoot()
+  local found
+  for seed = 1, 200 do
+    local level = Builder.build(2, Rng.new(seed), {})
+    for _, ground in ipairs(level.floorItems) do
+      if ground.item.kind == Items.POTION and ground.item.effect == "blind" then found = ground.item end
+    end
+    if found then break end
+  end
+  ok(found ~= nil, "a potion of blindness eventually turns up in the depth-2 loot table across a handful of seeds")
+  ok(Shop.priceOf(found) > 0, "a found blindness potion still carries a positive catalog price")
+end
+
+function tests.builderOccasionallyRollsAPotionOfLevitationAsLoot()
+  local found
+  for seed = 1, 200 do
+    local level = Builder.build(2, Rng.new(seed), {})
+    for _, ground in ipairs(level.floorItems) do
+      if ground.item.kind == Items.POTION and ground.item.effect == "levitate" then found = ground.item end
+    end
+    if found then break end
+  end
+  ok(found ~= nil, "a potion of levitation eventually turns up in the depth-2 loot table across a handful of seeds")
+  ok(Shop.priceOf(found) > 0, "a found levitation potion still carries a positive catalog price")
+end
+
+function tests.eventsCatalogEntriesEachHaveDistinctStartAndEndFlavorText()
+  for _, key in ipairs(Events.order) do
+    local start = Events.describe(key)
+    local ending = Events.endDescribe(key)
+    ok(start ~= nil, key .. " has a start line")
+    ok(ending ~= nil, key .. " has an end line")
+    ok(start ~= ending, key .. "'s start and end lines read differently")
+  end
+end
+
+function tests.eventsMonsterDamageMultiplierOnlyFiresDuringBloodmoon()
+  eq(Events.monsterDamageMultiplier(nil), 1, "no active event leaves monster damage unscaled")
+  eq(Events.monsterDamageMultiplier({ key = Events.RICHVEINS }), 1, "a non-bloodmoon event leaves monster damage unscaled")
+  eq(Events.monsterDamageMultiplier({ key = Events.BLOODMOON }), Events.BLOODMOON_MULTIPLIER,
+    "bloodmoon scales monster damage by its fixed multiplier")
+end
+
+function tests.eventsEssenceMultiplierOnlyFiresDuringRichVeins()
+  eq(Events.essenceMultiplier(nil), 1, "no active event leaves essence unscaled")
+  eq(Events.essenceMultiplier({ key = Events.BLOODMOON }), 1, "a non-richveins event leaves essence unscaled")
+  eq(Events.essenceMultiplier({ key = Events.RICHVEINS }), Events.RICHVEINS_MULTIPLIER,
+    "rich veins scales essence by its fixed multiplier")
+end
+
+function tests.eventsSightPenaltyOnlyFiresDuringHush()
+  eq(Events.sightPenalty(nil), 0, "no active event carries no sight penalty")
+  eq(Events.sightPenalty({ key = Events.BLOODMOON }), 0, "a non-hush event carries no sight penalty")
+  eq(Events.sightPenalty({ key = Events.HUSH }), Events.HUSH_SIGHT_PENALTY, "hush carries its fixed sight penalty")
+end
+
+function tests.eventsStepNeverStartsOnTheFirstFloorRegardlessOfTheRoll()
+  for seed = 1, 100 do
+    local level = { depth = 1 }
+    eq(Events.step(level, Rng.new(seed)), nil, "a depth-one floor never rolls an event")
+    eq(level.event, nil, "a depth-one floor's event stays nil across every seed")
+  end
+end
+
+function tests.eventsStepEventuallyStartsFromDepthTwoAcrossAHandfulOfSeeds()
+  local started = false
+  for seed = 1, 400 do
+    local level = { depth = 2 }
+    if Events.step(level, Rng.new(seed)) then started = true break end
+  end
+  ok(started, "a depth-two floor eventually rolls a fresh event across a handful of seeds")
+end
+
+function tests.eventsStepCountsDownAndExpiresWithItsEndLine()
+  local level = { depth = 2, event = { key = Events.BLOODMOON, turnsLeft = 2 } }
+  eq(Events.step(level, Rng.new(1)), nil, "an ordinary tick of a running event reports no line")
+  eq(level.event.turnsLeft, 1, "the running event's clock ticks down by one")
+  eq(Events.step(level, Rng.new(1)), Events.endDescribe(Events.BLOODMOON),
+    "the event's expiry is reported the turn its clock runs out")
+  eq(level.event, nil, "an expired event clears itself from the level")
+end
+
+function tests.gameMonsterMeleeDamageScalesDuringBloodmoon()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  local before = game.player.hp
+  game:monsterMelee(orc)
+  local plainDamage = before - game.player.hp
+
+  game.player.hp = before
+  game.level.event = { key = Events.BLOODMOON, turnsLeft = 5 }
+  game:monsterMelee(orc)
+  local bloodmoonDamage = before - game.player.hp
+
+  eq(bloodmoonDamage, math.floor(plainDamage * Events.BLOODMOON_MULTIPLIER),
+    "bloodmoon scales a monster's melee damage by its fixed multiplier")
+end
+
+function tests.gameMonsterShootDamageScalesDuringBloodmoon()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local dragon = Monsters.create(Monsters.byKey.dragon, 1, 6, 6, 1)
+  local before = game.player.hp
+  game:monsterShoot(dragon)
+  local plainDamage = before - game.player.hp
+
+  game.player.hp = before
+  game.player.statuses = {}
+  game.level.event = { key = Events.BLOODMOON, turnsLeft = 5 }
+  game:monsterShoot(dragon)
+  local bloodmoonDamage = before - game.player.hp
+
+  eq(bloodmoonDamage, math.floor(plainDamage * Events.BLOODMOON_MULTIPLIER),
+    "bloodmoon scales a monster's ranged damage by its fixed multiplier")
+end
+
+function tests.gameKillEssenceIsDoubledDuringRichVeins()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 4, 6, 1)
+  rat.hp = 1
+  game.level.entities = { rat }
+  game.level.event = { key = Events.RICHVEINS, turnsLeft = 5 }
+  local essenceBefore = game.player.essence
+  game:playerAttack(rat)
+  eq(game.player.essence, essenceBefore + Crafting.essenceFor(Monsters.xpFor(rat)) * Events.RICHVEINS_MULTIPLIER,
+    "rich veins doubles the essence earned from a kill")
+end
+
+function tests.gameEffectiveRadiusShrinksDuringHush()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local plain = game:effectiveRadius()
+  game.level.event = { key = Events.HUSH, turnsLeft = 5 }
+  eq(game:effectiveRadius(), plain - Events.HUSH_SIGHT_PENALTY, "hush dulls the player's effective sight radius")
+end
+
+function tests.gameEndPlayerTurnEventuallyRollsAFreshEventFromDepthTwo()
+  local triggered = false
+  for seed = 1, 400 do
+    local game = stagedGame(1, arena(21, 11), 3, 6)
+    game.level.depth = 2
+    game.rng = Rng.new(seed)
+    game:endPlayerTurn()
+    if game.level.event then triggered = true break end
+  end
+  ok(triggered, "ending a turn on a depth-two floor eventually rolls a fresh event across a handful of seeds")
+end
+
+function tests.gameEndPlayerTurnAnnouncesAnEventEndingInTheLog()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.event = { key = Events.RICHVEINS, turnsLeft = 1 }
+  game:endPlayerTurn()
+  eq(game.level.event, nil, "the event's clock runs out and clears itself")
+  ok(contains(game.log:last(), "quiet"), "the event's end is reported in the message log")
+end
+
+function tests.renderPanelShowsTheActiveEventAndItsRemainingTurns()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  ok(not contains(Render.panel(game), "turns left"), "no active event shows no event line at all")
+  game.level.event = { key = Events.BLOODMOON, turnsLeft = 7 }
+  ok(contains(Render.panel(game), "event bloodmoon (7 turns left)"),
+    "an active event reports its name and remaining turns")
+end
+
+function tests.eventFieldSurvivesSerialization()
+  local game = Game.new(3)
+  game.level.event = { key = Events.HUSH, turnsLeft = 9 }
+  local path = os.tmpname()
+  game:save(path)
+  local restored = Game.load(path)
+  os.remove(path)
+  eq(restored.level.event.key, Events.HUSH, "the active event's key survives a save/load round trip")
+  eq(restored.level.event.turnsLeft, 9, "the active event's remaining turns survive a save/load round trip")
+end
+
+-- graves.lua: cross-run bones.
+
+function tests.gravesRecordAppendsNewestFirstAndTrimsToMaxRecorded()
+  local meta = Meta.new()
+  for i = 1, Graves.MAX_RECORDED + 5 do
+    Graves.record(meta, { className = "fighter", depth = i, gold = i, essence = 0, turn = i })
+  end
+  eq(#meta.graves, Graves.MAX_RECORDED, "recording past the cap trims the oldest graves off")
+  eq(meta.graves[1].depth, Graves.MAX_RECORDED + 5, "the most recently recorded grave sits at the front")
+end
+
+function tests.gravesEligibleForOnlyIncludesGravesAtOrDeeperThanTheQueriedDepth()
+  local graves = {
+    { className = "a", depth = 2 },
+    { className = "b", depth = 5 },
+    { className = "c", depth = 5 },
+  }
+  local atFive = Graves.eligibleFor(graves, 5)
+  eq(#atFive, 2, "only the two graves dug at depth 5 or deeper are eligible for a depth-5 floor")
+  local atOne = Graves.eligibleFor(graves, 1)
+  eq(#atOne, 3, "every recorded grave is eligible for the entrance floor, however deep it was dug")
+  eq(#Graves.eligibleFor(nil, 3), 0, "a caller with no recorded graves at all gets an empty list, not an error")
+end
+
+function tests.gravesFloorItemBuildsAnInertGraveMarkerShape()
+  local grave = { className = "ranger", depth = 4, gold = 50, essence = 6, turn = 20 }
+  local item = Graves.floorItem(grave)
+  eq(item.kind, "grave", "a grave's floor item is its own kind, not a real item kind")
+  eq(item.grave, true, "a grave's floor item is tagged so pickupHere knows to wake it")
+  eq(item.graveClass, "ranger", "the marker carries the fallen's own class")
+  eq(item.graveGold, 50, "the marker carries the fallen's gold for Graves.reveal to read later")
+  eq(item.graveEssence, 6, "the marker carries the fallen's essence for Graves.reveal to read later")
+end
+
+function tests.gravesRevealScalesHpAndAttackWithCarriedWealthAndCaps()
+  local poor = Graves.reveal(1, 4, 6, { graveGold = 0, graveEssence = 0 })
+  eq(poor.hp, 10, "a penniless grave's shade has no hp bonus at all")
+  eq(poor.attack, 4, "a penniless grave's shade has no attack bonus at all")
+  eq(poor.faction, Factions.UNDEAD, "a shade is undead like every other restless dead in the bestiary")
+
+  local rich = Graves.reveal(2, 4, 6, { graveGold = 400, graveEssence = 200 })
+  eq(rich.hp, 30, "a rich grave's shade hp bonus caps at 20 rather than scaling without bound")
+  eq(rich.attack, 10, "a rich grave's shade attack bonus caps at 6 rather than scaling without bound")
+end
+
+function tests.gravesLootForReturnsHalfGoldAndAThirdEssenceRoundedDown()
+  local shade = Graves.reveal(1, 4, 6, { graveGold = 55, graveEssence = 10 })
+  local gold, essence = Graves.lootFor(shade)
+  eq(gold, 27, "grave loot pays out half the carried gold, rounded down")
+  eq(essence, 3, "grave loot pays out a third of the carried essence, rounded down")
+end
+
+function tests.graveFieldsSurviveSerialization()
+  local shade = Graves.reveal(1, 4, 6, { graveClass = "ranger", graveGold = 88, graveEssence = 15 })
+  local restored = Entity.fromData(shade:toData())
+  eq(restored.grave, true, "a revealed shade's grave tag survives a save/load round trip")
+  eq(restored.graveClass, "ranger", "the fallen's class survives a save/load round trip")
+  eq(restored.graveGold, 88, "the grave's gold survives a save/load round trip")
+  eq(restored.graveEssence, 15, "the grave's essence survives a save/load round trip")
+end
+
+function tests.gamePickupHereWakesAGraveShadeAndAmbushesThePlayer()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.player.defense, game.player.baseDefense = 0, 0
+  local grave = { className = "rogue", depth = 3, gold = 0, essence = 0, turn = 10 }
+  game.level.floorItems = { { x = 5, y = 5, item = Graves.floorItem(grave) } }
+  local hpBefore = game.player.hp
+  game:pickupHere()
+  eq(#game.level.floorItems, 0, "the grave marker leaves the floor the instant it is disturbed")
+  eq(#game.level.entities, 1, "a disturbed grave joins the level as a real hostile monster")
+  eq(game.level.entities[1].grave, true, "the spawned monster is tagged as a grave shade")
+  eq(game.player.hp, hpBefore - 4, "the shade lands one free ambush hit for its full attack")
+  ok(contains(game.log:last(), "damage"), "the ambush hit is logged")
+end
+
+function tests.gameKillingARevealedShadeGrantsItsFixedXpAndPaysOutGraveLoot()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local shade = Graves.reveal(1, 4, 6, { graveGold = 40, graveEssence = 9 })
+  shade.hp = 1
+  game.level.entities = { shade }
+  local essenceBefore, goldBefore = game.player.essence, game.player.gold
+  game:playerAttack(shade)
+  eq(game.player.essence, essenceBefore + Crafting.essenceFor(Graves.xpFor()) + 3,
+    "felling a shade grants essence scaled to its own fixed xp reward, plus a third of its grave essence")
+  eq(game.player.gold, goldBefore + 20, "felling a shade also pays out half its grave gold")
+  ok(contains(game.log:last(), "gold"), "the grave payout is logged")
+end
+
+function tests.gravesShadeLeavesNoCorpseLikeAnyOtherUndead()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local shade = Graves.reveal(1, 4, 6, { graveGold = 0, graveEssence = 0 })
+  shade.hp = 1
+  game.level.entities = { shade }
+  game:playerAttack(shade)
+  eq(#game.level.corpses, 0, "a felled shade leaves no corpse behind, same as any other undead")
+end
+
+function tests.gameGraveEntryCapturesDepthGoldEssenceAndClassAtTheMomentOfDeath()
+  local game = Game.new(4, { class = "mage" })
+  game.deepestDepth = 6
+  game.player.gold = 77
+  game.player.essence = 14
+  game.turn = 120
+  local entry = game:graveEntry()
+  eq(entry.className, "mage", "the grave records the class the run actually played")
+  eq(entry.depth, 6, "the grave records the deepest depth reached, not just the current floor")
+  eq(entry.gold, 77, "the grave records exactly what gold was still on hand at death")
+  eq(entry.essence, 14, "the grave records exactly what essence was still on hand at death")
+  eq(entry.turn, 120, "the grave records the turn count at death")
+end
+
+function tests.gameGraveEntryDefaultsToWandererForAClasslessRun()
+  local game = Game.new(4)
+  eq(game:graveEntry().className, "wanderer", "a run that never picked a class leaves a wanderer's grave")
+end
+
+function tests.builderNeverPlacesAGraveWhenOptionsCarriesNone()
+  for seed = 1, 15 do
+    local level = Builder.build(5, Rng.new(seed), {})
+    for _, ground in ipairs(level.floorItems) do
+      ok(not ground.item.grave, "no grave appears without the caller supplying any")
+    end
+  end
+end
+
+function tests.buildersOnlyRollAGraveOntoAFloorAtOrShallowerThanWhereItWasDug()
+  local shallowGrave = { className = "rogue", depth = 2, gold = 40, essence = 5, turn = 30 }
+  local found = false
+  for seed = 1, 40 do
+    local level = Builder.build(5, Rng.new(seed), { graves = { shallowGrave } })
+    for _, ground in ipairs(level.floorItems) do
+      if ground.item.grave then found = true end
+    end
+  end
+  ok(not found, "a grave dug at depth 2 never surfaces on a floor as deep as 5")
+end
+
+function tests.buildersOccasionallyPlaceAnEligibleGraveFromSuppliedOptions()
+  local deepGrave = { className = "mage", depth = 6, gold = 80, essence = 12, turn = 90 }
+  local found
+  for seed = 1, 40 do
+    local level = Builder.build(3, Rng.new(seed), { graves = { deepGrave } })
+    for _, ground in ipairs(level.floorItems) do
+      if ground.item.grave then found = ground.item end
+    end
+    if found then break end
+  end
+  ok(found ~= nil, "a floor eventually rolls an eligible grave across a handful of seeds")
+  eq(found.graveClass, "mage", "the placed marker carries the fallen's own class")
+end
+
+function tests.buildersInsertAGraveWithoutDisturbingAnyOtherPlacement()
+  local grave = { className = "fighter", depth = 8, gold = 60, essence = 9, turn = 50 }
+  local perturbed = false
+  local sawExtra = false
+  for seed = 1, 40 do
+    local plain = Builder.build(4, Rng.new(seed), {})
+    local withGrave = Builder.build(4, Rng.new(seed), { graves = { grave } })
+    if table.concat(plain.map.tiles) ~= table.concat(withGrave.map.tiles) then perturbed = true end
+    if #withGrave.entities ~= #plain.entities then perturbed = true end
+    if #withGrave.floorItems == #plain.floorItems + 1 then
+      sawExtra = true
+      local extra = withGrave.floorItems[#withGrave.floorItems]
+      ok(extra.item.grave, "the one extra floor item a supplied grave adds is the grave marker itself")
+    elseif #withGrave.floorItems ~= #plain.floorItems then
+      perturbed = true
+    end
+  end
+  ok(not perturbed, "supplying a grave never changes the map or any other placement, only adds at most its own marker")
+  ok(sawExtra, "across a handful of seeds, at least one actually places the grave marker")
+end
+
+-- proficiency.lua: weapon mastery.
+
+function tests.proficiencyKeyForReadsFistsWhenUnarmedAndTheWeaponsNameOnceEquipped()
+  eq(Proficiency.keyFor({}), Proficiency.UNARMED, "an entity with no weapon field masters bare fists")
+  eq(Proficiency.keyFor({ weapon = { name = "sword" } }), "sword", "an equipped weapon is keyed by its own name")
+end
+
+function tests.proficiencyOnMeleeHitAccumulatesAndReturnsOnlyOnARankCrossing()
+  local entity = {}
+  for i = 1, Proficiency.RANKS[1].hits - 1 do
+    local key = Proficiency.onMeleeHit(entity)
+    eq(key, nil, "no rank crossed yet on hit " .. i)
+  end
+  local key, bonus = Proficiency.onMeleeHit(entity)
+  eq(key, Proficiency.UNARMED, "the rank-crossing hit reports the mastered key")
+  eq(bonus, Proficiency.RANKS[1].bonus, "the rank-crossing hit reports that rank's own bonus")
+  local nextKey = Proficiency.onMeleeHit(entity)
+  eq(nextKey, nil, "the very next hit past a rank reports no further milestone")
+end
+
+function tests.proficiencyAttackBonusReadsTheHighestRankCrossedForTheCurrentKeyAlone()
+  local entity = { weapon = { name = "sword" } }
+  for _ = 1, Proficiency.RANKS[1].hits do Proficiency.onMeleeHit(entity) end
+  eq(Proficiency.attackBonus(entity), Proficiency.RANKS[1].bonus, "mastery with the equipped weapon applies")
+  entity.weapon = { name = "mace" }
+  eq(Proficiency.attackBonus(entity), 0, "switching to an unmastered weapon drops the bonus entirely")
+  entity.weapon = { name = "sword" }
+  eq(Proficiency.attackBonus(entity), Proficiency.RANKS[1].bonus,
+    "re-equipping the mastered weapon picks its bonus straight back up")
+end
+
+function tests.entityEffectiveAttackFoldsInProficiencyAlongsideMomentumAndSanity()
+  local entity = Entity.new({ x = 1, y = 1, glyph = "@", name = "you", kind = "player", hp = 20, attack = 6, defense = 2 })
+  eq(entity:effectiveAttack(), 6, "a fresh entity carries no mastery bonus")
+  for _ = 1, Proficiency.RANKS[1].hits do Proficiency.onMeleeHit(entity) end
+  eq(entity:effectiveAttack(), 6 + Proficiency.RANKS[1].bonus, "a mastered weapon's flat bonus lands on effective attack")
+end
+
+function tests.gamePlayerAttackAccumulatesProficiencyAndLogsOnlyOnARankCrossing()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  orc.hp, orc.maxHp = 999, 999
+  game.level.entities = { orc }
+  for _ = 1, Proficiency.RANKS[1].hits - 1 do
+    game:playerAttack(orc)
+  end
+  ok(not contains(game.log:last(), "skilled"), "no milestone logged before the rank is actually crossed")
+  game:playerAttack(orc)
+  ok(contains(game.log:last(), "skilled"), "crossing a mastery rank is announced as the very last log line")
+  eq(game.player.proficiency[Proficiency.UNARMED], Proficiency.RANKS[1].hits,
+    "an unarmed player's landed hits accumulate under the fists key")
+end
+
+function tests.renderPanelShowsMasteryOnlyOnceARankIsCrossed()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  ok(not contains(Render.panel(game), "mastery"), "a fresh player with no mastery shows no mastery line")
+  for _ = 1, Proficiency.RANKS[1].hits do Proficiency.onMeleeHit(game.player) end
+  ok(contains(Render.panel(game), string.format("mastery +%d with %s", Proficiency.RANKS[1].bonus, Proficiency.UNARMED)),
+    "a crossed mastery rank is reported in the status panel")
+end
+
+function tests.proficiencyFieldSurvivesSerialization()
+  local game = Game.new(3)
+  for _ = 1, Proficiency.RANKS[1].hits do Proficiency.onMeleeHit(game.player) end
+  local path = os.tmpname()
+  game:save(path)
+  local restored = Game.load(path)
+  os.remove(path)
+  eq(restored.player.proficiency[Proficiency.UNARMED], Proficiency.RANKS[1].hits,
+    "the player's accumulated mastery survives a save/load round trip")
+end
+
+function tests.proficiencyOnHitWithAndBonusForTrackAnExplicitKeyIndependentOfKeyFor()
+  local entity = { weapon = { name = "sword" } }
+  for _ = 1, Proficiency.RANKS[1].hits do Proficiency.onHitWith(entity, "short bow") end
+  eq(Proficiency.bonusFor(entity, "short bow"), Proficiency.RANKS[1].bonus,
+    "an explicit key masters independently of whatever keyFor would report")
+  eq(Proficiency.attackBonus(entity), 0,
+    "the equipped melee weapon's own mastery is untouched by an explicit-key bow's own hits")
+end
+
+function tests.gameFireAtAccumulatesBowSpecificProficiencySeparateFromMelee()
+  local game = stagedGame(4, arena(21, 11), 3, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 9, 6, 1)
+  orc.hp, orc.maxHp = 999, 999
+  game.level.entities = { orc }
+  game.player.bow = Items.bow("short bow", 2, 6)
+  game.player.inventory[#game.player.inventory + 1] = Items.ammo("arrow", Proficiency.RANKS[1].hits + 1)
+  for i = 1, Proficiency.RANKS[1].hits - 1 do
+    game:fireAt(orc)
+    ok(not contains(game.log:last(), "skilled"), "no milestone logged before the rank is actually crossed")
+  end
+  game:fireAt(orc)
+  ok(contains(game.log:last(), "skilled"), "crossing a bow mastery rank is announced as the shot's own last line")
+  eq(game.player.proficiency["short bow"], Proficiency.RANKS[1].hits, "bow hits accumulate under the bow's own name")
+  eq(game.player.proficiency[Proficiency.UNARMED], nil, "firing a bow never touches the unarmed melee key")
+end
+
+function tests.metaGravesFieldDefaultsToEmptyAndSurvivesASaveLoadRoundTrip()
+  local fresh = Meta.load("/tmp/warren_meta_does_not_exist_98765.sav")
+  eq(#fresh.graves, 0, "a freshly defaulted meta state has no recorded graves")
+  local meta = Meta.new()
+  Graves.record(meta, { className = "rogue", depth = 4, gold = 30, essence = 2, turn = 15 })
+  local path = os.tmpname()
+  Meta.save(meta, path)
+  local restored = Meta.load(path)
+  os.remove(path)
+  eq(#restored.graves, 1, "a recorded grave survives a save/load round trip")
+  eq(restored.graves[1].className, "rogue", "a restored grave keeps its own fallen class")
+  eq(restored.graves[1].depth, 4, "a restored grave keeps its own depth")
+end
+
+-- ascension.lua: opt-in run mutators traded for extra renown.
+
+function tests.ascensionCatalogEntriesHaveUniqueKeysAndAtLeastOneEffectHook()
+  local seen = {}
+  for _, def in ipairs(Ascension.MUTATORS) do
+    ok(not seen[def.key], def.key .. " appears only once in the catalog")
+    seen[def.key] = true
+    local hasHook = def.damageMultiplier or def.essenceMultiplier or def.sightPenalty or def.applyToPlayer
+    ok(hasHook ~= nil, def.key .. " carries at least one actual gameplay effect")
+  end
+end
+
+function tests.ascensionIsUnlockedRequiresMeetingBothDepthAndWinRequirements()
+  local meta = Meta.new()
+  meta.bestDepth = 2
+  ok(Ascension.isUnlocked(meta, "famine"), "famine unlocks once best depth reaches 2")
+  ok(not Ascension.isUnlocked(meta, "bloodbound"), "bloodbound still needs depth 3")
+  ok(not Ascension.isUnlocked(meta, "glasscannon"), "glasscannon still needs a first win")
+  meta.wins = 1
+  ok(Ascension.isUnlocked(meta, "glasscannon"), "glasscannon unlocks once a win is banked")
+  eq(Ascension.isUnlocked(meta, "madeupkey"), false, "an unknown key is never unlocked")
+end
+
+function tests.ascensionIsUnlockedWithNoMetaLocksEveryCatalogedMutator()
+  for _, key in ipairs(Ascension.order) do
+    ok(not Ascension.isUnlocked(nil, key), key .. " stays locked for a run started without a meta file")
+  end
+end
+
+function tests.ascensionResolveDropsUnknownAndStillLockedKeys()
+  local meta = Meta.new()
+  meta.bestDepth = 2
+  local active = Ascension.resolve(meta, { "famine", "bloodbound", "madeupkey" })
+  eq(#active, 1, "only the one unlocked, known key survives resolution")
+  eq(active[1], "famine", "famine is the survivor")
+end
+
+function tests.ascensionResolveDeduplicatesAndReordersToCatalogOrder()
+  local meta = Meta.new()
+  meta.bestDepth = 4
+  local active = Ascension.resolve(meta, { "nightblind", "famine", "nightblind", "famine" })
+  eq(#active, 2, "a key repeated in the request is not duplicated in the resolved list")
+  eq(active[1], "famine", "the resolved order follows the catalog, not the request")
+  eq(active[2], "nightblind", "the resolved order follows the catalog, not the request")
+end
+
+function tests.ascensionResolveWithNoRequestReturnsEmpty()
+  eq(#Ascension.resolve(Meta.new(), nil), 0, "a nil request resolves to no active mutators")
+  eq(#Ascension.resolve(Meta.new(), {}), 0, "an empty request resolves to no active mutators")
+end
+
+function tests.ascensionIsActiveTrueOnlyForKeysInTheActiveList()
+  local active = { "famine", "frail" }
+  ok(Ascension.isActive(active, "famine"), "famine is reported active")
+  ok(not Ascension.isActive(active, "bloodbound"), "bloodbound is reported inactive")
+  ok(not Ascension.isActive(nil, "famine"), "a nil active list reports every key inactive")
+end
+
+function tests.ascensionDamageMultiplierMultipliesAcrossActiveMutators()
+  eq(Ascension.damageMultiplier(nil), 1, "no active mutators leaves damage unscaled")
+  eq(Ascension.damageMultiplier({ "famine" }), 1, "a mutator with no damage hook leaves damage unscaled")
+  eq(Ascension.damageMultiplier({ "bloodbound" }), 1.5, "bloodbound scales damage by its own fixed multiplier")
+end
+
+function tests.ascensionEssenceMultiplierAppliesFamineAlone()
+  eq(Ascension.essenceMultiplier(nil), 1, "no active mutators leaves essence unscaled")
+  eq(Ascension.essenceMultiplier({ "bloodbound" }), 1, "a mutator with no essence hook leaves essence unscaled")
+  eq(Ascension.essenceMultiplier({ "famine" }), 0.5, "famine halves essence income")
+end
+
 end
 
 local order = {
