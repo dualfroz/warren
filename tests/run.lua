@@ -9990,6 +9990,352 @@ function tests.challengesForDayCyclesThroughTheCatalogInOrder()
   eq(wrapped, Challenges.CATALOG[1], "the cycle wraps back to the first preset after one full lap")
 end
 
+function tests.challengesSeedForStaysWithinTheDefaultSeedRange()
+  for _, day in ipairs({ 0, 1, 42, 365, 999999 }) do
+    local seed = Challenges.seedFor(day)
+    ok(seed >= 0 and seed < 65536, "day " .. day .. " hashes into the same 16-bit range as the default seed")
+  end
+end
+
+function tests.challengesCatalogPresetsReferenceOnlyRealClassesAndMutators()
+  for _, preset in ipairs(Challenges.CATALOG) do
+    ok(Classes.isValid(preset.class), preset.key .. " names a real class")
+    for _, key in ipairs(preset.mutators) do
+      ok(Ascension.byKey[key] ~= nil, preset.key .. "'s mutator '" .. key .. "' is a real ascension mutator")
+    end
+  end
+end
+
+function tests.challengesDescribeNamesTheClassAndEveryRequiredMutator()
+  local described = Challenges.describe(Challenges.byKey.wild_hunt)
+  eq(described, "Wild Hunt (ranger + nightblind)", "a single-mutator preset lists its class and that mutator")
+end
+
+function tests.challengesDescribeOmitsTheMutatorJoinWhenNoneAreRequired()
+  local described = Challenges.describe(Challenges.byKey.shadow_creed)
+  eq(described, "Shadow Creed (rogue)", "a mutator-free preset reads as just its name and class")
+end
+
+function tests.challengesSatisfiedByFailsOnAClassMismatch()
+  local game = Game.new(9, { class = "rogue" })
+  local satisfied, reason = Challenges.satisfiedBy(Challenges.byKey.iron_gauntlet, game)
+  eq(satisfied, false, "a rogue never satisfies a fighter-only challenge")
+  ok(contains(reason, "fighter"), "the failure names the class the challenge actually required")
+end
+
+function tests.challengesSatisfiedBySucceedsWithTheRightClassAndNoMutatorsRequired()
+  local game = Game.new(9, { class = "rogue" })
+  local satisfied = Challenges.satisfiedBy(Challenges.byKey.shadow_creed, game)
+  eq(satisfied, true, "matching the class is enough when the preset demands no mutators")
+end
+
+function tests.challengesSatisfiedByFailsWhenARequiredMutatorNeverActivated()
+  local game = Game.new(9, { class = "fighter" })
+  local satisfied, reason = Challenges.satisfiedBy(Challenges.byKey.iron_gauntlet, game)
+  eq(satisfied, false, "a run with no active mutators cannot satisfy one that requires bloodbound")
+  eq(reason, "missing mutator bloodbound", "the failure names the exact missing mutator")
+end
+
+function tests.challengesSatisfiedBySucceedsOnceItsRequiredMutatorIsActuallyActive()
+  local unlocked = Meta.new()
+  unlocked.bestDepth = 3
+  local game = Game.new(9, { class = "fighter", meta = unlocked, mutators = { "bloodbound" } })
+  local satisfied = Challenges.satisfiedBy(Challenges.byKey.iron_gauntlet, game)
+  eq(satisfied, true, "the challenge is honored once its required mutator actually resolved active")
+end
+
+function tests.analyticsWinRateIsZeroWithNoRecordedRunsAndFractionalOtherwise()
+  eq(Analytics.winRate(Meta.new()), 0, "a state with no recorded runs has a zero win rate")
+  local meta = Meta.new()
+  Meta.recordRun(meta, { deepestDepth = 1, kills = 0, bossKills = 0, questsCompleted = 0, artifactsFound = 0, won = true })
+  Meta.recordRun(meta, { deepestDepth = 1, kills = 0, bossKills = 0, questsCompleted = 0, artifactsFound = 0, won = false })
+  eq(Analytics.winRate(meta), 0.5, "one win out of two runs is a 50% win rate")
+end
+
+function tests.analyticsAverageScoreIsZeroOnAnEmptyBoardAndTheMeanOtherwise()
+  eq(Analytics.averageScore(Leaderboard.new()), 0, "an empty leaderboard has a zero average score")
+  local board = Leaderboard.new()
+  Leaderboard.record(board, { score = 100 })
+  Leaderboard.record(board, { score = 200 })
+  Leaderboard.record(board, { score = 300 })
+  eq(Analytics.averageScore(board), 200, "the average of 100, 200 and 300 is exactly 200")
+end
+
+function tests.analyticsFavoriteClassPicksTheMostFrequentTiesBrokenByFirstAppearance()
+  eq(Analytics.favoriteClass(Leaderboard.new()), nil, "an empty leaderboard has no favorite class")
+  local board = Leaderboard.new()
+  Leaderboard.record(board, { score = 90, className = "rogue" })
+  Leaderboard.record(board, { score = 80, className = "mage" })
+  Leaderboard.record(board, { score = 70, className = "mage" })
+  eq(Analytics.favoriteClass(board), "mage", "mage appears twice, more than any other class")
+
+  local tied = Leaderboard.new()
+  Leaderboard.record(tied, { score = 50, className = "fighter" })
+  Leaderboard.record(tied, { score = 40, className = "ranger" })
+  eq(Analytics.favoriteClass(tied), "fighter",
+    "a tie between equally-frequent classes breaks toward whichever appeared first on the board")
+end
+
+function tests.analyticsPercentileRanksAScoreAgainstTheBoardItWouldJoin()
+  eq(Analytics.percentile(Leaderboard.new(), 999), 1, "an empty board can never hold anything back")
+  local board = Leaderboard.new()
+  Leaderboard.record(board, { score = 100 })
+  Leaderboard.record(board, { score = 200 })
+  Leaderboard.record(board, { score = 300 })
+  Leaderboard.record(board, { score = 400 })
+  eq(Analytics.percentile(board, 999), 1, "a score above everything beats the entire board")
+  eq(Analytics.percentile(board, 1), 0, "a score below everything beats nothing")
+  eq(Analytics.percentile(board, 250), 0.5, "a score beating exactly half the board reads as 50%")
+  eq(Analytics.percentile(board, 200), 0.25, "a tied score counts as beaten, not beating, its equal")
+end
+
+function tests.titlesForRenownNeverReturnsNilForAnyNonNegativeRenown()
+  for _, renown in ipairs({ 0, 1, 49, 50, 350, 1499, 1500, 100000 }) do
+    ok(Titles.forRenown(renown) ~= nil, "renown " .. renown .. " always resolves to some title")
+  end
+end
+
+function tests.titlesForRenownWalksTheLadderFromTheBottomUp()
+  eq(Titles.forRenown(0), "Whelp", "zero renown starts at the very bottom of the ladder")
+  eq(Titles.forRenown(49), "Whelp", "one short of a threshold stays on the lower title")
+  eq(Titles.forRenown(50), "Delver", "landing exactly on a threshold claims that title")
+  eq(Titles.forRenown(349), "Warden", "just under the next threshold keeps the current title")
+  eq(Titles.forRenown(1500), "Undying", "the exact top threshold claims the top title")
+  eq(Titles.forRenown(999999), "Undying", "renown far past the ladder still caps at the top title")
+end
+
+function tests.titlesToNextCountsDownToTheNextThresholdAndNilsOutAtTheTop()
+  eq(Titles.toNext(0), 50, "starting from zero needs exactly the first threshold's renown")
+  eq(Titles.toNext(45), 5, "five renown short of the first threshold reports exactly five")
+  eq(Titles.toNext(50), 100, "landing on a threshold reports the gap to the next one, not zero")
+  eq(Titles.toNext(1500), nil, "sitting at the top threshold has no further tier to climb toward")
+  eq(Titles.toNext(50000), nil, "renown past the top of the ladder also has nothing left to climb toward")
+end
+
+function tests.morgueBuildOmitsTitleWithoutMetaAndIncludesItWithMeta()
+  local game = Game.new(3)
+  local bare = Morgue.build(game)
+  eq(bare.title, nil, "a meta-free build carries no title")
+  local meta = Meta.new()
+  meta.renown = 60
+  local withMeta = Morgue.build(game, meta)
+  eq(withMeta.title, "Delver", "a build given meta carries the title that renown actually earns")
+  local text = Morgue.format(withMeta)
+  ok(contains(text, "the Delver"), "the formatted report names the earned title in its heading")
+  ok(not contains(Morgue.format(bare), "the Delver"), "a title-less report never mentions any title")
+end
+
+function tests.exportLeaderboardCsvOnAnEmptyBoardIsJustTheHeaderRow()
+  local csv = Export.leaderboardCsv(Leaderboard.new())
+  eq(csv, table.concat(Export.COLUMNS, ",") .. "\n", "an empty board exports to a single header line")
+end
+
+function tests.exportLeaderboardCsvEmitsOneRowPerEntryInRankOrder()
+  local board = Leaderboard.new()
+  Leaderboard.record(board, { score = 300, className = "fighter", depth = 5, turn = 200, won = true, seed = 11 })
+  Leaderboard.record(board, { score = 200, className = "mage", depth = 3, turn = 150, won = false, seed = 22 })
+  local csv = Export.leaderboardCsv(board)
+  local lines = {}
+  for line in csv:gmatch("[^\n]+") do lines[#lines + 1] = line end
+  eq(#lines, 3, "the header plus one row per entry gives three lines total")
+  eq(lines[1], "rank,score,className,depth,turn,won,seed", "the header names every column in a fixed order")
+  eq(lines[2], "1,300,fighter,5,200,true,11", "the top-ranked entry becomes the first data row")
+  eq(lines[3], "2,200,mage,3,150,false,22", "the second-ranked entry keeps that same rank order")
+end
+
+function tests.exportLeaderboardCsvRendersBooleansAsLowercaseWords()
+  local board = Leaderboard.new()
+  Leaderboard.record(board, { score = 50, className = "rogue", depth = 1, turn = 10, won = true, seed = 1 })
+  ok(contains(Export.leaderboardCsv(board), ",true,"), "a won run's CSV row spells out 'true', not '1' or 'TRUE'")
+end
+
+function tests.exportCompendiumCsvListsEverySpeciesSeenOrNot()
+  local compendium = Compendium.new()
+  Compendium.noteSighting(compendium, "rat")
+  Compendium.noteKill(compendium, "rat")
+  Compendium.noteKill(compendium, "rat")
+  local csv = Export.compendiumCsv(compendium)
+  local lines = {}
+  for line in csv:gmatch("[^\n]+") do lines[#lines + 1] = line end
+  eq(lines[1], "key,name,seen,kills", "the header names every compendium export column")
+  eq(#lines, #Compendium.entries(compendium) + 1, "every catalogued species gets a row, sighted or not")
+  ok(contains(csv, "rat,rat,true,2"), "a sighted, twice-slain species reports its own seen flag and tally")
+  ok(contains(csv, "false,0"), "an undiscovered species still reports as unseen with a zero tally")
+end
+
+function tests.streaksCurrentIsZeroAndNilOnAnEmptyHistory()
+  local length, outcome = Streaks.current(Streaks.new())
+  eq(length, 0, "an empty history has a streak length of zero")
+  eq(outcome, nil, "an empty history has no outcome to report")
+end
+
+function tests.streaksCurrentCountsOnlyTheUnbrokenRunAtTheEnd()
+  local history = Streaks.new()
+  Streaks.record(history, true)
+  Streaks.record(history, true)
+  Streaks.record(history, false)
+  Streaks.record(history, false)
+  Streaks.record(history, false)
+  local length, outcome = Streaks.current(history)
+  eq(length, 3, "three losses in a row at the tail end give a streak of three")
+  eq(outcome, false, "the current streak's outcome is a loss")
+
+  Streaks.record(history, true)
+  length, outcome = Streaks.current(history)
+  eq(length, 1, "a single win right after a loss streak is itself a streak of exactly one")
+  eq(outcome, true, "the fresh win flips the current outcome to a win")
+end
+
+function tests.streaksRecordTrimsHistoryPastItsCap()
+  local history = Streaks.new()
+  for i = 1, Streaks.HISTORY_CAP + 10 do
+    Streaks.record(history, i % 2 == 0)
+  end
+  eq(#history, Streaks.HISTORY_CAP, "history never grows past its fixed cap")
+end
+
+function tests.streaksRecordDropsTheOldestEntryNotTheNewestOnceOverCap()
+  local history = Streaks.new()
+  for i = 1, Streaks.HISTORY_CAP do
+    Streaks.record(history, false)
+  end
+  eq(#history, Streaks.HISTORY_CAP, "filling exactly to the cap keeps every entry")
+  Streaks.record(history, true)
+  eq(#history, Streaks.HISTORY_CAP, "one more push still respects the same cap")
+  eq(history[#history], true, "the newest push is the one that survives at the tail")
+  eq(history[1], false, "the oldest entry was the one dropped to make room")
+end
+
+function tests.streaksBestWinStreakFindsTheLongestWinRunAnywhereNotJustTheActiveOne()
+  local history = Streaks.new()
+  for _, won in ipairs({ true, true, true, false, true, false, true, true }) do
+    Streaks.record(history, won)
+  end
+  eq(Streaks.bestWinStreak(history), 3, "the best win streak is the earlier run of three, not the trailing two")
+  local currentLength, currentOutcome = Streaks.current(history)
+  eq(currentLength, 2, "the currently active streak is only two long")
+  eq(currentOutcome, true, "the currently active streak is a winning one")
+end
+
+function tests.streaksBestWinStreakIsZeroWithNoWinsAtAll()
+  local history = Streaks.new()
+  Streaks.record(history, false)
+  Streaks.record(history, false)
+  eq(Streaks.bestWinStreak(history), 0, "a history of nothing but losses has a best win streak of zero")
+end
+
+function tests.metaRecordRunFeedsStreaksAndRunHistorySurvivesASaveLoadRoundTrip()
+  local fresh = Meta.load("/tmp/warren_meta_does_not_exist_71234.sav")
+  eq(#fresh.runHistory, 0, "a freshly defaulted meta state has an empty run history")
+  local meta = Meta.new()
+  Meta.recordRun(meta, { deepestDepth = 1, kills = 0, bossKills = 0, questsCompleted = 0, artifactsFound = 0, won = true })
+  Meta.recordRun(meta, { deepestDepth = 1, kills = 0, bossKills = 0, questsCompleted = 0, artifactsFound = 0, won = false })
+  eq(#meta.runHistory, 2, "each recorded run appends exactly one entry to the history")
+  local currentLength, currentOutcome = Streaks.current(meta.runHistory)
+  eq(currentLength, 1, "the most recent recorded run is a fresh streak of one")
+  eq(currentOutcome, false, "the most recent recorded run was a loss")
+  local path = os.tmpname()
+  Meta.save(meta, path)
+  local restored = Meta.load(path)
+  os.remove(path)
+  eq(#restored.runHistory, 2, "run history survives a save/load round trip")
+  eq(restored.runHistory[1], true, "the oldest entry keeps its own outcome")
+  eq(restored.runHistory[2], false, "the newest entry keeps its own outcome")
+end
+
+function tests.metaRecordRunUnlocksComebackOnlyAfterALossThenAWin()
+  local meta = Meta.new()
+  Meta.recordRun(meta, { deepestDepth = 1, kills = 0, bossKills = 0, questsCompleted = 0, artifactsFound = 0, won = false })
+  eq(meta.achievements.comeback, nil, "a lone loss cannot unlock a comeback")
+  Meta.recordRun(meta, { deepestDepth = 1, kills = 0, bossKills = 0, questsCompleted = 0, artifactsFound = 0, won = true })
+  eq(meta.achievements.comeback, true, "winning right after a loss unlocks the comeback")
+end
+
+function tests.metaRecordRunDoesNotUnlockComebackOnAFirstEverWinOrAWinAfterAWin()
+  local isolated = Meta.new()
+  Meta.recordRun(isolated, { deepestDepth = 1, kills = 0, bossKills = 0, questsCompleted = 0, artifactsFound = 0, won = true })
+  eq(isolated.achievements.comeback, nil, "a first-ever run that wins has no prior loss to come back from")
+
+  local streak = Meta.new()
+  Meta.recordRun(streak, { deepestDepth = 1, kills = 0, bossKills = 0, questsCompleted = 0, artifactsFound = 0, won = true })
+  Meta.recordRun(streak, { deepestDepth = 1, kills = 0, bossKills = 0, questsCompleted = 0, artifactsFound = 0, won = true })
+  eq(streak.achievements.comeback, nil, "a win right after another win is not a comeback")
+end
+
+-- Nemesis (nemesis.lua): a cross-floor hunter born mid-run from a plain
+-- monster that was actually hunting the player at the stairs, escalating
+-- every time it follows without being killed first.
+
+function tests.nemesisIsEligibleRequiresAHuntingHostileAndExcludesEverySpecialCase()
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 5, 5, 1)
+  ok(not Nemesis.isEligible(orc), "a monster that has not noticed the player yet is not eligible")
+  orc.awareness = Stealth.HUNTING
+  ok(Nemesis.isEligible(orc), "a hunting monster under a self-directed ai is eligible")
+
+  local wretch = Monsters.create(Monsters.byKey.wretch, 2, 5, 5, 1)
+  wretch.awareness = Stealth.HUNTING
+  ok(not Nemesis.isEligible(wretch), "a permanent flee species never gives chase down a stairwell")
+
+  local shopkeeper = Monsters.create(Monsters.byKey.shopkeeper, 3, 5, 5, 4)
+  shopkeeper.awareness = Stealth.HUNTING
+  ok(not Nemesis.isEligible(shopkeeper), "the shopkeeper's vend ai is never eligible")
+
+  local boss = Bosses.create(Bosses.byKey.lich, 4, 5, 5)
+  boss.awareness = Stealth.HUNTING
+  ok(not Nemesis.isEligible(boss), "a boss already has its own escalation path")
+
+  local elite = Monsters.create(Monsters.byKey.orc, 5, 5, 5, 3)
+  elite.awareness, elite.elite = Stealth.HUNTING, true
+  ok(not Nemesis.isEligible(elite), "an elite already has its own escalation path")
+
+  local mimic = Mimics.reveal(6, 5, 5, 3)
+  mimic.awareness = Stealth.HUNTING
+  ok(not Nemesis.isEligible(mimic), "a revealed mimic already has its own escalation path")
+
+  local shade = Graves.reveal(7, 5, 5, {})
+  shade.awareness = Stealth.HUNTING
+  ok(not Nemesis.isEligible(shade), "a grave shade already has its own escalation path")
+
+  local dead = Monsters.create(Monsters.byKey.rat, 8, 5, 5, 1)
+  dead.awareness, dead.hp = Stealth.HUNTING, 0
+  ok(not Nemesis.isEligible(dead), "a dead monster cannot give chase")
+
+  local already = Monsters.create(Monsters.byKey.rat, 9, 5, 5, 1)
+  already.awareness, already.nemesis = Stealth.HUNTING, true
+  ok(not Nemesis.isEligible(already), "an existing nemesis cannot spawn a second one")
+end
+
+function tests.nemesisPickHunterReturnsTheNearestEligibleHunterBreakingTiesByListOrder()
+  local player = Entity.new({ x = 5, y = 5, glyph = "@", name = "you", kind = "player", hp = 20, attack = 5, defense = 1 })
+  local level = arena(21, 11)
+  local far = Monsters.create(Monsters.byKey.orc, 1, 15, 5, 1)
+  far.awareness = Stealth.HUNTING
+  local dormant = Monsters.create(Monsters.byKey.orc, 2, 6, 5, 1)
+  local near = Monsters.create(Monsters.byKey.orc, 3, 7, 5, 1)
+  near.awareness = Stealth.HUNTING
+  level.entities = { far, dormant, near }
+  eq(Nemesis.pickHunter(level, player), near, "the nearest eligible hunter wins over a dormant closer monster and a farther one")
+
+  local tie = Monsters.create(Monsters.byKey.orc, 4, 3, 5, 1)
+  tie.awareness = Stealth.HUNTING
+  level.entities = { near, tie }
+  eq(Nemesis.pickHunter(level, player), near, "an equidistant tie is broken by earlier list order")
+
+  level.entities = { dormant }
+  eq(Nemesis.pickHunter(level, player), nil, "no eligible hunter on the floor returns nil")
+end
+
+function tests.nemesisBeginFromCapturesSpeciesAndHpFractionAtGrudgeOne()
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 5, 5, 1)
+  orc.hp = orc.maxHp // 2
+  local pursuit = Nemesis.beginFrom(orc)
+  eq(pursuit.species, "orc", "the pursuit remembers which species is following")
+  eq(pursuit.grudge, 1, "a freshly begun pursuit starts at grudge one")
+  eq(pursuit.hpFraction, 0.5, "the pursuit captures the hunter's hp fraction at the moment it gave chase")
+end
+
+function tests.nemesisEscalateRaisesGrudgeAndHealsTowardFullBothCapped()
+  local pursuit = { species = "orc", grudge = 1, hpFraction = 0.3 }
 end
 
 local order = {
