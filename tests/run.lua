@@ -9644,6 +9644,352 @@ function tests.gameOpenChestFallsBackToALockpickWhenNoKeyIsCarried()
   for _, item in ipairs(game.player.inventory) do
     if item.kind == Items.LOCKPICK then stillHasPick = true end
   end
+  ok(not stillHasPick, "the lockpick is spent gambling against the lock with no key on hand")
+end
+
+function tests.gameOpenChestRefusesWhenNothingIsHereOrItIsAlreadyEmpty()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.chests = {}
+  eq(game:openChest(), false, "opening with no chest underfoot fails")
+  local chest = { x = 3, y = 6, locked = false, trapped = false, opened = true, loot = {} }
+  game.level.chests = { chest }
+  eq(game:openChest(), false, "opening an already-emptied chest fails")
+end
+
+function tests.chestsFieldsSurviveSerialization()
+  local level = arena(21, 11)
+  local chest = Chests.new(Rng.new(4), 3)
+  chest.x, chest.y = 5, 5
+  chest.locked = true
+  chest.trapped = true
+  level.chests = { chest }
+  local restored = Level.fromData(level:toData())
+  eq(#restored.chests, 1, "the chest list survives a round trip")
+  eq(restored.chests[1].locked, true, "a chest's locked flag survives a round trip")
+  eq(restored.chests[1].trapped, true, "a chest's trapped flag survives a round trip")
+  eq(restored.chests[1].opened, false, "a chest's opened flag survives a round trip")
+  eq(#restored.chests[1].loot, #chest.loot, "a chest's loot list survives a round trip intact")
+  eq(restored.chests[1].loot[1].kind, chest.loot[1].kind, "a chest's loot items keep their own kind")
+end
+
+function tests.renderShowsAClosedChestGlyphAndAnOpenedOneOnceEmptied()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local chest = { x = 4, y = 6, locked = true, trapped = false, opened = false, loot = { Items.gold(5) } }
+  game.level.chests = { chest }
+  game:computeVisible()
+  local frame = game:render()
+  ok(contains(frame, "B"), "a closed chest renders as its own glyph")
+  chest.opened = true
+  chest.loot = {}
+  frame = game:render()
+  ok(contains(frame, "b"), "an emptied chest renders as its own distinct glyph")
+end
+
+function tests.autopilotOpensAnUnlockedChestOnSightButSkipsALockedOneWithNoKeyOrPick()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local chest = { x = 3, y = 6, locked = false, trapped = false, opened = false, loot = { Items.gold(5) } }
+  game.level.chests = { chest }
+  game:choosePlayerAction()
+  eq(chest.opened, true, "the autopilot opens a free chest the instant it stands on one")
+
+  local lockedGame = stagedGame(1, arena(21, 11), 3, 6)
+  local locked = { x = 3, y = 6, locked = true, trapped = false, opened = false, loot = { Items.gold(5) } }
+  lockedGame.level.chests = { locked }
+  local beforeX, beforeY = lockedGame.player.x, lockedGame.player.y
+  lockedGame:choosePlayerAction()
+  eq(locked.opened, false, "the autopilot never gambles a lock it has neither a key nor a lockpick for")
+  ok(lockedGame.player.x ~= beforeX or lockedGame.player.y ~= beforeY,
+    "the autopilot still makes progress toward the stairs instead of parking on an unopenable chest")
+end
+
+function tests.morgueScoreWeighsEveryStatByItsOwnFixedWeight()
+  local w = Morgue.SCORE_WEIGHTS
+  local report = {
+    deepestDepth = 4, kills = 12, bossKills = 1, questsCompleted = 2, artifactsFound = 1,
+    vaultsOpened = 1, setPiecesFound = 3, chestsOpened = 5, playerLevel = 6, gold = 40, won = false,
+  }
+  local expected = 4 * w.depth + 12 * w.kill + 1 * w.bossKill + 2 * w.quest + 1 * w.artifact
+    + 1 * w.vault + 3 * w.setPiece + 5 * w.chest + 6 * w.playerLevel + 40
+  eq(Morgue.score(report), expected, "score sums every weighted stat plus flat gold")
+end
+
+function tests.morgueScoreAddsTheWinBonusOnlyWhenWon()
+  local base = {
+    deepestDepth = 1, kills = 0, bossKills = 0, questsCompleted = 0, artifactsFound = 0,
+    vaultsOpened = 0, setPiecesFound = 0, chestsOpened = 0, playerLevel = 1, gold = 0, won = false,
+  }
+  local lost = Morgue.score(base)
+  base.won = true
+  local won = Morgue.score(base)
+  eq(won - lost, Morgue.SCORE_WEIGHTS.win, "winning adds exactly the win bonus and nothing else")
+end
+
+function tests.morgueEquipmentListsOnlyOccupiedSlotsInFixedOrder()
+  local game = Game.new(9)
+  eq(#Morgue.equipment(game.player), 0, "a fresh player with nothing worn has no equipment lines")
+  game.player.armor = Items.armor("plate", 4)
+  game.player.weapon = Items.weapon("sword", 3)
+  local lines = Morgue.equipment(game.player)
+  eq(#lines, 2, "only the two worn slots produce a line")
+  eq(lines[1], "weapon: sword", "weapon is listed before armor regardless of assignment order")
+  eq(lines[2], "armor: plate", "armor keeps its own slot label")
+end
+
+function tests.morgueEquipmentPrefixesARevealedCurseButNotAHiddenOne()
+  local game = Game.new(9)
+  local ring = Items.ring("ring of woe", 0, 0)
+  Curses.afflict(ring, Curses.pool.ring[1])
+  game.player.ring = ring
+  eq(Morgue.equipment(game.player)[1], "ring: ring of woe", "an unrevealed curse reads like an ordinary item")
+  Curses.reveal(ring)
+  eq(Morgue.equipment(game.player)[1], "ring: cursed ring of woe", "a revealed curse is prefixed")
+end
+
+function tests.morgueKillTallySortsByCountThenByCatalogOrderOnTies()
+  local compendium = Compendium.new()
+  Compendium.noteKill(compendium, "goblin")
+  Compendium.noteKill(compendium, "rat")
+  Compendium.noteKill(compendium, "rat")
+  Compendium.noteKill(compendium, "bat")
+  local rows = Morgue.killTally(compendium)
+  eq(#rows, 3, "only species with at least one kill appear")
+  eq(rows[1].key, "rat", "the heaviest kill count sorts first")
+  eq(rows[1].kills, 2, "rat's tally is exactly two")
+  eq(rows[2].key, "bat", "a tie between bat and goblin breaks toward bat's earlier catalog slot")
+  eq(rows[3].key, "goblin", "goblin follows bat on the same tied count")
+end
+
+function tests.morgueBuildMirrorsGameStatsPlayerAndCompendium()
+  local game = Game.new(21)
+  game.stats.kills = 3
+  game.stats.bossKills = 1
+  game.deepestDepth = 5
+  game.turn = 120
+  game.player.gold = 77
+  Compendium.noteKill(game.compendium, "orc")
+  local report = Morgue.build(game)
+  eq(report.kills, 3, "build copies the live kill tally")
+  eq(report.bossKills, 1, "build copies the live boss kill tally")
+  eq(report.deepestDepth, 5, "build copies the deepest depth reached")
+  eq(report.turn, 120, "build copies the current turn")
+  eq(report.gold, 77, "build copies the player's gold")
+  eq(report.alive, true, "a living player's report says so")
+  eq(#report.killTally, 1, "the compendium's own kill feeds straight into the tally")
+  eq(report.killTally[1].key, "orc", "the tallied species matches what was actually killed")
+end
+
+function tests.morgueFormatRendersOutcomeGearKillsAndScoreInOrder()
+  local game = Game.new(3)
+  game.player.weapon = Items.weapon("axe", 2)
+  Compendium.noteKill(game.compendium, "kobold")
+  game.player.hp = 0
+  local text = Morgue.format(Morgue.build(game))
+  ok(contains(text, "died in the dark"), "a dead player's obituary names the outcome")
+  ok(contains(text, "weapon: axe"), "the report lists the worn weapon")
+  ok(contains(text, "kobold"), "the report lists a slain species")
+  local scoreLine = "score: " .. Morgue.score(Morgue.build(game))
+  ok(contains(text, scoreLine), "the report ends with the matching numeric score")
+  local scorePos = text:find("score:", 1, true)
+  local killsPos = text:find("kills:", 1, true)
+  ok(killsPos < scorePos, "the kill tally is printed before the score line")
+end
+
+function tests.morgueFormatNamesTheWinOutcomeWhenWon()
+  local game = Game.new(3)
+  game.won = true
+  local text = Morgue.format(Morgue.build(game))
+  ok(contains(text, "Victorious the wanderer"), "a won run's heading calls the player victorious")
+  ok(contains(text, "escaped the warren with the Amulet"), "a won run's outcome line names the escape")
+end
+
+function tests.morgueFormatOmitsEquipmentAndKillsSectionsWhenEmpty()
+  local game = Game.new(3)
+  local text = Morgue.format(Morgue.build(game))
+  ok(not contains(text, "equipment:"), "an unarmed player's report has no equipment section")
+  ok(not contains(text, "kills:"), "a report with no recorded kills has no kill section")
+  ok(contains(text, "still drawing breath"), "a living player's report says so")
+end
+
+function tests.leaderboardRecordOnAnEmptyBoardLandsAtRankOne()
+  local board = Leaderboard.new()
+  local rank = Leaderboard.record(board, { score = 100 })
+  eq(rank, 1, "the first entry ever recorded ranks first")
+  eq(#board, 1, "the board now holds exactly one entry")
+end
+
+function tests.leaderboardRecordKeepsTheBoardSortedBestScoreFirst()
+  local board = Leaderboard.new()
+  Leaderboard.record(board, { score = 50, tag = "a" })
+  Leaderboard.record(board, { score = 90, tag = "b" })
+  Leaderboard.record(board, { score = 70, tag = "c" })
+  eq(board[1].tag, "b", "the highest score sorts to the very top")
+  eq(board[2].tag, "c", "the middling score lands second")
+  eq(board[3].tag, "a", "the lowest score lands last")
+  local rank = Leaderboard.record(board, { score = 80, tag = "d" })
+  eq(rank, 2, "a fresh entry ranks by where it actually lands, not where it was inserted")
+  eq(board[2].tag, "d", "the new entry displaces the weaker one down a slot")
+  eq(board[3].tag, "c", "everything below the insertion point shifts down by one")
+end
+
+function tests.leaderboardRecordDropsAnEntryThatDoesNotCrackTheCap()
+  local board = Leaderboard.new()
+  for i = 1, Leaderboard.CAPACITY do
+    Leaderboard.record(board, { score = 1000 - i })
+  end
+  eq(#board, Leaderboard.CAPACITY, "the board fills to exactly its capacity")
+  local rank = Leaderboard.record(board, { score = 1 })
+  eq(rank, nil, "a score worse than everything already on the board does not crack it")
+  eq(#board, Leaderboard.CAPACITY, "the board stays at capacity rather than growing")
+  eq(board[Leaderboard.CAPACITY].score, 1000 - Leaderboard.CAPACITY, "the weakest surviving entry is unchanged")
+end
+
+function tests.leaderboardRecordBumpsTheWeakestEntryOffOnceFull()
+  local board = Leaderboard.new()
+  for i = 1, Leaderboard.CAPACITY do
+    Leaderboard.record(board, { score = 1000 - i })
+  end
+  local worst = board[Leaderboard.CAPACITY].score
+  local rank = Leaderboard.record(board, { score = 1500 })
+  ok(rank ~= nil, "a score that beats the current worst entry cracks the board")
+  eq(#board, Leaderboard.CAPACITY, "the board stays at capacity after bumping someone off")
+  for _, entry in ipairs(board) do
+    ok(entry.score ~= worst, "the previous weakest entry no longer appears on the board")
+  end
+end
+
+function tests.leaderboardTopReturnsAtMostCountEntriesInOrder()
+  local board = Leaderboard.new()
+  Leaderboard.record(board, { score = 30 })
+  Leaderboard.record(board, { score = 10 })
+  Leaderboard.record(board, { score = 20 })
+  local top2 = Leaderboard.top(board, 2)
+  eq(#top2, 2, "top(2) returns exactly two entries")
+  eq(top2[1].score, 30, "the first slot is the best score")
+  eq(top2[2].score, 20, "the second slot is the next best score")
+end
+
+function tests.leaderboardTopDefaultsToTheFullCapacityWhenNoCountIsGiven()
+  local board = Leaderboard.new()
+  for i = 1, Leaderboard.CAPACITY + 3 do
+    Leaderboard.record(board, { score = i })
+  end
+  local top = Leaderboard.top(board)
+  eq(#top, Leaderboard.CAPACITY, "top() with no count returns the board's full capacity, not everything ever recorded")
+end
+
+function tests.leaderboardBestScoreReadsTheTopEntryOrZeroWhenEmpty()
+  eq(Leaderboard.bestScore(Leaderboard.new()), 0, "an empty board's best score is zero")
+  local board = Leaderboard.new()
+  Leaderboard.record(board, { score = 42 })
+  eq(Leaderboard.bestScore(board), 42, "the best score matches the single recorded entry")
+end
+
+function tests.metaLeaderboardFieldDefaultsToEmptyAndSurvivesASaveLoadRoundTrip()
+  local fresh = Meta.load("/tmp/warren_meta_does_not_exist_55511.sav")
+  eq(#fresh.leaderboard, 0, "a freshly defaulted meta state has an empty leaderboard")
+  local meta = Meta.new()
+  Leaderboard.record(meta.leaderboard, { score = 250, className = "mage", depth = 4, turn = 88, won = false, seed = 7 })
+  local path = os.tmpname()
+  Meta.save(meta, path)
+  local restored = Meta.load(path)
+  os.remove(path)
+  eq(#restored.leaderboard, 1, "a recorded leaderboard entry survives a save/load round trip")
+  eq(restored.leaderboard[1].score, 250, "a restored entry keeps its own score")
+  eq(restored.leaderboard[1].className, "mage", "a restored entry keeps its own class")
+end
+
+function tests.replayRunIsDeterministicAndMatchesAFreshGamesOwnReport()
+  local seed, steps = 55, 60
+  local game = Game.new(seed)
+  for _ = 1, steps do
+    if not game.player:isAlive() then break end
+    game:autoStep()
+  end
+  local expected = Morgue.build(game)
+  local replayed = Replay.run(seed, nil, steps)
+  local matches, mismatchField = Replay.matches(expected, replayed)
+  ok(matches, "replaying the same seed and step count reproduces every compared field (first mismatch: "
+    .. tostring(mismatchField) .. ")")
+  eq(replayed.turn, expected.turn, "the replay reaches the exact same turn")
+  eq(replayed.deepestDepth, expected.deepestDepth, "the replay reaches the exact same depth")
+end
+
+function tests.replayVerifyConfirmsAGenuineReportAndReturnsItsScore()
+  local seed, steps = 55, 60
+  local game = Game.new(seed)
+  for _ = 1, steps do
+    if not game.player:isAlive() then break end
+    game:autoStep()
+  end
+  local report = Morgue.build(game)
+  local matches, mismatchField, score = Replay.verify(seed, nil, steps, report)
+  ok(matches, "verify confirms a report that genuinely came from this seed and step count")
+  eq(mismatchField, nil, "a matching verify names no mismatched field")
+  eq(score, Morgue.score(report), "verify's returned score matches the report's own score")
+end
+
+function tests.replayVerifyFlagsATamperedReportAndStillReturnsTheRealScore()
+  local seed, steps = 55, 60
+  local game = Game.new(seed)
+  for _ = 1, steps do
+    if not game.player:isAlive() then break end
+    game:autoStep()
+  end
+  local report = Morgue.build(game)
+  local tampered = {}
+  for k, v in pairs(report) do tampered[k] = v end
+  tampered.gold = report.gold + 9999
+  local matches, mismatchField, score = Replay.verify(seed, nil, steps, tampered)
+  eq(matches, false, "a tampered gold total fails verification")
+  eq(mismatchField, "gold", "verify names gold as the field that diverged")
+  eq(score, Morgue.score(report), "the replay still reports the real, untampered score")
+end
+
+function tests.replayComparedFieldsCoversEveryFieldMorgueScoreActuallyReads()
+  local weighed = {
+    "deepestDepth", "kills", "bossKills", "questsCompleted", "artifactsFound",
+    "vaultsOpened", "setPiecesFound", "chestsOpened", "playerLevel", "gold", "won",
+  }
+  for _, field in ipairs(weighed) do
+    local found = false
+    for _, compared in ipairs(Replay.COMPARED_FIELDS) do
+      if compared == field then found = true end
+    end
+    ok(found, "Replay.COMPARED_FIELDS includes '" .. field .. "', every field Morgue.score weighs")
+  end
+end
+
+function tests.replayMatchesReportsTheFirstDivergingFieldInComparedFieldsOrder()
+  local base = {
+    won = false, alive = true, deepestDepth = 3, turn = 100, gold = 10, essence = 2,
+    kills = 1, bossKills = 0, questsCompleted = 0, artifactsFound = 0,
+    vaultsOpened = 0, setPiecesFound = 0, chestsOpened = 0, playerLevel = 1,
+  }
+  local altered = {}
+  for k, v in pairs(base) do altered[k] = v end
+  altered.turn = 999
+  local matches, field = Replay.matches(base, altered)
+  eq(matches, false, "a divergent turn count fails the match")
+  eq(field, "turn", "the mismatch is reported against the turn field specifically")
+  eq(Replay.matches(base, base), true, "an identical report matches itself")
+end
+
+function tests.challengesForDaySameDayAlwaysReturnsTheSamePresetAndSeed()
+  local presetA, seedA = Challenges.forDay(7)
+  local presetB, seedB = Challenges.forDay(7)
+  eq(presetA, presetB, "the same day index always names the identical preset table")
+  eq(seedA, seedB, "the same day index always yields the identical seed")
+end
+
+function tests.challengesForDayCyclesThroughTheCatalogInOrder()
+  for i = 0, #Challenges.CATALOG - 1 do
+    local preset = Challenges.forDay(i)
+    eq(preset, Challenges.CATALOG[i + 1], "day " .. i .. " maps to catalog slot " .. (i + 1))
+  end
+  local wrapped = Challenges.forDay(#Challenges.CATALOG)
+  eq(wrapped, Challenges.CATALOG[1], "the cycle wraps back to the first preset after one full lap")
+end
+
 end
 
 local order = {
