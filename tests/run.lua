@@ -8779,6 +8779,698 @@ function tests.ascensionEssenceMultiplierAppliesFamineAlone()
   eq(Ascension.essenceMultiplier({ "famine" }), 0.5, "famine halves essence income")
 end
 
+function tests.ascensionSightPenaltySumsAcrossActiveMutators()
+  eq(Ascension.sightPenalty(nil), 0, "no active mutators carries no sight penalty")
+  eq(Ascension.sightPenalty({ "nightblind" }), 2, "nightblind carries its own fixed sight penalty")
+end
+
+function tests.ascensionRenownBonusPercentSumsRatherThanCompounds()
+  eq(Ascension.renownBonusPercent(nil), 0, "no active mutators adds no renown bonus")
+  eq(Ascension.renownBonusPercent({ "famine" }), 10, "famine alone adds its own fixed bonus")
+  eq(Ascension.renownBonusPercent({ "famine", "nightblind" }), 20, "two mutators add their bonuses, not compound them")
+end
+
+function tests.ascensionApplyToPlayerHalvesMaxHpAndDoublesAttackForGlassCannon()
+  local player = { maxHp = 30, hp = 30, baseAttack = 5, attack = 5, baseDefense = 1, defense = 1 }
+  Ascension.applyToPlayer({ "glasscannon" }, player)
+  eq(player.maxHp, 15, "glass cannon halves max hp")
+  eq(player.hp, 15, "current hp is clamped down to the new max")
+  eq(player.attack, 10, "glass cannon doubles attack")
+  eq(player.baseAttack, 10, "glass cannon doubles base attack alongside the equipped total")
+  eq(player.defense, 1, "glass cannon leaves defense untouched")
+end
+
+function tests.ascensionApplyToPlayerHalvesDefenseForFrail()
+  local player = { maxHp = 30, hp = 30, baseAttack = 5, attack = 5, baseDefense = 3, defense = 3 }
+  Ascension.applyToPlayer({ "frail" }, player)
+  eq(player.defense, 1, "frail floors defense down by half")
+  eq(player.baseDefense, 1, "frail floors base defense down by half")
+  eq(player.attack, 5, "frail leaves attack untouched")
+end
+
+function tests.gameNewResolvesRequestedMutatorsAgainstMetaAndAppliesTheirDeltas()
+  local meta = Meta.new()
+  meta.bestDepth = 4
+  meta.wins = 1
+  local game = Game.new(5, { meta = meta, mutators = { "unknownkey", "glasscannon", "frail" } })
+  eq(#game.ascension, 2, "only the two unlocked, known mutators survive resolution")
+  eq(game.ascension[1], "frail", "active mutators are ordered by the catalog, not the request")
+  eq(game.ascension[2], "glasscannon", "active mutators are ordered by the catalog, not the request")
+  eq(game.player.maxHp, 15, "glasscannon halves the fresh player's max hp")
+  eq(game.player.defense, 0, "frail halves the fresh player's base defense down from 1")
+end
+
+function tests.gameMonsterMeleeDamageStacksBloodboundWithBloodmoonMultiplicatively()
+  local meta = Meta.new()
+  meta.bestDepth = 3
+  local game = Game.new(1, { meta = meta, mutators = { "bloodbound" } })
+  game.level = arena(21, 11)
+  game.player.x, game.player.y = 3, 6
+  game:computeVisible()
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+
+  local before = game.player.hp
+  game.ascension = {}
+  game:monsterMelee(orc)
+  local plainDamage = before - game.player.hp
+
+  game.player.hp = before
+  game.ascension = { "bloodbound" }
+  game:monsterMelee(orc)
+  local bloodboundDamage = before - game.player.hp
+  eq(bloodboundDamage, math.floor(plainDamage * 1.5), "bloodbound alone scales melee damage by its own multiplier")
+
+  game.player.hp = before
+  game.level.event = { key = Events.BLOODMOON, turnsLeft = 5 }
+  game:monsterMelee(orc)
+  local stacked = before - game.player.hp
+  eq(stacked, math.floor(plainDamage * 1.5 * Events.BLOODMOON_MULTIPLIER),
+    "bloodbound and bloodmoon stack multiplicatively on the same hit")
+end
+
+function tests.gameKillEssenceStacksFamineWithRichVeinsMultiplicatively()
+  local meta = Meta.new()
+  meta.bestDepth = 2
+  local game = Game.new(1, { meta = meta, mutators = { "famine" } })
+  game.level = arena(21, 11)
+  game.player.x, game.player.y = 3, 6
+  game:computeVisible()
+
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 4, 6, 1)
+  rat.hp = 1
+  game.level.entities = { rat }
+  game.ascension = {}
+  local before = game.player.essence
+  game:playerAttack(rat)
+  local plainEssence = game.player.essence - before
+
+  local rat2 = Monsters.create(Monsters.byKey.rat, 2, 4, 6, 1)
+  rat2.hp = 1
+  game.level.entities = { rat2 }
+  game.player.essence = before
+  game.ascension = { "famine" }
+  game:playerAttack(rat2)
+  local famineEssence = game.player.essence - before
+  eq(famineEssence, math.floor(plainEssence * 0.5), "famine alone halves essence earned from a kill")
+
+  local rat3 = Monsters.create(Monsters.byKey.rat, 3, 4, 6, 1)
+  rat3.hp = 1
+  game.level.entities = { rat3 }
+  game.player.essence = before
+  game.level.event = { key = Events.RICHVEINS, turnsLeft = 5 }
+  game:playerAttack(rat3)
+  local stackedEssence = game.player.essence - before
+  eq(stackedEssence, plainEssence,
+    "famine's half and rich veins' double multiply to exactly cancel back to the plain amount")
+end
+
+function tests.gameEffectiveRadiusStacksNightblindWithHush()
+  local meta = Meta.new()
+  meta.bestDepth = 2
+  local game = Game.new(1, { meta = meta, mutators = { "nightblind" } })
+  game.ascension = {}
+  local noAscension = game:effectiveRadius()
+  game.ascension = { "nightblind" }
+  eq(game:effectiveRadius(), noAscension - 2, "nightblind alone shrinks the effective sight radius by its own penalty")
+  game.level.event = { key = Events.HUSH, turnsLeft = 5 }
+  eq(game:effectiveRadius(), noAscension - 2 - Events.HUSH_SIGHT_PENALTY,
+    "nightblind and hush both shrink the effective sight radius, summed together")
+end
+
+function tests.metaRenownForAddsTheAscensionBonusOnTopOfTheBaseScore()
+  local stats = { deepestDepth = 5, bossKills = 0, questsCompleted = 0, won = false }
+  local base = Meta.renownFor(stats)
+  stats.mutators = { "famine" }
+  eq(Meta.renownFor(stats), base + (base * 10) // 100, "famine's 10% renown bonus is added on top of the base score")
+  stats.mutators = { "famine", "nightblind" }
+  eq(Meta.renownFor(stats), base + (base * 20) // 100, "two mutators' renown bonuses sum before being applied")
+end
+
+function tests.ascensionFieldSurvivesASaveLoadRoundTrip()
+  local meta = Meta.new()
+  meta.bestDepth = 3
+  local game = Game.new(4, { meta = meta, mutators = { "bloodbound" } })
+  local path = os.tmpname()
+  game:save(path)
+  local restored = Game.load(path)
+  os.remove(path)
+  eq(#restored.ascension, 1, "the active ascension mutator list survives a save/load round trip")
+  eq(restored.ascension[1], "bloodbound", "the restored mutator key matches what was active")
+end
+
+function tests.renderPanelShowsActiveAscensionMutatorsByKey()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  ok(not contains(Render.panel(game), "ascension"), "no active mutators shows no ascension line at all")
+  game.ascension = { "famine", "nightblind" }
+  ok(contains(Render.panel(game), "ascension famine,nightblind"), "active mutators are listed by key in the panel")
+end
+
+-- durability.lua: weapon/armor/bow wear and repair.
+
+function tests.durabilityFreshWeaponStartsAtMaxAndIsNotBroken()
+  local sword = Items.weapon("sword", 4)
+  eq(sword.durability, Durability.MAX, "a freshly forged weapon starts at max durability")
+  eq(sword.maxDurability, Durability.MAX, "a freshly forged weapon's max durability matches the catalog default")
+  ok(not Durability.isBroken(sword), "a freshly forged weapon is not broken")
+end
+
+function tests.durabilityWearWeaponDecrementsAndBreaksAtZeroSubtractingItsPower()
+  local hero = { attack = 5, inventory = {}, kind = "player", name = "you" }
+  Items.equipWeapon(Items.weapon("sword", 4), hero)
+  eq(hero.attack, 9, "the sword's power is baked into attack on equip")
+  local broke
+  for _ = 1, Durability.MAX - 1 do
+    broke = Durability.wearWeapon(hero)
+    ok(broke == nil, "the sword survives every hit before its last")
+  end
+  eq(hero.weapon.durability, 1, "one point of durability remains before the final hit")
+  broke = Durability.wearWeapon(hero)
+  ok(broke ~= nil, "the hit that empties durability reports a break")
+  ok(contains(broke, "breaks apart"), "the break line names what happened")
+  eq(hero.weapon.durability, 0, "durability floors at exactly zero")
+  eq(hero.attack, 5, "the sword's power is pulled back out of attack the instant it breaks")
+end
+
+function tests.durabilityWearWeaponIsANoOpOnceAlreadyBroken()
+  local item = Items.weapon("dagger", 2)
+  item.durability = 0
+  local hero = { weapon = item, attack = 10, kind = "player", name = "you" }
+  eq(Durability.wearWeapon(hero), nil, "wearing an already broken weapon reports no further break")
+  eq(item.durability, 0, "durability never drops below zero")
+  eq(hero.attack, 10, "wearing an already-broken weapon never touches attack again")
+end
+
+function tests.durabilityWearArmorBreaksAndSubtractsItsPowerFromDefense()
+  local hero = { defense = 1, inventory = {}, kind = "player", name = "you" }
+  Items.equipArmor(Items.armor("plate", 3), hero)
+  eq(hero.defense, 4, "the plate's power is baked into defense on equip")
+  hero.armor.durability = 1
+  local broke = Durability.wearArmor(hero)
+  ok(contains(broke, "battered"), "the break line reports the armor giving out")
+  eq(hero.defense, 1, "the armor's power is pulled back out of defense the instant it breaks")
+end
+
+function tests.durabilityWearBowBreaksWithoutTouchingAnyStatDirectly()
+  local hero = { bow = Items.bow("shortbow", 3, 6), attack = 5, kind = "player", name = "you" }
+  hero.bow.durability = 1
+  local broke = Durability.wearBow(hero)
+  ok(contains(broke, "snaps"), "the break line reports the bow giving out")
+  eq(hero.bow.durability, 0, "durability floors at zero")
+  eq(hero.attack, 5, "a bow's power was never baked into attack, so breaking it leaves attack untouched")
+end
+
+function tests.durabilityEffectivePowerIsZeroForABrokenItemAndFullOtherwise()
+  local bow = Items.bow("shortbow", 3, 6)
+  eq(Durability.effectivePower(bow), 3, "a pristine bow contributes its full power")
+  bow.durability = 0
+  eq(Durability.effectivePower(bow), 0, "a broken bow contributes nothing")
+  eq(Durability.effectivePower(nil), 0, "no bow equipped contributes nothing")
+end
+
+function tests.durabilityRepairFailsWithoutEnoughGoldOrOnAPristineItem()
+  local hero = { weapon = Items.weapon("sword", 4), gold = 0 }
+  local success, reason = Durability.repair(hero, "weapon")
+  eq(success, false, "a pristine weapon refuses repair")
+  eq(reason, "already in perfect condition", "the refusal explains why")
+  hero.weapon.durability = 10
+  success, reason = Durability.repair(hero, "weapon")
+  eq(success, false, "an empty purse refuses to cover the repair bill")
+  eq(reason, "not enough gold", "the refusal explains why")
+  success, reason = Durability.repair(hero, "bow")
+  eq(success, false, "repairing an empty slot fails")
+  eq(reason, "nothing equipped there", "the refusal explains why")
+end
+
+function tests.durabilityRepairRestoresFullDurabilityAndFoldsPowerBackInAfterABreak()
+  local hero = { attack = 5, gold = 100, inventory = {}, kind = "player", name = "you" }
+  Items.equipWeapon(Items.weapon("sword", 4), hero)
+  hero.weapon.durability = 0
+  hero.attack = hero.attack - 4
+  local success, cost = Durability.repair(hero, "weapon")
+  ok(success, "a full purse and a broken weapon repair successfully")
+  eq(hero.weapon.durability, Durability.MAX, "repairing restores full durability")
+  eq(cost, Durability.MAX * Durability.REPAIR_COST_PER_POINT, "repairing a fully broken item costs its full bill")
+  eq(hero.gold, 100 - cost, "the repair bill is deducted from gold")
+  eq(hero.attack, 9, "the weapon's power is folded back into attack once repaired")
+end
+
+function tests.durabilityRepairOnANotYetBrokenItemJustTopsUpDurabilityWithoutTouchingStats()
+  local hero = { attack = 9, gold = 100 }
+  hero.weapon = Items.weapon("sword", 4)
+  hero.weapon.durability = 20
+  local success, cost = Durability.repair(hero, "weapon")
+  ok(success, "a merely dinged weapon still repairs")
+  eq(hero.weapon.durability, Durability.MAX, "durability tops back up to max")
+  eq(cost, (Durability.MAX - 20) * Durability.REPAIR_COST_PER_POINT, "the bill only covers the missing points")
+  eq(hero.attack, 9, "attack is untouched since the weapon was never broken in the first place")
+end
+
+function tests.equipWeaponAddsOnlyEffectivePowerForAnAlreadyBrokenWeapon()
+  local hero = { attack = 5, inventory = {} }
+  local sword = Items.weapon("sword", 4)
+  sword.durability = 0
+  Items.equipWeapon(sword, hero)
+  eq(hero.attack, 5, "equipping an already-broken weapon adds none of its power")
+end
+
+function tests.rangedFireDealsNoBowBonusOnceTheBowIsBroken()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.bow = Items.bow("shortbow", 5, 6)
+  game.player.inventory[#game.player.inventory + 1] = Items.ammo("arrow", 10)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 9, 6, 1)
+  orc.hp, orc.maxHp = 999, 999
+
+  game:fireAt(orc)
+  local pristineDamage = 999 - orc.hp
+
+  orc.hp = 999
+  game.player.bow.durability = 0
+  game:fireAt(orc)
+  local brokenDamage = 999 - orc.hp
+
+  ok(brokenDamage < pristineDamage, "a broken bow deals strictly less damage than a working one")
+  eq(brokenDamage, pristineDamage - 5, "the broken bow's missing power matches its catalog power exactly")
+end
+
+function tests.gamePlayerAttackWearsTheEquippedWeaponAndLogsWhenItBreaks()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Items.equipWeapon(Items.weapon("dagger", 2), game.player)
+  game.player.weapon.durability = 1
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  orc.hp, orc.maxHp = 999, 999
+  game:playerAttack(orc)
+  eq(game.player.weapon.durability, 0, "the weapon's last durability point is spent on this hit")
+  local broke = false
+  for _, line in ipairs(game.log:recent(6)) do
+    if contains(line, "breaks apart") then broke = true end
+  end
+  ok(broke, "the weapon breaking is reported in the message log")
+end
+
+function tests.gameMonsterMeleeWearsThePlayersArmorAndLogsWhenItBreaks()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Items.equipArmor(Items.armor("plate", 3), game.player)
+  game.player.armor.durability = 1
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  game:monsterMelee(orc)
+  eq(game.player.armor.durability, 0, "the armor's last durability point is spent on this hit")
+  local broke = false
+  for _, line in ipairs(game.log:recent(6)) do
+    if contains(line, "battered") then broke = true end
+  end
+  ok(broke, "the armor breaking is reported in the message log")
+end
+
+function tests.gameFireAtWearsTheEquippedBowAndLogsWhenItBreaks()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.bow = Items.bow("shortbow", 3, 6)
+  game.player.bow.durability = 1
+  game.player.inventory[#game.player.inventory + 1] = Items.ammo("arrow", 5)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 9, 6, 1)
+  orc.hp, orc.maxHp = 999, 999
+  game:fireAt(orc)
+  eq(game.player.bow.durability, 0, "the bow's last durability point is spent on this shot")
+  ok(contains(game.log:last(), "snaps"), "the bow snapping is the shot's own last log line")
+end
+
+function tests.gameBrokenEquippedSlotFindsTheFirstBrokenPieceInPriorityOrder()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  eq(game:brokenEquippedSlot(), nil, "a fresh player with no gear has nothing broken")
+  Items.equipArmor(Items.armor("plate", 3), game.player)
+  game.player.armor.durability = 0
+  eq(game:brokenEquippedSlot(), "armor", "the only broken piece is found")
+  Items.equipWeapon(Items.weapon("sword", 4), game.player)
+  game.player.weapon.durability = 0
+  eq(game:brokenEquippedSlot(), "weapon", "weapon takes priority over armor once both are broken")
+end
+
+function tests.gameRepairEquippedSpendsGoldAndLogsSuccess()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Items.equipWeapon(Items.weapon("sword", 4), game.player)
+  game.player.weapon.durability = 0
+  game.player.gold = 1000
+  local before = game.player.gold
+  local success = game:repairEquipped("weapon")
+  ok(success, "a full purse repairs the broken weapon")
+  eq(game.player.weapon.durability, Durability.MAX, "the weapon comes back to full durability")
+  ok(game.player.gold < before, "gold is spent on the repair")
+  ok(contains(game.log:last(), "repair"), "the repair is logged")
+end
+
+function tests.gameRepairEquippedFailsAndLogsWhenGoldIsShort()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Items.equipWeapon(Items.weapon("sword", 4), game.player)
+  game.player.weapon.durability = 0
+  game.player.gold = 0
+  local success = game:repairEquipped("weapon")
+  eq(success, false, "an empty purse cannot repair")
+  eq(game.player.weapon.durability, 0, "the weapon stays broken")
+  ok(contains(game.log:last(), "cannot repair"), "the failure is logged")
+end
+
+function tests.autopilotRepairsBrokenGearAutomaticallyWhenAffordable()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Items.equipWeapon(Items.weapon("sword", 4), game.player)
+  game.player.weapon.durability = 0
+  game.player.gold = 1000
+  game.level.entities = {}
+  game:choosePlayerAction()
+  eq(game.player.weapon.durability, Durability.MAX,
+    "the autopilot repairs a broken weapon on sight once it can afford to")
+end
+
+function tests.durabilityFieldsSurviveSerialization()
+  local game = Game.new(3)
+  Items.equipWeapon(Items.weapon("sword", 4), game.player)
+  game.player.weapon.durability = 7
+  local path = os.tmpname()
+  game:save(path)
+  local restored = Game.load(path)
+  os.remove(path)
+  eq(restored.player.weapon.durability, 7, "a weapon's own durability survives a save/load round trip")
+  eq(restored.player.weapon.maxDurability, Durability.MAX, "a weapon's max durability survives a save/load round trip")
+end
+
+function tests.renderPanelShowsWornGearOnlyOnceItHasTakenDamage()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Items.equipWeapon(Items.weapon("sword", 4), game.player)
+  ok(not contains(Render.panel(game), "sword ("), "a pristine weapon's label carries no wear indicator")
+  game.player.weapon.durability = 10
+  ok(contains(Render.panel(game), "sword (10/30)"), "a dinged weapon's label reports its remaining durability")
+  game.player.weapon.durability = 0
+  ok(contains(Render.panel(game), "sword (broken)"), "a broken weapon's label says so plainly")
+end
+
+-- disarm.lua: passive trap sense and deliberate disarming.
+
+function tests.disarmSweepDetectsAHiddenTrapWithinOneStepEventuallyAcrossAHandfulOfSeeds()
+  local detected = false
+  for seed = 1, 100 do
+    local level = { traps = { { x = 5, y = 5, effect = "dart", revealed = false } } }
+    if #Disarm.sweep(level, Rng.new(seed), 5, 6) > 0 then detected = true break end
+  end
+  ok(detected, "an adjacent hidden trap is eventually detected across a handful of seeds")
+end
+
+function tests.disarmSweepNeverDetectsATrapTwoStepsAway()
+  for seed = 1, 200 do
+    local level = { traps = { { x = 5, y = 5, effect = "dart", revealed = false } } }
+    eq(#Disarm.sweep(level, Rng.new(seed), 7, 7), 0,
+      "a trap two steps away is never detected regardless of the roll")
+  end
+end
+
+function tests.disarmSweepNeverRedetectsAnAlreadyDetectedOrRevealedTrap()
+  local level = { traps = {
+    { x = 5, y = 5, effect = "dart", revealed = false, detected = true },
+    { x = 5, y = 6, effect = "dart", revealed = true },
+  } }
+  for seed = 1, 50 do
+    eq(#Disarm.sweep(level, Rng.new(seed), 5, 5), 0,
+      "neither an already-detected nor an already-sprung trap is swept again")
+  end
+end
+
+function tests.disarmOddsForClimbWithLevelButNeverReachTheDenominator()
+  local num1, den1 = Disarm.oddsFor({ level = 1 })
+  eq(num1, Disarm.DISARM_BASE_NUMERATOR, "a fresh level-one player rolls the catalog's base odds")
+  local num2, den2 = Disarm.oddsFor({ level = 100 })
+  eq(den2, den1, "the denominator never changes with level")
+  ok(num2 < den2, "even an extremely high level never reaches a guaranteed disarm")
+  eq(num2, Disarm.DISARM_BASE_DENOMINATOR - 1, "the numerator caps a single point shy of the denominator")
+end
+
+function tests.disarmAttemptOnSuccessRemovesTheTrapAndPaysSalvage()
+  local succeeded = false
+  for seed = 1, 300 do
+    local game = stagedGame(seed, arena(21, 11), 3, 6)
+    local trap = { x = 4, y = 6, effect = "dart", revealed = false, detected = true }
+    game.level.traps = { trap }
+    local essenceBefore = game.player.essence
+    local success, line = Disarm.attempt(game, trap)
+    if success then
+      eq(#game.level.traps, 0, "a successfully disarmed trap is removed from the level")
+      ok(game.player.essence > essenceBefore, "a successful disarm pays out salvage essence")
+      ok(contains(line, "disarm"), "the success is reported")
+      succeeded = true
+      break
+    end
+  end
+  ok(succeeded, "disarming eventually succeeds across a handful of seeds")
+end
+
+function tests.disarmAttemptOnFailureSpringsTheTrapOnThePlayer()
+  local failed = false
+  for seed = 1, 300 do
+    local game = stagedGame(seed, arena(21, 11), 3, 6)
+    local trap = { x = 4, y = 6, effect = "dart", revealed = false, detected = true }
+    game.level.traps = { trap }
+    local hpBefore = game.player.hp
+    local success = Disarm.attempt(game, trap)
+    if not success then
+      eq(trap.revealed, true, "a failed disarm springs the trap, revealing it")
+      ok(game.player.hp < hpBefore, "a failed disarm's spring wounds the player exactly like a footstep would")
+      failed = true
+      break
+    end
+  end
+  ok(failed, "disarming eventually fails across a handful of seeds")
+end
+
+function tests.gameDisarmTrapRefusesAnUndetectedOrAlreadySprungTrap()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local undetected = { x = 4, y = 6, effect = "dart", revealed = false }
+  game.level.traps = { undetected }
+  eq(game:disarmTrap(undetected), false, "an undetected trap refuses disarming outright")
+  eq(#game.level.traps, 1, "the untouched trap is still there")
+
+  local sprung = { x = 5, y = 6, effect = "dart", revealed = true, detected = true }
+  eq(game:disarmTrap(sprung), false, "an already-sprung trap refuses disarming outright")
+end
+
+function tests.gameDisarmTrapSucceedsOrSpringsExactlyLikeDisarmAttempt()
+  local sawSuccess, sawFailure = false, false
+  for seed = 1, 300 do
+    if sawSuccess and sawFailure then break end
+    local game = stagedGame(seed, arena(21, 11), 3, 6)
+    local trap = { x = 4, y = 6, effect = "dart", revealed = false, detected = true }
+    game.level.traps = { trap }
+    local hpBefore = game.player.hp
+    if game:disarmTrap(trap) then
+      eq(#game.level.traps, 0, "a successful disarm through the game wrapper removes the trap")
+      sawSuccess = true
+    else
+      eq(trap.revealed, true, "a failed disarm through the game wrapper springs the trap")
+      ok(game.player.hp <= hpBefore, "a failed disarm through the game wrapper can wound the player")
+      sawFailure = true
+    end
+  end
+  ok(sawSuccess, "the game wrapper eventually succeeds across a handful of seeds")
+  ok(sawFailure, "the game wrapper eventually fails across a handful of seeds")
+end
+
+function tests.gameEndPlayerTurnEventuallyDetectsAnAdjacentTrapAcrossAHandfulOfSeeds()
+  local noticed = false
+  for seed = 1, 100 do
+    local game = stagedGame(1, arena(21, 11), 3, 6)
+    game.rng = Rng.new(seed)
+    game.level.traps = { { x = 4, y = 6, effect = "dart", revealed = false } }
+    game:endPlayerTurn()
+    if game.level.traps[1].detected then
+      local reported = false
+      for _, line in ipairs(game.log:recent(6)) do
+        if contains(line, "notice") then reported = true end
+      end
+      ok(reported, "a freshly detected trap is reported somewhere in the turn's log lines")
+      noticed = true
+      break
+    end
+  end
+  ok(noticed, "an adjacent hidden trap is eventually detected during a normal turn across a handful of seeds")
+end
+
+function tests.trapDetectedFieldSurvivesSerialization()
+  local game = Game.new(3)
+  game.level.traps = { { x = 1, y = 1, effect = "dart", revealed = false, detected = true } }
+  local path = os.tmpname()
+  game:save(path)
+  local restored = Game.load(path)
+  os.remove(path)
+  eq(restored.level.traps[1].detected, true, "a trap's detected flag survives a save/load round trip")
+end
+
+function tests.secretsSweepDiscoversAnAdjacentHiddenDoorEventuallyAcrossAHandfulOfSeeds()
+  local discovered = false
+  for seed = 1, 100 do
+    local level = arena(21, 11)
+    level.secretDoors = { { x = 5, y = 5, discovered = false } }
+    if #Secrets.sweep(level, Rng.new(seed), 5, 6) > 0 then discovered = true break end
+  end
+  ok(discovered, "an adjacent secret door is eventually discovered across a handful of seeds")
+end
+
+function tests.secretsSweepNeverDiscoversADoorTwoStepsAway()
+  for seed = 1, 200 do
+    local level = arena(21, 11)
+    level.secretDoors = { { x = 5, y = 5, discovered = false } }
+    eq(#Secrets.sweep(level, Rng.new(seed), 7, 7), 0,
+      "a secret door two steps away is never discovered regardless of the roll")
+  end
+end
+
+function tests.secretsSweepNeverRediscoversAnAlreadyDiscoveredDoor()
+  local level = arena(21, 11)
+  level.secretDoors = { { x = 5, y = 5, discovered = true } }
+  for seed = 1, 50 do
+    eq(#Secrets.sweep(level, Rng.new(seed), 5, 5), 0, "an already-discovered door is never swept again")
+  end
+end
+
+function tests.secretsSweepOpensTheWallIntoAPlainClosedDoorOnDiscovery()
+  local level = arena(21, 11)
+  level.map:set(5, 5, Tiles.WALL)
+  level.secretDoors = { { x = 5, y = 5, discovered = false } }
+  local found
+  for seed = 1, 100 do
+    local door = Secrets.sweep(level, Rng.new(seed), 5, 6)[1]
+    if door then found = door break end
+  end
+  ok(found ~= nil, "the door is eventually discovered")
+  eq(found.discovered, true, "the discovered door's own flag is flipped")
+  eq(level.map:get(5, 5), Tiles.DOOR_CLOSED, "the wall tile becomes a plain closed door once discovered")
+end
+
+local function orthogonalNeighbours(x, y)
+  return { { x + 1, y }, { x - 1, y }, { x, y + 1 }, { x, y - 1 } }
+end
+
+local function reachableFrom(map, fromX, fromY, x, y)
+  return Astar.find(map, fromX, fromY, x, y, function(cx, cy)
+    return not map:isPassable(cx, cy, false)
+  end) ~= nil
+end
+
+function tests.builderOccasionallyPlacesASecretDoorGuardingAGenuinelyUnreachableAlcove()
+  local checked = 0
+  for seed = 1, 200 do
+    local level = Builder.build(3, Rng.new(seed), {})
+    if #level.secretDoors == 1 then
+      checked = checked + 1
+      local door = level.secretDoors[1]
+      eq(door.discovered, false, "a freshly built floor's secret door always starts undiscovered")
+      eq(level.map:get(door.x, door.y), Tiles.WALL, "an undiscovered secret door still reads as an ordinary wall")
+
+      -- Exactly one of the door's own orthogonal neighbours is the alcove
+      -- itself: real floor, yet unreachable from the stairs while the door
+      -- between them is still a plain, impassable wall.
+      local alcoveX, alcoveY
+      for _, n in ipairs(orthogonalNeighbours(door.x, door.y)) do
+        local nx, ny = n[1], n[2]
+        if level.map:isWalkable(nx, ny) and not reachableFrom(level.map, level.upX, level.upY, nx, ny) then
+          alcoveX, alcoveY = nx, ny
+        end
+      end
+      ok(alcoveX ~= nil, "seed " .. seed .. ": the secret door hides a genuinely unreachable alcove cell")
+      if alcoveX then
+        level.map:set(door.x, door.y, Tiles.DOOR_CLOSED)
+        ok(reachableFrom(level.map, level.upX, level.upY, alcoveX, alcoveY),
+          "seed " .. seed .. ": the same alcove opens up the instant its door is discovered")
+      end
+      if checked >= 10 then break end
+    end
+  end
+  ok(checked > 0, "at least one of the sampled seeds actually places a secret door")
+end
+
+function tests.builderNeverPlacesASecretDoorAboveDepthTwo()
+  for seed = 1, 10 do
+    local level = Builder.build(1, Rng.new(seed), {})
+    eq(#level.secretDoors, 0, "no secret door appears on the first floor")
+  end
+end
+
+function tests.gameEndPlayerTurnEventuallyDiscoversAnAdjacentSecretDoorAcrossAHandfulOfSeeds()
+  local discovered = false
+  for seed = 1, 100 do
+    local game = stagedGame(1, arena(21, 11), 3, 6)
+    game.rng = Rng.new(seed)
+    game.level.map:set(4, 6, Tiles.WALL)
+    game.level.secretDoors = { { x = 4, y = 6, discovered = false } }
+    game:endPlayerTurn()
+    if game.level.secretDoors[1].discovered then
+      local reported = false
+      for _, line in ipairs(game.log:recent(6)) do
+        if contains(line, "hidden door") then reported = true end
+      end
+      ok(reported, "a freshly discovered secret door is reported somewhere in the turn's log lines")
+      eq(game.level.map:get(4, 6), Tiles.DOOR_CLOSED, "the discovered door's tile is a plain closed door")
+      discovered = true
+      break
+    end
+  end
+  ok(discovered, "an adjacent secret door is eventually discovered over a handful of seeded turns")
+end
+
+function tests.secretDoorFieldsSurviveSerialization()
+  local game = Game.new(5)
+  game.level.secretDoors = { { x = 3, y = 3, discovered = false } }
+  local path = os.tmpname()
+  game:save(path)
+  local restored = Game.load(path)
+  os.remove(path)
+  eq(#restored.level.secretDoors, 1, "the secret door list survives a save/load round trip")
+  eq(restored.level.secretDoors[1].discovered, false, "a secret door's discovered flag survives a round trip")
+end
+
+function tests.chestsNewLootAlwaysIncludesGoldAndExactlyOneGearPiece()
+  for seed = 1, 30 do
+    local chest = Chests.new(Rng.new(seed), 3)
+    local goldCount, gearCount = 0, 0
+    for _, item in ipairs(chest.loot) do
+      if item.kind == Items.GOLD then goldCount = goldCount + 1 end
+      if item.kind == Items.WEAPON or item.kind == Items.ARMOR then gearCount = gearCount + 1 end
+    end
+    eq(goldCount, 1, "every chest carries exactly one pile of gold")
+    eq(gearCount, 1, "every chest carries exactly one weapon or armor piece")
+  end
+end
+
+function tests.chestsNewNeverRollsTrappedOnAnUnlockedChest()
+  local sawLockedTrapped, sawLockedUntrapped = false, false
+  for seed = 1, 100 do
+    local chest = Chests.new(Rng.new(seed), 3)
+    ok(chest.locked or not chest.trapped, "an unlocked chest is never also trapped")
+    if chest.locked and chest.trapped then sawLockedTrapped = true end
+    if chest.locked and not chest.trapped then sawLockedUntrapped = true end
+  end
+  ok(sawLockedTrapped, "a locked chest eventually rolls trapped across a handful of seeds")
+  ok(sawLockedUntrapped, "a locked chest eventually rolls untrapped across a handful of seeds")
+end
+
+function tests.chestsIsLockedIsTrueForALockedUnopenedChestAndFalseOnceOpened()
+  local chest = { locked = true, trapped = false, opened = false, loot = { Items.gold(5) } }
+  eq(Chests.isLocked(chest), true, "a locked, unopened chest reports locked")
+  chest.opened = true
+  eq(Chests.isLocked(chest), false, "an opened chest never reports locked, whatever its own flag says")
+end
+
+function tests.chestsOpenGrantsEveryLootItemAndEmptiesTheChest()
+  local player = { inventory = {} }
+  local chest = { locked = false, trapped = false, opened = false, loot = { Items.gold(5), Items.potionOf("heal") } }
+  local success, line = Chests.open(player, chest)
+  ok(success, "opening an unlocked chest succeeds")
+  eq(#player.inventory, 2, "every loot item lands in the inventory")
+  eq(chest.opened, true, "the chest is marked opened")
+  eq(#chest.loot, 0, "the chest's own loot list is emptied")
+  ok(contains(line, "open"), "the opening is reported")
+end
+
+function tests.chestsOpenRefusesAnAlreadyEmptiedChest()
+  local player = { inventory = {} }
+  local chest = { locked = false, trapped = false, opened = true, loot = {} }
+  local success, line = Chests.open(player, chest)
+  eq(success, false, "opening an already-emptied chest fails")
+  eq(#player.inventory, 0, "nothing is granted from an already-emptied chest")
 end
 
 local order = {
