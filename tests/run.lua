@@ -10855,6 +10855,525 @@ end
 function tests.builderCanRollATomeOfTheConfuseSpellSomewhereInARangeOfSeeds()
   local found = false
   for seed = 1, 100 do
+    local level = Builder.build(6, Rng.new(seed), {})
+    for _, ground in ipairs(level.floorItems) do
+      if ground.item.kind == Items.TOME and ground.item.spell == "confuse" then found = true end
+    end
+    if found then break end
+  end
+  ok(found, "the confuse tome is reachable dungeon loot within a reasonable seed range")
+end
+
+function tests.builderCanRollAConfuseTrapOrTrapKitSomewhereInARangeOfSeeds()
+  local sawTrap, sawKit = false, false
+  for seed = 1, 100 do
+    local level = Builder.build(3, Rng.new(seed), {})
+    for _, trap in ipairs(level.traps) do
+      if trap.effect == "confuse" then sawTrap = true end
+    end
+    for _, ground in ipairs(level.floorItems) do
+      if ground.item.kind == Items.KIT and ground.item.effect == "confuse" then sawKit = true end
+    end
+    if sawTrap and sawKit then break end
+  end
+  ok(sawTrap, "a builder-placed confuse trap is reachable within a reasonable seed range")
+  ok(sawKit, "a confuse trap kit is reachable dungeon loot within a reasonable seed range")
+end
+
+function tests.builderCanRollABlindTrapOrTrapKitSomewhereInARangeOfSeeds()
+  local sawTrap, sawKit = false, false
+  for seed = 1, 100 do
+    local level = Builder.build(3, Rng.new(seed), {})
+    for _, trap in ipairs(level.traps) do
+      if trap.effect == "blind" then sawTrap = true end
+    end
+    for _, ground in ipairs(level.floorItems) do
+      if ground.item.kind == Items.KIT and ground.item.effect == "blind" then sawKit = true end
+    end
+    if sawTrap and sawKit then break end
+  end
+  ok(sawTrap, "a builder-placed blind trap is reachable within a reasonable seed range")
+  ok(sawKit, "a blind trap kit is reachable dungeon loot within a reasonable seed range")
+end
+
+function tests.builderCanRollAStunTrapOrTrapKitSomewhereInARangeOfSeeds()
+  local sawTrap, sawKit = false, false
+  for seed = 1, 100 do
+    local level = Builder.build(3, Rng.new(seed), {})
+    for _, trap in ipairs(level.traps) do
+      if trap.effect == "stun" then sawTrap = true end
+    end
+    for _, ground in ipairs(level.floorItems) do
+      if ground.item.kind == Items.KIT and ground.item.effect == "stun" then sawKit = true end
+    end
+    if sawTrap and sawKit then break end
+  end
+  ok(sawTrap, "a builder-placed stun trap is reachable within a reasonable seed range")
+  ok(sawKit, "a stun trap kit is reachable dungeon loot within a reasonable seed range")
+end
+
+function tests.spellsBlindAppliesTheBlindStatusAndSpendsItsListedManaCost()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Spells.learn(game.player, "blind")
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 6, 6, 1)
+  game.level.entities = { orc }
+  local manaBefore = game.player.mana
+  local success = game:castSpell("blind", orc)
+  ok(success, "casting a learned, in-range blind succeeds")
+  ok(Status.has(orc, Status.BLIND), "the target now carries the blind status")
+  eq(game.player.mana, manaBefore - Spells.catalog.blind.cost, "casting blind spends exactly its listed mana cost")
+end
+
+function tests.spellsBlindFailsOutOfRangeAndSpendsNothing()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Spells.learn(game.player, "blind")
+  local farOrc = Monsters.create(Monsters.byKey.orc, 1, 19, 6, 1)
+  game.level.entities = { farOrc }
+  local manaBefore = game.player.mana
+  local success = game:castSpell("blind", farOrc)
+  ok(not success, "blind cast beyond its range fails")
+  ok(not Status.has(farOrc, Status.BLIND), "a failed cast never applies the status")
+  eq(game.player.mana, manaBefore, "a failed cast spends no mana")
+end
+
+function tests.builderCanRollATomeOfTheBlindSpellSomewhereInARangeOfSeeds()
+  -- Range widened from 100 to 200: adding "cleanse" to Builder's `learnable`
+  -- list shifted rng:range(1, #learnable)'s result for effectively every
+  -- seed, and the nearest blind tome under the new list happens to sit at
+  -- seed 111 - still well within "a reasonable seed range".
+  local found = false
+  for seed = 1, 200 do
+    local level = Builder.build(6, Rng.new(seed), {})
+    for _, ground in ipairs(level.floorItems) do
+      if ground.item.kind == Items.TOME and ground.item.spell == "blind" then found = true end
+    end
+    if found then break end
+  end
+  ok(found, "the blind tome is reachable dungeon loot within a reasonable seed range")
+end
+
+-- WEAKEN previously only ever flowed toward the player (shaman's tryCurse,
+-- a cursed shrine) - see spells.lua's weaken entry for the missing other
+-- direction this closes.
+function tests.spellsWeakenAppliesTheWeakenStatusAndReducesAttackAndSpendsItsListedManaCost()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Spells.learn(game.player, "weaken")
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 6, 6, 1)
+  game.level.entities = { orc }
+  local effectiveAttackBefore = orc:effectiveAttack()
+  local manaBefore = game.player.mana
+  local success = game:castSpell("weaken", orc)
+  ok(success, "casting a learned, in-range weaken succeeds")
+  ok(Status.has(orc, Status.WEAKEN), "the target now carries the weaken status")
+  eq(orc:effectiveAttack() + 3, effectiveAttackBefore, "weaken's -3 attack modifier is folded into the target's effective attack")
+  eq(game.player.mana, manaBefore - Spells.catalog.weaken.cost, "casting weaken spends exactly its listed mana cost")
+end
+
+function tests.spellsWeakenFailsOutOfRangeAndSpendsNothing()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Spells.learn(game.player, "weaken")
+  local farOrc = Monsters.create(Monsters.byKey.orc, 1, 19, 6, 1)
+  game.level.entities = { farOrc }
+  local manaBefore = game.player.mana
+  local success = game:castSpell("weaken", farOrc)
+  ok(not success, "weaken cast beyond its range fails")
+  ok(not Status.has(farOrc, Status.WEAKEN), "a failed cast never applies the status")
+  eq(game.player.mana, manaBefore, "a failed cast spends no mana")
+end
+
+function tests.builderCanRollATomeOfTheWeakenSpellSomewhereInARangeOfSeeds()
+  -- Range widened from 100 to 200: adding "cleanse" to Builder's `learnable`
+  -- list shifted rng:range(1, #learnable)'s result for effectively every
+  -- seed, and the nearest weaken tome under the new list happens to sit at
+  -- seed 127 - still well within "a reasonable seed range".
+  local found = false
+  for seed = 1, 200 do
+    local level = Builder.build(6, Rng.new(seed), {})
+    for _, ground in ipairs(level.floorItems) do
+      if ground.item.kind == Items.TOME and ground.item.spell == "weaken" then found = true end
+    end
+    if found then break end
+  end
+  ok(found, "the weaken tome is reachable dungeon loot within a reasonable seed range")
+end
+
+function tests.spellsCleanseLiftsHostileStatusesAndDiseaseOnTheCasterAndSpendsItsListedManaCost()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Spells.learn(game.player, "cleanse")
+  Status.apply(game.player, Status.POISON, 5, 2)
+  Status.apply(game.player, Status.CONFUSE, 6, 1)
+  Disease.infect(game.player, Disease.PARASITES)
+  local manaBefore = game.player.mana
+  local success = game:castSpell("cleanse")
+  ok(success, "casting a learned, self-targeted cleanse succeeds")
+  ok(not Status.has(game.player, Status.POISON), "cleanse lifts poison from the caster")
+  ok(not Status.has(game.player, Status.CONFUSE), "cleanse lifts confusion from the caster")
+  ok(not Disease.isInfected(game.player), "cleanse also lifts an active infection, like the cure potion does")
+  eq(game.player.mana, manaBefore - Spells.catalog.cleanse.cost, "casting cleanse spends exactly its listed mana cost")
+  ok(contains(game.log:last(), "affliction lifts") and contains(game.log:last(), "fades"),
+    "the single logged line credits both the disease and the status effects it lifted")
+end
+
+function tests.spellsCleanseWithNothingHostileStillSucceedsAndSpendsMana()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Spells.learn(game.player, "cleanse")
+  local manaBefore = game.player.mana
+  local success = game:castSpell("cleanse")
+  ok(success, "casting cleanse with nothing to lift still succeeds, exactly like heal or shield always do")
+  eq(game.player.mana, manaBefore - Spells.catalog.cleanse.cost, "mana is still spent even when there was nothing to cleanse")
+  ok(contains(game.log:last(), "nothing to cleanse"), "the logged line is honest that nothing was actually lifted")
+end
+
+function tests.builderCanRollATomeOfTheCleanseSpellSomewhereInARangeOfSeeds()
+  local found = false
+  for seed = 1, 200 do
+    local level = Builder.build(6, Rng.new(seed), {})
+    for _, ground in ipairs(level.floorItems) do
+      if ground.item.kind == Items.TOME and ground.item.spell == "cleanse" then found = true end
+    end
+    if found then break end
+  end
+  ok(found, "the cleanse tome is reachable dungeon loot within a reasonable seed range")
+end
+
+function tests.spellsLevitateAppliesTheLevitateStatusToTheCasterAndSpendsItsListedManaCost()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Spells.learn(game.player, "levitate")
+  local manaBefore = game.player.mana
+  local success = game:castSpell("levitate")
+  ok(success, "casting a learned, self-targeted levitate succeeds")
+  ok(Status.has(game.player, Status.LEVITATE), "the caster now carries the levitate status")
+  eq(game.player.mana, manaBefore - Spells.catalog.levitate.cost, "casting levitate spends exactly its listed mana cost")
+end
+
+function tests.builderCanRollATomeOfTheLevitateSpellSomewhereInARangeOfSeeds()
+  -- Range widened from 100 to 200: adding "weaken" to Builder's `learnable`
+  -- list shifted rng:range(1, #learnable)'s result for effectively every
+  -- seed (a longer list moves the modulo, not just adds a new bucket at the
+  -- end), and the nearest levitate tome under the new list happens to sit
+  -- at seed 173 - still well within "a reasonable seed range", just a
+  -- different one than before this list grew by one entry.
+  local found = false
+  for seed = 1, 200 do
+    local level = Builder.build(6, Rng.new(seed), {})
+    for _, ground in ipairs(level.floorItems) do
+      if ground.item.kind == Items.TOME and ground.item.spell == "levitate" then found = true end
+    end
+    if found then break end
+  end
+  ok(found, "the levitate tome is reachable dungeon loot within a reasonable seed range")
+end
+
+function tests.polymorphPoolExcludesTheShopkeeperAndRespectsDepth()
+  local shallow = Polymorph.pool(1)
+  local shallowKeys = {}
+  for _, spec in ipairs(shallow) do shallowKeys[spec.key] = true end
+  ok(shallowKeys.rat and shallowKeys.bat and shallowKeys.kobold, "a depth-one pool offers every depth-one species")
+  ok(not shallowKeys.orc, "a depth-one pool excludes a species that first appears deeper")
+
+  local deep = Polymorph.pool(4)
+  local deepKeys = {}
+  for _, spec in ipairs(deep) do deepKeys[spec.key] = true end
+  ok(deepKeys.zombie and deepKeys.necromancer, "a depth-four pool offers species that first appear at depth four")
+  ok(not deepKeys.shopkeeper, "the shopkeeper is never offered by a polymorph, at any depth")
+end
+
+function tests.polymorphTransformPicksADifferentSpeciesAndPreservesTheHpFraction()
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 5, 5, 1)
+  rat.hp = 2
+  local pool = Polymorph.pool(1)
+  local spec = Polymorph.transform(rat, Rng.new(7), pool)
+  ok(spec ~= nil, "a pool with other species on offer always yields a transform")
+  ok(rat.species ~= "rat", "the entity is no longer its original species")
+  eq(rat.species, spec.key, "the entity's species now matches whatever transform returned")
+  eq(rat.maxHp, spec.hp, "max hp is replaced wholesale from the new species")
+  local expectedHp = math.max(1, math.floor(spec.hp * 0.5 + 0.5))
+  eq(rat.hp, expectedHp, "current hp is rescaled to the same fraction the old body carried")
+  eq(rat.attack, spec.attack, "attack is replaced wholesale from the new species")
+  eq(rat.ai, spec.ai, "ai behaviour is replaced wholesale from the new species")
+end
+
+function tests.polymorphTransformReturnsNilWhenThePoolOffersNothingButTheCurrentSpecies()
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 5, 5, 1)
+  local spec = Polymorph.transform(rat, Rng.new(3), { Monsters.byKey.rat })
+  ok(spec == nil, "a pool with nothing but the entity's own species transforms nothing")
+  eq(rat.species, "rat", "the entity is left untouched when there is nowhere else to go")
+end
+
+function tests.spellsPolymorphTransformsTheTargetAndSpendsItsListedManaCost()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Spells.learn(game.player, "polymorph")
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 6, 6, 1)
+  game.level.entities = { orc }
+  local manaBefore = game.player.mana
+  local success = game:castSpell("polymorph", orc)
+  ok(success, "casting a learned, in-range polymorph succeeds")
+  ok(orc.species ~= "orc", "the target's species actually changed")
+  eq(game.player.mana, manaBefore - Spells.catalog.polymorph.cost, "casting polymorph spends exactly its listed mana cost")
+end
+
+function tests.spellsPolymorphFailsOutOfRangeAndSpendsNothing()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Spells.learn(game.player, "polymorph")
+  local farOrc = Monsters.create(Monsters.byKey.orc, 1, 19, 6, 1)
+  game.level.entities = { farOrc }
+  local manaBefore = game.player.mana
+  local success = game:castSpell("polymorph", farOrc)
+  ok(not success, "polymorph cast beyond its range fails")
+  eq(farOrc.species, "orc", "a failed cast never transforms the target")
+  eq(game.player.mana, manaBefore, "a failed cast spends no mana")
+end
+
+function tests.builderCanRollATomeOfThePolymorphSpellSomewhereInARangeOfSeeds()
+  -- Range widened from 100 to 200: adding "cleanse" to Builder's `learnable`
+  -- list shifted rng:range(1, #learnable)'s result for effectively every
+  -- seed, and the nearest polymorph tome under the new list happens to sit
+  -- at seed 183 - still well within "a reasonable seed range".
+  local found = false
+  for seed = 1, 200 do
+    local level = Builder.build(6, Rng.new(seed), {})
+    for _, ground in ipairs(level.floorItems) do
+      if ground.item.kind == Items.TOME and ground.item.spell == "polymorph" then found = true end
+    end
+    if found then break end
+  end
+  ok(found, "the polymorph tome is reachable dungeon loot within a reasonable seed range")
+end
+
+function tests.blocksCanReceiveRefusesWallsDoorsVaultsGatesBlocksAndEntities()
+  local level = arena(9, 9)
+  level.map:set(4, 4, Tiles.WALL)
+  eq(Blocks.canReceive(level, 4, 4), false, "a wall cannot receive a shoved block")
+  level.map:set(4, 5, Tiles.DOOR_CLOSED)
+  eq(Blocks.canReceive(level, 4, 5), false, "a closed door cannot receive a shoved block")
+  level.map:set(4, 6, Tiles.VAULT_DOOR)
+  eq(Blocks.canReceive(level, 4, 6), false, "a sealed vault door cannot receive a shoved block")
+  level.map:set(4, 7, Tiles.GATE_CLOSED)
+  eq(Blocks.canReceive(level, 4, 7), false, "a closed gate cannot receive a shoved block")
+  level.blocks = { { x = 3, y = 3 } }
+  eq(Blocks.canReceive(level, 3, 3), false, "a cell already holding another block cannot receive a shove")
+  level.entities = { Entity.new({ x = 3, y = 4, glyph = "r", name = "rat", kind = "monster", hp = 5, attack = 1, defense = 0 }) }
+  eq(Blocks.canReceive(level, 3, 4), false, "a cell occupied by a living entity cannot receive a shove")
+  eq(Blocks.canReceive(level, 5, 5), true, "plain open floor can receive a shoved block")
+  eq(Blocks.canReceive(level, 20, 20), false, "an out-of-bounds cell cannot receive a shove")
+end
+
+function tests.blocksPushRelocatesABlockOntoPlainFloor()
+  local level = arena(9, 9)
+  local block = { x = 3, y = 3 }
+  level.blocks = { block }
+  local pushed, line = Blocks.push(level, block, 1, 0)
+  eq(pushed, true, "a shove onto open floor succeeds")
+  eq(block.x, 4, "the block's own x relocates by the shove")
+  eq(block.y, 3, "the block's own y is unchanged by a purely horizontal shove")
+  ok(contains(line, "shove"), "a plain shove is logged as a shove")
+end
+
+function tests.blocksPushIntoLavaSolidifiesTheCellAndConsumesTheBlock()
+  local level = arena(9, 9)
+  level.map:set(4, 3, Tiles.LAVA)
+  local block = { x = 3, y = 3 }
+  level.blocks = { block }
+  local pushed, line = Blocks.push(level, block, 1, 0)
+  eq(pushed, true, "a shove into lava still succeeds")
+  eq(level.map:get(4, 3), Tiles.RUBBLE, "the lava cell solidifies into rubble")
+  eq(#level.blocks, 0, "the block is consumed by the lava it just quenched")
+  ok(contains(line, "lava"), "quenching lava is logged")
+end
+
+function tests.blocksPushIntoAChasmFillsTheGapAndConsumesTheBlock()
+  local level = arena(9, 9)
+  level.map:set(4, 3, Tiles.CHASM)
+  local block = { x = 3, y = 3 }
+  level.blocks = { block }
+  local pushed, line = Blocks.push(level, block, 1, 0)
+  eq(pushed, true, "a shove into a chasm still succeeds")
+  eq(level.map:get(4, 3), Tiles.FLOOR, "the chasm cell fills into plain floor")
+  eq(#level.blocks, 0, "the block is consumed filling in the chasm")
+  ok(contains(line, "chasm"), "filling a chasm is logged")
+end
+
+function tests.blocksPushFailsAgainstAWallOrAnotherBlockOrAnEntity()
+  local level = arena(9, 9)
+  level.map:set(4, 3, Tiles.WALL)
+  local block = { x = 3, y = 3 }
+  level.blocks = { block }
+  eq(Blocks.push(level, block, 1, 0), false, "a shove into a wall fails outright")
+  eq(block.x, 3, "a failed shove leaves the block exactly where it was")
+
+  level.map:set(4, 3, Tiles.FLOOR)
+  level.blocks = { block, { x = 4, y = 3 } }
+  eq(Blocks.push(level, block, 1, 0), false, "a shove into another block fails outright")
+
+  level.blocks = { block }
+  level.entities = { Entity.new({ x = 4, y = 3, glyph = "r", name = "rat", kind = "monster", hp = 5, attack = 1, defense = 0 }) }
+  eq(Blocks.push(level, block, 1, 0), false, "a shove into a living entity fails outright")
+end
+
+function tests.blocksUpdateGatesOpensOnlyWhileAPlatedBlockHoldsItAndReseals()
+  local level = arena(9, 9)
+  level.map:set(6, 3, Tiles.GATE_CLOSED)
+  level.gates = { { x = 6, y = 3, open = false } }
+  level.plates = { { x = 4, y = 3, gateX = 6, gateY = 3 } }
+  local block = { x = 3, y = 3 }
+  level.blocks = { block }
+  Blocks.updateGates(level)
+  eq(level.map:get(6, 3), Tiles.GATE_CLOSED, "the gate stays sealed with no block on its plate")
+  eq(level.gates[1].open, false, "the gate's own open field matches its sealed tile")
+
+  Blocks.push(level, block, 1, 0)
+  Blocks.updateGates(level)
+  eq(level.map:get(6, 3), Tiles.GATE_OPEN, "the gate swings open the instant its plate takes the block's weight")
+  eq(level.gates[1].open, true, "the gate's own open field matches its opened tile")
+
+  Blocks.push(level, block, 1, 0)
+  Blocks.updateGates(level)
+  eq(level.map:get(6, 3), Tiles.GATE_CLOSED, "the gate reseals the instant the block is shoved off its plate")
+  eq(level.gates[1].open, false, "the gate's own open field matches its resealed tile")
+end
+
+function tests.movePlayerShovesABlockAheadAndTheGateItHoldsOpenReactsImmediately()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.map:set(6, 6, Tiles.GATE_CLOSED)
+  game.level.gates = { { x = 6, y = 6, open = false } }
+  game.level.plates = { { x = 5, y = 6, gateX = 6, gateY = 6 } }
+  game.level.blocks = { { x = 4, y = 6 } }
+  game:movePlayer(1, 0)
+  eq(game.player.x, 4, "the player steps into the cell the block just vacated")
+  eq(game.level.blocks[1].x, 5, "the shove relocates the block by exactly one cell")
+  eq(game.level.blocks[1].y, 6, "the shove does not drift off the push axis")
+  eq(game.level.map:get(6, 6), Tiles.GATE_OPEN, "the linked gate opens the instant the block lands on its plate")
+  ok(contains(game.log:last(), "shove"), "shoving the block is logged")
+end
+
+function tests.movePlayerCannotShoveABlockIntoAWallAndDoesNotMoveEither()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.map:set(5, 6, Tiles.WALL)
+  game.level.blocks = { { x = 4, y = 6 } }
+  local moved = game:movePlayer(1, 0)
+  eq(moved, false, "the player's own step fails along with the blocked shove")
+  eq(game.player.x, 3, "the player does not move when the shove it would trigger fails")
+  eq(game.level.blocks[1].x, 4, "the block stays put when its shove fails")
+end
+
+function tests.movePlayerCannotShoveOneBlockIntoAnother()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.blocks = { { x = 4, y = 6 }, { x = 5, y = 6 } }
+  local moved = game:movePlayer(1, 0)
+  eq(moved, false, "shoving a block into another block fails the whole step")
+  eq(game.player.x, 3, "the player does not move when the chained shove fails")
+end
+
+function tests.movePlayerSwapsPlacesWithItsOwnCompanionInsteadOfAttackingIt()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local hound = Companions.summon(game, "hound")
+  local hpBefore = hound.hp
+  game:movePlayer(1, 0)
+  eq(game.player.x, 6, "the player steps onto the cell its companion just vacated")
+  eq(game.player.y, 5, "the player's row is unchanged by the swap")
+  eq(hound.x, 5, "the companion is displaced onto the player's old cell")
+  eq(hound.y, 5, "the companion's row is unchanged by the swap")
+  eq(hound.hp, hpBefore, "swapping past a companion never damages it")
+  ok(contains(game.log:last(), "swap"), "swapping past an ally is logged")
+end
+
+function tests.movePlayerSwapsPlacesWithAHiredHirelingToo()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local sellsword = Mercenaries.hire(game, "sellsword")
+  local hpBefore = sellsword.hp
+  game:movePlayer(1, 0)
+  eq(sellsword.x, 5, "a hireling is displaced by a swap exactly like a companion, never attacked")
+  eq(sellsword.hp, hpBefore, "swapping past a hireling never damages it")
+end
+
+function tests.adjacentMonsterSkipsTheBondedCompanionAndFindsARealHostileInstead()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  Companions.summon(game, "hound")
+  local rat = Monsters.create(Monsters.byKey.rat, 50, 5, 6, 1)
+  game.level.entities[#game.level.entities + 1] = rat
+  eq(game:adjacentMonster(), rat, "the autopilot's melee target skips its own companion and finds the hostile rat")
+end
+
+function tests.adjacentMonsterReturnsNilWhenOnlyAnAllyStandsNextToThePlayer()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  Companions.summon(game, "hound")
+  eq(game:adjacentMonster(), nil, "a bonded companion alone never counts as a melee target")
+end
+
+function tests.adjacentMonsterAlsoSkipsAThrallStandingNextToThePlayer()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local thrall = Entity.new({ id = 99, x = 6, y = 5, glyph = "z", name = "raised thrall", kind = "thrall",
+    hp = 5, attack = 2, defense = 0 })
+  game.level.entities[#game.level.entities + 1] = thrall
+  eq(game:adjacentMonster(), nil, "a raised thrall standing next to the player is never a melee target either")
+end
+
+function tests.choosePlayerActionNeverAttacksItsOwnBondedCompanionEvenWithNothingElseToDo()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local hound = Companions.summon(game, "hound")
+  local hpBefore = hound.hp
+  game:choosePlayerAction()
+  eq(hound.hp, hpBefore, "the autopilot never bumps its own companion into a melee attack")
+end
+
+function tests.aStarNeverRoutesAMonsterThroughABlockedCell()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  for y = 2, 10 do game.level.map:set(11, y, Tiles.WALL) end
+  game.level.map:set(11, 6, Tiles.FLOOR)
+  game.level.blocks = { { x = 11, y = 6 } }
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 13, 6, 1)
+  game.level.entities = { orc }
+  Ai.act(game, orc)
+  ok(not (orc.x == 11 and orc.y == 6), "a chasing monster never steps onto a cell a block occupies")
+  eq(orc.x, 13, "with the single gap blocked, the chaser has no route and holds its ground")
+  eq(orc.y, 6, "the chaser's y is likewise unchanged with no route available")
+end
+
+function tests.playerPathToNeverRoutesThroughABlockedCell()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  for y = 2, 10 do game.level.map:set(11, y, Tiles.WALL) end
+  game.level.map:set(11, 6, Tiles.FLOOR)
+  game.level.blocks = { { x = 11, y = 6 } }
+  local path = game:playerPathTo(15, 6)
+  eq(path, nil, "no path is found when the only corridor cell is occupied by a block")
+end
+
+function tests.gatesAndBlocksStayOffFloorsAboveDepthTwo()
+  for seed = 1, 4 do
+    for depth = 1, 2 do
+      local level = Builder.build(depth, Rng.new(seed), {})
+      eq(#level.gates, 0, "no gate appears above depth three")
+      eq(#level.blocks, 0, "no pushable block appears above depth three")
+      eq(#level.plates, 0, "no pressure plate appears above depth three")
+    end
+  end
+end
+
+-- Depth 5 cycles to the rooms generator (see gen/init.lua's Gen.order),
+-- the one that actually carves the doorway pinch points this puzzle needs;
+-- depths 3-4 cycle to cellular/drunkard caves that essentially never have
+-- one, so the gate's own depth >= 3 gate is exercised here rather than at
+-- depth three itself, exactly like vaults.lua's own test picks depth five.
+function tests.builderOccasionallyPlacesAGateBlockPuzzleOnceADoorwayIsAvailable()
+  local found = false
+  for seed = 1, 200 do
+    local level = Builder.build(5, Rng.new(seed), {})
+    if #level.gates == 1 then
+      found = true
+      eq(#level.plates, 1, "a placed gate always comes with exactly one linked plate")
+      eq(#level.blocks, 1, "a placed gate always comes with exactly one pushable block")
+      local gate, plate, block = level.gates[1], level.plates[1], level.blocks[1]
+      eq(plate.gateX, gate.x, "the plate's gate link matches the placed gate's x")
+      eq(plate.gateY, gate.y, "the plate's gate link matches the placed gate's y")
+      eq(level.map:get(gate.x, gate.y), Tiles.GATE_CLOSED, "the gate starts sealed on its own tile")
+      local dx, dy = plate.x - block.x, plate.y - block.y
+      ok((dx == 0 and math.abs(dy) == 1) or (dy == 0 and math.abs(dx) == 1),
+        "the block always starts exactly one cardinal step from its plate")
+      local treasureFound
+      for _, ground in ipairs(level.floorItems) do
+        if ground.item.name and ground.item.name:find("gate%-forged", 1) then treasureFound = ground.item end
+      end
+      ok(treasureFound ~= nil, "the puzzle's guaranteed treasure is placed somewhere on the floor")
 end
 
 local order = {
