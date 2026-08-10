@@ -10682,6 +10682,179 @@ function tests.infightingStrikeEmitsNoiseThatCanStirADormantBystanderNotInvolved
     bystander.awareness = Stealth.DORMANT
     game.level.entities = { goblin, orc, bystander }
     Infighting.strike(game, goblin, orc)
+    if bystander.awareness ~= Stealth.DORMANT then stirred = true; break end
+  end
+  ok(stirred, "two monsters brawling among themselves are exactly as loud as any other fight")
+end
+
+-- Same shape of gap as the Noise fix just above, but for a different
+-- Combat.attack side effect: Game:applyEliteOnHit (a vampiric elite's
+-- lifesteal, a chilling elite's status rider) was only ever wired into
+-- Game:monsterMelee/monsterShoot, both of which assume the victim is the
+-- player - its log lines even hardcoded the word "you". An elite fighting a
+-- rival monster or the player's own companion/hireling/thrall through
+-- Infighting.strike got neither the heal nor the rider at all.
+function tests.infightingStrikeAppliesTheAttackersEliteLifestealAgainstAnyDefenderNotJustThePlayer()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 10, 6, 1)
+  orc.elite, orc.eliteAffixes = true, { "vampiric" }
+  orc.hp = orc.maxHp - 5
+  local wolf = Entity.new({
+    id = 2, x = 11, y = 6, glyph = "d", name = "wolf", kind = "companion",
+    hp = 20, maxHp = 20, attack = 2, defense = 0, speed = 100,
+  })
+  game.level.entities = { orc, wolf }
+  local before = orc.hp
+  Infighting.strike(game, orc, wolf)
+  ok(orc.hp > before, "a vampiric elite heals on an infighting hit exactly as it does against the player")
+  ok(contains(game.log:last(), "wolf"), "the drain message names the actual victim, not the player")
+  ok(not contains(game.log:last(), "you"), "a wolf being drained is never described as draining \"you\"")
+end
+
+function tests.infightingStrikeAppliesTheAttackersEliteOnHitRiderAgainstAnyDefenderNotJustThePlayer()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 10, 6, 1)
+  orc.elite, orc.eliteAffixes = true, { "chilling" }
+  local wolf = Entity.new({
+    id = 2, x = 11, y = 6, glyph = "d", name = "wolf", kind = "hireling",
+    hp = 20, maxHp = 20, attack = 2, defense = 0, speed = 100,
+  })
+  game.level.entities = { orc, wolf }
+  ok(not Status.has(wolf, Status.SLOW), "the hireling starts unslowed")
+  Infighting.strike(game, orc, wolf)
+  ok(Status.has(wolf, Status.SLOW), "a chilling elite's infighting hit slows its actual victim, not just the player")
+  ok(contains(game.log:last(), "wolf"), "the rider message names the actual victim, not the player")
+end
+
+-- Game:monsterMelee has always rolled a bite-carrying species' disease.lua
+-- infection against the player; Infighting.strike shares every other one of
+-- monsterMelee's hooks (Combat.attack, applyEliteOnHit, emitNoise) but never
+-- this one, so a rat fighting a rival monster or the player's own
+-- companion/hireling/thrall through infighting could never actually spread
+-- its parasites - the same shape of gap the elite-hook tests above already
+-- closed for lifesteal and on-hit riders.
+function tests.infightingStrikeCanTransmitTheAttackersBiteDiseaseToAnyDefenderNotJustThePlayer()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 10, 6, 1)
+  eq(rat.biteDisease, Disease.PARASITES, "a rat carries parasites to begin with")
+  local wolf = Entity.new({
+    id = 2, x = 11, y = 6, glyph = "d", name = "wolf", kind = "companion",
+    hp = 10000, maxHp = 10000, attack = 2, defense = 0, speed = 100,
+  })
+  game.level.entities = { rat, wolf }
+  local infected = false
+  for _ = 1, 400 do
+    Infighting.strike(game, rat, wolf)
+    if Disease.isInfected(wolf) then infected = true break end
+  end
+  ok(infected, "enough infighting bites from a parasite-carrying rival eventually infect a companion, not just the player")
+  eq(wolf.disease.key, Disease.PARASITES, "the companion caught exactly the rat's own carried affliction")
+  ok(contains(game.log:last(), "wolf"), "the infection message names the actual victim, not the player")
+end
+
+function tests.infightingTryActAttacksAnAdjacentRivalAndReturnsTrue()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  local goblin = Monsters.create(Monsters.byKey.goblin, 1, 10, 6, 1)
+  local orc = Monsters.create(Monsters.byKey.orc, 2, 11, 6, 1)
+  game.level.entities = { goblin, orc }
+  local hpBefore = orc.hp
+  local acted = Infighting.tryAct(game, goblin)
+  ok(acted, "infighting consumes the goblin's turn when an adjacent rival is present")
+  ok(orc.hp < hpBefore, "the adjacent rival takes damage")
+end
+
+function tests.infightingTryActStepsTowardADistantRivalAndReturnsTrue()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  local goblin = Monsters.create(Monsters.byKey.goblin, 1, 10, 6, 1)
+  local orc = Monsters.create(Monsters.byKey.orc, 2, 14, 6, 1)
+  game.level.entities = { goblin, orc }
+  local acted = Infighting.tryAct(game, goblin)
+  ok(acted, "infighting consumes the goblin's turn even while the rival is still distant")
+  eq(goblin.x, 11, "the goblin steps one cell toward the distant rival instead of standing still")
+end
+
+function tests.infightingTryActReturnsFalseWithNoQualifyingTarget()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  local goblin = Monsters.create(Monsters.byKey.goblin, 1, 10, 6, 1)
+  local rat = Monsters.create(Monsters.byKey.rat, 2, 11, 6, 1)
+  game.level.entities = { goblin, rat }
+  ok(not Infighting.tryAct(game, goblin), "infighting yields the turn back to Ai.act when nothing qualifies")
+end
+
+function tests.gameTakeMonsterTurnLetsARivalFightInsteadOfChasingADistantPlayer()
+  local game = stagedGame(1, arena(21, 11), 19, 9)
+  local goblin = Monsters.create(Monsters.byKey.goblin, 1, 10, 6, 1)
+  local orc = Monsters.create(Monsters.byKey.orc, 2, 11, 6, 1)
+  game.level.entities = { goblin, orc }
+  local hpBefore = orc.hp
+  game:takeMonsterTurn(goblin)
+  ok(orc.hp < hpBefore, "a goblin that could chase a distant player instead fights the adjacent rival orc")
+  eq(goblin.x, 10, "fighting the rival in place keeps the goblin from stepping toward the player")
+end
+
+function tests.spellsDiscordAppliesTheDiscordStatusAndSpendsItsListedManaCost()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Spells.learn(game.player, "discord")
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 6, 6, 1)
+  game.level.entities = { orc }
+  local manaBefore = game.player.mana
+  local success = game:castSpell("discord", orc)
+  ok(success, "casting a learned, in-range discord succeeds")
+  ok(Status.has(orc, Status.DISCORD), "the target now carries the discord status")
+  eq(game.player.mana, manaBefore - Spells.catalog.discord.cost, "casting discord spends exactly its listed mana cost")
+end
+
+function tests.spellsDiscordFailsOutOfRangeAndSpendsNothing()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Spells.learn(game.player, "discord")
+  local farOrc = Monsters.create(Monsters.byKey.orc, 1, 19, 6, 1)
+  game.level.entities = { farOrc }
+  local manaBefore = game.player.mana
+  local success = game:castSpell("discord", farOrc)
+  ok(not success, "discord cast beyond its range fails")
+  ok(not Status.has(farOrc, Status.DISCORD), "a failed cast never applies the status")
+  eq(game.player.mana, manaBefore, "a failed cast spends no mana")
+end
+
+function tests.builderCanRollATomeOfTheDiscordSpellSomewhereInARangeOfSeeds()
+  local found = false
+  for seed = 1, 100 do
+    local level = Builder.build(6, Rng.new(seed), {})
+    for _, ground in ipairs(level.floorItems) do
+      if ground.item.kind == Items.TOME and ground.item.spell == "discord" then found = true end
+    end
+    if found then break end
+  end
+  ok(found, "the discord tome is reachable dungeon loot within a reasonable seed range")
+end
+
+function tests.spellsConfuseAppliesTheConfuseStatusAndSpendsItsListedManaCost()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Spells.learn(game.player, "confuse")
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 6, 6, 1)
+  game.level.entities = { orc }
+  local manaBefore = game.player.mana
+  local success = game:castSpell("confuse", orc)
+  ok(success, "casting a learned, in-range confuse succeeds")
+  ok(Status.has(orc, Status.CONFUSE), "the target now carries the confuse status")
+  eq(game.player.mana, manaBefore - Spells.catalog.confuse.cost, "casting confuse spends exactly its listed mana cost")
+end
+
+function tests.spellsConfuseFailsOutOfRangeAndSpendsNothing()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Spells.learn(game.player, "confuse")
+  local farOrc = Monsters.create(Monsters.byKey.orc, 1, 19, 6, 1)
+  game.level.entities = { farOrc }
+  local manaBefore = game.player.mana
+  local success = game:castSpell("confuse", farOrc)
+  ok(not success, "confuse cast beyond its range fails")
+  ok(not Status.has(farOrc, Status.CONFUSE), "a failed cast never applies the status")
+  eq(game.player.mana, manaBefore, "a failed cast spends no mana")
+end
+
+function tests.builderCanRollATomeOfTheConfuseSpellSomewhereInARangeOfSeeds()
+  local found = false
+  for seed = 1, 100 do
 end
 
 local order = {
