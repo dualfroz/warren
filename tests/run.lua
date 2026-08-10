@@ -10336,6 +10336,352 @@ end
 
 function tests.nemesisEscalateRaisesGrudgeAndHealsTowardFullBothCapped()
   local pursuit = { species = "orc", grudge = 1, hpFraction = 0.3 }
+  Nemesis.escalate(pursuit)
+  eq(pursuit.grudge, 2, "escalating raises the grudge by one")
+  eq(pursuit.hpFraction, 0.5, "escalating heals the pursuit's carried hp fraction")
+  for _ = 1, 10 do Nemesis.escalate(pursuit) end
+  eq(pursuit.grudge, Nemesis.MAX_GRUDGE, "grudge never climbs past its cap")
+  eq(pursuit.hpFraction, 1, "hp fraction never heals past full")
+end
+
+function tests.nemesisSpawnScalesHpAndAttackWithGrudgeAndAppliesTheCarriedHpFraction()
+  local base = Monsters.create(Monsters.byKey.orc, 1, 5, 5, 1)
+  local weak = Nemesis.spawn({ species = "orc", grudge = 1, hpFraction = 0.5 }, 2, 5, 5, 1)
+  eq(weak.maxHp, base.maxHp + Nemesis.bonusHp(1), "a grudge-one nemesis carries a small hp bonus over the plain species")
+  eq(weak.hp, math.floor(weak.maxHp * 0.5), "the spawned nemesis's hp reflects its carried hp fraction")
+  eq(weak.attack, base.attack + Nemesis.bonusAttack(1), "a grudge-one nemesis carries a small attack bonus")
+  ok(weak.nemesis, "the spawned entity is flagged as a nemesis")
+  eq(weak.nemesisGrudge, 1, "the spawned entity remembers its own grudge tier")
+  eq(weak.species, "orc", "the spawned nemesis keeps the species key its xp/faction lookups depend on")
+
+  local fierce = Nemesis.spawn({ species = "orc", grudge = 4, hpFraction = 1 }, 3, 5, 5, 1)
+  ok(fierce.maxHp > weak.maxHp, "a higher grudge nemesis carries a larger hp bonus")
+  ok(fierce.attack > weak.attack, "a higher grudge nemesis carries a larger attack bonus")
+
+  local sliver = Nemesis.spawn({ species = "orc", grudge = 1, hpFraction = 0.001 }, 4, 5, 5, 1)
+  ok(sliver.hp >= 1, "a nemesis spawned from a nearly-dead fraction never rounds down to zero hp")
+end
+
+function tests.nemesisNameForEscalatesThroughEachEpithetAndClampsAtTheLast()
+  eq(Nemesis.nameFor("orc", 1), "orc, " .. Nemesis.EPITHETS[1], "grudge one uses the first epithet")
+  eq(Nemesis.nameFor("orc", #Nemesis.EPITHETS), "orc, " .. Nemesis.EPITHETS[#Nemesis.EPITHETS],
+    "grudge at the epithet count uses the last epithet")
+  eq(Nemesis.nameFor("orc", Nemesis.MAX_GRUDGE + 5), "orc, " .. Nemesis.EPITHETS[#Nemesis.EPITHETS],
+    "grudge beyond the epithet list clamps to the last epithet rather than indexing past it")
+end
+
+function tests.nemesisXpBonusAndBountyGoldScaleWithGrudge()
+  ok(Nemesis.xpBonus(2) > Nemesis.xpBonus(1), "a higher grudge pays a bigger xp bonus")
+  ok(Nemesis.bountyGold(2) > Nemesis.bountyGold(1), "a higher grudge pays a bigger bounty")
+  eq(Nemesis.bountyGold(1), 10, "grudge one's bounty matches the catalog base")
+end
+
+-- Seed 3, not 5: adding a tenth potion type (levitate) grew identify.lua's
+-- potionLooks pool by one, which costs Identify.new one extra shuffle draw
+-- at world creation - every seed's subsequent rng stream shifts by exactly
+-- that much, including this test's nemesis-emergence chance roll. Reseeded
+-- by actually running Game:descend() across a range and picking one where
+-- the roll still succeeds, not guessed.
+function tests.gameDescendCanRollANewNemesisFromAHuntingMonsterLeftOnTheDepartingFloor()
+  local game = stagedGame(3, arena(21, 11), 2, 2)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 10, 6, 1)
+  orc.awareness = Stealth.HUNTING
+  game.level.entities = { orc }
+  game.player.x, game.player.y = game.level.downX, game.level.downY
+  game:descend()
+  ok(game.nemesis ~= nil, "this seed's departure roll gives the hunting orc a chance to follow")
+  eq(game.nemesis.species, "orc", "the nemesis descriptor remembers which species followed")
+  local found
+  for _, entity in ipairs(game.level.entities) do
+    if entity.nemesis then found = entity end
+  end
+  ok(found ~= nil, "the nemesis is actually placed onto the floor just reached")
+  eq(found.nemesisGrudge, 1, "a freshly emerged nemesis starts at grudge one")
+end
+
+function tests.gameDescendNeverRollsANewNemesisFromAMonsterThatIsNotActuallyHunting()
+  for seed = 1, 30 do
+    local game = stagedGame(seed, arena(21, 11), 2, 2)
+    local orc = Monsters.create(Monsters.byKey.orc, 1, 10, 6, 1)
+    game.level.entities = { orc }
+    game.player.x, game.player.y = game.level.downX, game.level.downY
+    game:descend()
+    ok(game.nemesis == nil, "a dormant monster never gives chase no matter the seed")
+  end
+end
+
+function tests.gameNemesisFollowsAcrossMultipleDescentsEscalatingItsGrudgeEachTime()
+  local game = stagedGame(1, arena(21, 11), 2, 2)
+  game.nemesis = { species = "orc", grudge = 1, hpFraction = 1 }
+  local hunter = Nemesis.spawn(game.nemesis, game:nextMonsterId(), 10, 6, 1)
+  game.level.entities = { hunter }
+  game.player.x, game.player.y = game.level.downX, game.level.downY
+
+  game:descend()
+  eq(game.nemesis.grudge, 2, "following once past the first stairwell raises the grudge to two")
+  local first
+  for _, entity in ipairs(game.level.entities) do if entity.nemesis then first = entity end end
+  ok(first ~= nil, "the escalated nemesis is placed on the second floor")
+  eq(first.nemesisGrudge, 2, "the respawned nemesis carries the escalated grudge")
+
+  game.player.x, game.player.y = game.level.downX, game.level.downY
+  game:descend()
+  eq(game.nemesis.grudge, 3, "following a second time raises the grudge again")
+  local second
+  for _, entity in ipairs(game.level.entities) do if entity.nemesis then second = entity end end
+  ok(second ~= nil, "the nemesis follows onto the third floor too")
+  local nemesisCount = 0
+  for _, entity in ipairs(game.level.entities) do
+    if entity.nemesis then nemesisCount = nemesisCount + 1 end
+  end
+  eq(nemesisCount, 1, "exactly one nemesis is ever on a floor at a time, never a duplicate")
+end
+
+function tests.gameAscendCarriesAnActiveNemesisAlongButNeverRollsANewOne()
+  local game = stagedGame(1, arena(21, 11), 2, 2)
+  game.player.x, game.player.y = game.level.downX, game.level.downY
+  game:descend()
+  eq(game.depth, 2, "the game is now on the second floor")
+  eq(game.nemesis, nil, "no nemesis was following yet")
+
+  for seed = 1, 20 do
+    local ascendGame = stagedGame(seed, arena(21, 11), 2, 2)
+    ascendGame.player.x, ascendGame.player.y = ascendGame.level.downX, ascendGame.level.downY
+    ascendGame:descend()
+    local orc = Monsters.create(Monsters.byKey.orc, 99, 10, 6, ascendGame.depth)
+    orc.awareness = Stealth.HUNTING
+    ascendGame.level.entities = { orc }
+    ascendGame.player.x, ascendGame.player.y = ascendGame.level.upX, ascendGame.level.upY
+    ascendGame:ascend()
+    ok(ascendGame.nemesis == nil, "climbing back up never manufactures a brand new nemesis")
+  end
+
+  local followGame = stagedGame(1, arena(21, 11), 2, 2)
+  followGame.player.x, followGame.player.y = followGame.level.downX, followGame.level.downY
+  followGame:descend()
+  followGame.nemesis = { species = "orc", grudge = 2, hpFraction = 1 }
+  local hunter = Nemesis.spawn(followGame.nemesis, followGame:nextMonsterId(), 10, 6, followGame.depth)
+  followGame.level.entities = { hunter }
+  followGame.player.x, followGame.player.y = followGame.level.upX, followGame.level.upY
+  followGame:ascend()
+  eq(followGame.nemesis.grudge, 3, "an already-active nemesis still follows the player back up the stairs")
+  local found
+  for _, entity in ipairs(followGame.level.entities) do if entity.nemesis then found = entity end end
+  ok(found ~= nil, "the nemesis is placed on the floor just climbed back onto")
+end
+
+-- companions.lua/mercenaries.lua/reanimation.lua's own module comments each
+-- describe a bonded ally as sticking with the player for the run (a
+-- companion "persists across the whole run once bonded", a hireling demands
+-- its wage "for as long as it lives") - before Game:detachCarriedAllies/
+-- Game:plantCarriedAllies existed, Game:descend simply swapped self.level to
+-- the next floor's own dungeon:get(depth) result, so every one of the three
+-- was silently left behind, alive and well, on the departing floor forever.
+function tests.gameDescendCarriesEveryLivingAllyOntoTheNextFloorInsteadOfAbandoningThem()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local oldLevel = game.level
+  local golem = Companions.summon(game, "golem")
+  local hireling = Mercenaries.hire(game, "sellsword")
+  local rat = Monsters.create(Monsters.byKey.rat, 99, 8, 6, 1)
+  Corpses.spawn(game.level, rat)
+  local thrall = Reanimation.raise(game, game.level.corpses[1])
+  ok(golem ~= nil and hireling ~= nil and thrall ~= nil, "all three allies bond before the descent")
+
+  game.player.x, game.player.y = game.level.downX, game.level.downY
+  ok(game:descend(), "descending succeeds")
+  eq(game.depth, 2, "the game is now on the second floor")
+  ok(game:hasCompanion(), "the companion is with the player on the new floor")
+  ok(game:hasHireling(), "the hireling is with the player on the new floor")
+  local thrallFound
+  for _, entity in ipairs(game.level.entities) do
+    if entity.kind == "thrall" then thrallFound = entity end
+  end
+  eq(thrallFound, thrall, "the very same thrall instance rises with the player, not a rebuilt one")
+
+  local leftBehind = 0
+  for _, entity in ipairs(oldLevel.entities) do
+    if entity.kind == "companion" or entity.kind == "hireling" or entity.kind == "thrall" then
+      leftBehind = leftBehind + 1
+    end
+  end
+  eq(leftBehind, 0, "none of the three allies are stranded on the departing floor")
+end
+
+function tests.gameAscendCarriesEveryLivingAllyBackOntoThePreviousFloorToo()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.x, game.player.y = game.level.downX, game.level.downY
+  game:descend()
+  eq(game.depth, 2, "now on the second floor")
+  local golem = Companions.summon(game, "golem")
+  local hireling = Mercenaries.hire(game, "sellsword")
+  ok(golem ~= nil and hireling ~= nil, "both allies bond on the second floor")
+  local descendLevel = game.level
+
+  game.player.x, game.player.y = game.level.upX, game.level.upY
+  ok(game:ascend(), "ascending succeeds")
+  eq(game.depth, 1, "back on the first floor")
+  ok(game:hasCompanion(), "the companion follows back up the stairs")
+  ok(game:hasHireling(), "the hireling follows back up the stairs too")
+
+  local leftBehind = 0
+  for _, entity in ipairs(descendLevel.entities) do
+    if entity.kind == "companion" or entity.kind == "hireling" then leftBehind = leftBehind + 1 end
+  end
+  eq(leftBehind, 0, "neither ally is stranded on the floor just climbed away from")
+end
+
+function tests.gameAwardKillOnANemesisGrantsBonusXpAndBountyGoldAndClearsTheHunt()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.nemesis = { species = "orc", grudge = 3, hpFraction = 1 }
+  local hunter = Nemesis.spawn(game.nemesis, 1, 4, 6, 1)
+  hunter.hp = 1
+  game.level.entities = { hunter }
+  local xpBefore, goldBefore = game.player.xp, game.player.gold
+  game:playerAttack(hunter)
+  ok(game.player.xp > xpBefore or game.player.level > 1, "felling the nemesis grants xp on top of its species reward")
+  eq(game.player.gold, goldBefore + Nemesis.bountyGold(3), "felling the nemesis pays out its grudge-scaled bounty gold")
+  eq(game.nemesis, nil, "the hunt is over once the nemesis is actually killed")
+  ok(contains(table.concat(game.log:recent(5), " "), "hunt is over"), "the kill is logged as ending the hunt")
+end
+
+function tests.nemesisFieldsSurviveEntityAndGameSerialization()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.nemesis = { species = "orc", grudge = 3, hpFraction = 0.75 }
+  local hunter = Nemesis.spawn(game.nemesis, 1, 6, 5, 1)
+  game.level.entities = { hunter }
+
+  local restoredLevel = Level.fromData(game.level:toData())
+  eq(restoredLevel.entities[1].nemesis, true, "the nemesis flag survives a level round trip")
+  eq(restoredLevel.entities[1].nemesisGrudge, 3, "the nemesis's grudge survives a level round trip")
+
+  local restoredGame = Game.fromData(game:toData())
+  eq(restoredGame.nemesis.species, "orc", "the pursuing nemesis descriptor survives a game round trip")
+  eq(restoredGame.nemesis.grudge, 3, "the descriptor's grudge survives a game round trip")
+  eq(restoredGame.nemesis.hpFraction, 0.75, "the descriptor's carried hp fraction survives a game round trip")
+end
+
+function tests.factionsAreRivalsChecksBothDirectionsAndExcludesSameFactionAndNil()
+  ok(Factions.areRivals(Factions.GOBLINOID, Factions.ORCISH), "goblinoid and orcish are a listed rivalry")
+  ok(Factions.areRivals(Factions.ORCISH, Factions.GOBLINOID), "the rivalry check reads either direction")
+  ok(not Factions.areRivals(Factions.GOBLINOID, Factions.GOBLINOID), "a faction is never its own rival")
+  ok(not Factions.areRivals(Factions.MERCHANT, Factions.DRAKE), "an unlisted pair is not a rivalry")
+  ok(not Factions.areRivals(nil, Factions.ORCISH), "a nil faction on either side never counts as a rival")
+  ok(not Factions.areRivals(Factions.GOBLINOID, nil), "a nil faction on either side never counts as a rival")
+end
+
+function tests.infightingTargetPicksTheNearestVisibleRivalOverACloserNonRival()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  local goblin = Monsters.create(Monsters.byKey.goblin, 1, 10, 6, 1)
+  local orc = Monsters.create(Monsters.byKey.orc, 2, 12, 6, 1)
+  local rat = Monsters.create(Monsters.byKey.rat, 3, 9, 6, 1)
+  game.level.entities = { goblin, orc, rat }
+  local target = Infighting.target(game, goblin)
+  eq(target.id, orc.id, "the goblin's rival target is the orc, not the nearer but unrelated rat")
+end
+
+function tests.infightingTargetIgnoresARivalBeyondSightRange()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  local goblin = Monsters.create(Monsters.byKey.goblin, 1, 3, 6, 1)
+  local farOrc = Monsters.create(Monsters.byKey.orc, 2, 19, 6, 1)
+  game.level.entities = { goblin, farOrc }
+  ok(Infighting.target(game, goblin) == nil, "a rival far beyond sight range is not a target")
+end
+
+function tests.infightingTargetIgnoresARivalBehindAWallEvenWithinSightRange()
+  local map = Map.new(21, 11)
+  for y = 2, 9 do
+    for x = 2, 9 do map:set(x, y, Map.FLOOR) end
+    for x = 12, 19 do map:set(x, y, Map.FLOOR) end
+  end
+  local level = Level.new({
+    depth = 1, generator = "arena", map = map,
+    entities = {}, floorItems = {}, traps = {}, lights = {}, dark = false, explored = {},
+    upX = 2, upY = 2, downX = 19, downY = 9,
+  })
+  local game = stagedGame(1, level, 2, 2)
+  local goblin = Monsters.create(Monsters.byKey.goblin, 1, 9, 5, 1)
+  local orc = Monsters.create(Monsters.byKey.orc, 2, 12, 5, 1)
+  game.level.entities = { goblin, orc }
+  ok(Infighting.target(game, goblin) == nil,
+    "a rival on the far side of a solid wall is not a target despite being close in raw distance")
+end
+
+function tests.infightingTargetIgnoresNonRivalsWithoutDiscord()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  local goblin = Monsters.create(Monsters.byKey.goblin, 1, 10, 6, 1)
+  local rat = Monsters.create(Monsters.byKey.rat, 2, 11, 6, 1)
+  game.level.entities = { goblin, rat }
+  ok(Infighting.target(game, goblin) == nil, "an unrelated species is never a target on its own")
+end
+
+function tests.infightingTargetUnderDiscordPicksNearestCreatureOfAnyKindIncludingACompanion()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 10, 6, 1)
+  Status.apply(orc, Status.DISCORD, 5, 1)
+  local companion = Entity.new({
+    id = 2, x = 11, y = 6, glyph = "d", name = "wolf", kind = "companion",
+    hp = 10, maxHp = 10, attack = 2, defense = 0, speed = 100,
+  })
+  local rat = Monsters.create(Monsters.byKey.rat, 3, 15, 6, 1)
+  game.level.entities = { orc, companion, rat }
+  local target = Infighting.target(game, orc)
+  eq(target.id, companion.id,
+    "a discorded monster attacks the nearest creature of any kind, even a companion, over a farther non-rival")
+end
+
+function tests.infightingTargetReturnsNilOnceDiscordHasExpired()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 10, 6, 1)
+  local rat = Monsters.create(Monsters.byKey.rat, 2, 11, 6, 1)
+  game.level.entities = { orc, rat }
+  ok(Infighting.target(game, orc) == nil, "without discord an orc has no quarrel with a nearby rat")
+end
+
+function tests.infightingStrikeOnAPlainMonsterSpawnsACorpseButAwardsThePlayerNothing()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  local goblin = Monsters.create(Monsters.byKey.goblin, 1, 10, 6, 1)
+  local orc = Monsters.create(Monsters.byKey.orc, 2, 11, 6, 1)
+  orc.hp, orc.maxHp = 1, 1
+  game.level.entities = { goblin, orc }
+  local xpBefore = game.player.xp
+  local killsBefore = game.stats.kills
+  Infighting.strike(game, goblin, orc)
+  ok(not orc:isAlive(), "the orc dies to the goblin's blow")
+  eq(game.player.xp, xpBefore, "the player earns no xp for a kill it did not land")
+  eq(game.stats.kills, killsBefore, "the run's kill counter only tracks the player's own kills")
+  eq(#game.level.corpses, 1, "the fallen orc still leaves a corpse behind for scavenging or reanimation")
+  ok(contains(game.log:last(), "dies"), "the death is still logged")
+end
+
+function tests.infightingStrikeThatKillsACompanionRoutesThroughTheNormalAllyDeathMessage()
+  local game = stagedGame(1, arena(21, 11), 3, 3)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 10, 6, 1)
+  local wolf = Entity.new({
+    id = 2, x = 11, y = 6, glyph = "d", name = "wolf", kind = "companion",
+    hp = 1, maxHp = 10, attack = 2, defense = 0, speed = 100,
+  })
+  game.level.entities = { orc, wolf }
+  Infighting.strike(game, orc, wolf)
+  ok(contains(game.log:last(), "falls"), "a companion killed by infighting dies with the same message as any other death")
+end
+
+-- Same gap as companionActAttackingAnAdjacentMonsterEmitsNoise... and its
+-- hireling/thrall siblings, but here on neither side of the fight is a
+-- player-aligned ally at all: two monsters brawling among themselves (a
+-- rivalry, or one of them discorded) were exactly as silent as a companion's
+-- own melee, despite Infighting.strike running the very same Combat.attack
+-- every other fight in the engine does. A dormant third monster standing
+-- nearby but uninvolved never had a chance to overhear either kind of fight.
+function tests.infightingStrikeEmitsNoiseThatCanStirADormantBystanderNotInvolvedInTheFight()
+  local stirred = false
+  for seed = 1, 200 do
+    local game = stagedGame(seed, arena(21, 11), 3, 3)
+    local goblin = Monsters.create(Monsters.byKey.goblin, 1, 10, 6, 1)
+    local orc = Monsters.create(Monsters.byKey.orc, 2, 11, 6, 1)
+    local bystander = Monsters.create(Monsters.byKey.rat, 3, 14, 6, 1)
+    bystander.awareness = Stealth.DORMANT
+    game.level.entities = { goblin, orc, bystander }
+    Infighting.strike(game, goblin, orc)
 end
 
 local order = {
