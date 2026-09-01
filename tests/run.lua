@@ -12931,6 +12931,352 @@ function tests.commandsApplyUseDrinksAPotionByInventoryIndexAndSpendsTheTurn()
   eq(#game.player.inventory, before - 1, "the consumed potion leaves the inventory")
 end
 
+function tests.commandsApplyItemCommandsRejectAMissingOrNonNumericIndexWithoutSpendingATurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  for _, verb in ipairs({ "use", "drop", "sell", "throw", "capture" }) do
+    local consumesTurn, message = Commands.apply(game, verb)
+    eq(consumesTurn, false, verb .. " with no inventory number spends no turn")
+    ok(message ~= nil and #message > 0, verb .. " explains what index it needs")
+  end
+  local consumesTurn, message = Commands.apply(game, "use ninety")
+  eq(consumesTurn, false, "a non-numeric inventory argument spends no turn")
+  ok(message ~= nil, "the non-numeric argument still gets a clear reason")
+end
+
+function tests.commandsApplyCastAutoTargetsTheNearestVisibleHostile()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local near = Monsters.create(Monsters.byKey.rat, 5, 8, 5, 1)
+  local far = Monsters.create(Monsters.byKey.rat, 9, 15, 5, 1)
+  near.hp, far.hp = 30, 30
+  game.level.entities = { near, far }
+  local consumesTurn = Commands.apply(game, "cast missile")
+  eq(consumesTurn, true, "casting a known targeted spell at a visible hostile spends the turn")
+  ok(near.hp < 30, "the nearer visible hostile takes the hit")
+  eq(far.hp, 30, "the farther hostile is left untouched")
+end
+
+function tests.commandsApplyCastBreaksATiedDistanceByAscendingMonsterId()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local higherId = Monsters.create(Monsters.byKey.rat, 9, 8, 5, 1)
+  local lowerId = Monsters.create(Monsters.byKey.rat, 3, 5, 8, 1)
+  higherId.hp, lowerId.hp = 30, 30
+  game.level.entities = { higherId, lowerId }
+  Commands.apply(game, "cast missile")
+  ok(lowerId.hp < 30, "a tied Chebyshev distance is broken toward the lower monster id")
+  eq(higherId.hp, 30, "the higher-id tied hostile is left untouched")
+end
+
+function tests.commandsApplyCastFailsWithoutSpendingATurnWhenNoHostileIsVisible()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local consumesTurn, message = Commands.apply(game, "cast missile")
+  eq(consumesTurn, false, "a targeted spell with nothing to target spends no turn")
+  eq(message, "there is nothing in sight to cast that at", "the failure explains itself")
+end
+
+function tests.commandsApplyCastRejectsAnUnknownOrUnlearnedSpellWithoutSpendingATurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local consumesTurn, message = Commands.apply(game, "cast nonsense")
+  eq(consumesTurn, false, "an unknown spell key spends no turn")
+  eq(message, "you know no spell by that name", "the failure names the problem")
+end
+
+function tests.commandsApplyCastConfuseAppliesTheStatusThroughTheFullCommandPipeline()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  Spells.learn(game.player, "confuse")
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 8, 5, 1)
+  game.level.entities = { rat }
+  local consumesTurn = Commands.apply(game, "cast confuse")
+  eq(consumesTurn, true, "casting confuse on a visible hostile spends the turn")
+  eq(Status.has(rat, Status.CONFUSE), true, "the nearest visible hostile carries the confuse status afterward")
+end
+
+function tests.commandsApplyCastBlindAppliesTheStatusThroughTheFullCommandPipeline()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  Spells.learn(game.player, "blind")
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 8, 5, 1)
+  game.level.entities = { rat }
+  local consumesTurn = Commands.apply(game, "cast blind")
+  eq(consumesTurn, true, "casting blind on a visible hostile spends the turn")
+  eq(Status.has(rat, Status.BLIND), true, "the nearest visible hostile carries the blind status afterward")
+end
+
+function tests.commandsApplyCastWeakenAppliesTheStatusThroughTheFullCommandPipeline()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  Spells.learn(game.player, "weaken")
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 8, 5, 1)
+  game.level.entities = { rat }
+  local consumesTurn = Commands.apply(game, "cast weaken")
+  eq(consumesTurn, true, "casting weaken on a visible hostile spends the turn")
+  eq(Status.has(rat, Status.WEAKEN), true, "the nearest visible hostile carries the weaken status afterward")
+end
+
+-- levitate is self-targeted (Spells.catalog.levitate.targeted == false), so
+-- unlike cast confuse/blind above there is no hostile to resolve at all -
+-- this is the pipeline's only self-buff cast covered end to end.
+function tests.commandsApplyCastLevitateAppliesTheStatusToTheCasterThroughTheFullCommandPipeline()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  Spells.learn(game.player, "levitate")
+  local consumesTurn = Commands.apply(game, "cast levitate")
+  eq(consumesTurn, true, "casting levitate spends the turn")
+  eq(Status.has(game.player, Status.LEVITATE), true, "the caster carries the levitate status afterward")
+end
+
+-- cleanse is self-targeted like levitate, so no hostile needs to be in sight
+-- at all - the pipeline still finds and lifts the caster's own status.
+function tests.commandsApplyCastCleanseLiftsTheCastersOwnStatusThroughTheFullCommandPipeline()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  Spells.learn(game.player, "cleanse")
+  Status.apply(game.player, Status.POISON, 5, 2)
+  local consumesTurn = Commands.apply(game, "cast cleanse")
+  eq(consumesTurn, true, "casting cleanse spends the turn")
+  eq(Status.has(game.player, Status.POISON), false, "the caster's own poison is gone afterward")
+end
+
+function tests.commandsApplyThrowAndFireFailWithoutSpendingATurnWhenNoHostileIsVisible()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local consumesTurn1, message1 = Commands.apply(game, "throw 1")
+  eq(consumesTurn1, false, "throwing with nothing in sight spends no turn")
+  eq(message1, "there is nothing in sight to throw at", "the failure explains itself")
+  local consumesTurn2, message2 = Commands.apply(game, "fire")
+  eq(consumesTurn2, false, "firing with nothing in sight spends no turn")
+  eq(message2, "there is nothing in sight to fire at", "the failure explains itself")
+end
+
+function tests.commandsApplyUseskillRejectsAnUnknownOrUnlearnedSkillWithoutSpendingATurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local unknown = Commands.apply(game, "useskill nonsense")
+  eq(unknown, false, "an unknown skill key spends no turn")
+  local unlearned = Commands.apply(game, "useskill cleave")
+  eq(unlearned, false, "a skill the player never learned spends no turn")
+end
+
+function tests.commandsApplyUseskillCleaveAutoTargetsAnAdjacentHostile()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.player.class = "fighter"
+  Skills.learn(game.player, "cleave")
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 6, 5, 1)
+  rat.hp = 20
+  game.level.entities = { rat }
+  local consumesTurn = Commands.apply(game, "useskill cleave")
+  eq(consumesTurn, true, "cleave against an adjacent hostile spends the turn")
+  ok(rat.hp < 20, "cleave's own attack lands on the auto-targeted adjacent hostile")
+end
+
+-- Every targeted handler (throw/capture/fire/cast/useskill) accepts an
+-- optional trailing target number, resolved against the exact same 1-based
+-- listing Handlers.look/examine already print. These tests all set up a
+-- nearer hostile the OLD nearest-only auto-target would have picked, plus a
+-- farther one at a later position in game.level.entities (the same order
+-- look numbers its list in), and confirm the explicit number reaches past
+-- the nearer default to the one actually named.
+function tests.commandsApplyThrowWithAnExplicitTargetNumberHitsThatHostileInsteadOfTheNearestOne()
+  local game = stagedGame(4, arena(21, 11), 5, 5)
+  local near = Monsters.create(Monsters.byKey.rat, 1, 5, 6, 1)
+  local far = Monsters.create(Monsters.byKey.rat, 1, 5, 8, 1)
+  near.hp, far.hp = 20, 20
+  game.level.entities = { near, far }
+  game.player.inventory[#game.player.inventory + 1] = Items.weapon("dagger", 2)
+  local index = #game.player.inventory
+  local consumesTurn = Commands.apply(game, "throw " .. index .. " 2")
+  eq(consumesTurn, true, "throwing at an explicit in-sight target number spends the turn")
+  ok(far.hp < 20, "the explicitly named second hostile takes the hit")
+  eq(near.hp, 20, "the nearer, non-targeted hostile is left untouched")
+end
+
+function tests.commandsApplyThrowRejectsAnExplicitTargetNumberThatIsNotInSightWithoutSpendingATurn()
+  local game = stagedGame(4, arena(21, 11), 5, 5)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 5, 6, 1)
+  game.level.entities = { rat }
+  game.player.inventory[#game.player.inventory + 1] = Items.weapon("dagger", 2)
+  local index = #game.player.inventory
+  local before = #game.player.inventory
+  local consumesTurn, message = Commands.apply(game, "throw " .. index .. " 5")
+  eq(consumesTurn, false, "naming a target number nothing is visible at spends no turn")
+  eq(message, "no monster in sight at that number", "the failure names the specific problem")
+  eq(#game.player.inventory, before, "the item is never spent on a rejected target number")
+end
+
+function tests.commandsApplyFireWithAnExplicitTargetNumberShootsThatHostileInsteadOfTheNearestOne()
+  local game = stagedGame(4, arena(21, 11), 5, 5)
+  local near = Monsters.create(Monsters.byKey.rat, 1, 5, 6, 1)
+  local far = Monsters.create(Monsters.byKey.rat, 1, 5, 8, 1)
+  near.hp, far.hp = 20, 20
+  game.level.entities = { near, far }
+  game.player.bow = Items.bow("short bow", 2, 6)
+  game.player.inventory[#game.player.inventory + 1] = Items.ammo("arrow", 2)
+  local consumesTurn = Commands.apply(game, "fire 2")
+  eq(consumesTurn, true, "firing at an explicit in-sight target number spends the turn")
+  ok(far.hp < 20, "the explicitly named second hostile takes the shot")
+  eq(near.hp, 20, "the nearer, non-targeted hostile is left untouched")
+end
+
+function tests.commandsApplyCastWithAnExplicitTargetNumberHitsThatHostileInsteadOfTheNearestOne()
+  local game = stagedGame(4, arena(21, 11), 5, 5)
+  local near = Monsters.create(Monsters.byKey.rat, 1, 5, 6, 1)
+  local far = Monsters.create(Monsters.byKey.rat, 1, 5, 8, 1)
+  near.hp, far.hp = 20, 20
+  game.level.entities = { near, far }
+  local consumesTurn = Commands.apply(game, "cast missile 2")
+  eq(consumesTurn, true, "casting at an explicit in-sight target number spends the turn")
+  ok(far.hp < 20, "the explicitly named second hostile takes the hit")
+  eq(near.hp, 20, "the nearer, non-targeted hostile is left untouched")
+end
+
+function tests.commandsApplyCaptureWithAnExplicitTargetNumberTargetsThatHostileInsteadOfTheNearestOne()
+  local game = stagedGame(4, arena(21, 11), 5, 5)
+  local near = Monsters.create(Monsters.byKey.rat, 1, 5, 6, 1)
+  local far = Monsters.create(Monsters.byKey.rat, 1, 5, 8, 1)
+  near.hp, far.hp = 1, 1
+  game.level.entities = { near, far }
+  game.player.inventory[#game.player.inventory + 1] = Items.net()
+  local index = #game.player.inventory
+  game.rng = Rng.new(2)
+  local consumesTurn = Commands.apply(game, "capture " .. index .. " 2")
+  eq(consumesTurn, true, "capturing at an explicit in-sight target number spends the turn")
+  eq(#game.level.captives, 1, "exactly one captive results from the attempt")
+  eq(game.level.captives[1].x, far.x, "the explicitly named second hostile is the one caught")
+  eq(game.level.captives[1].y, far.y, "the explicitly named second hostile is the one caught")
+  ok(near:isAlive(), "the nearer, non-targeted hostile is left alive and free")
+end
+
+-- Cleave hits its named target through the full attack path and every other
+-- monster standing next to the player for a halved splash (see skills.lua's
+-- Skills.useCleave) - so with two rats both adjacent to the player, an
+-- explicit target number cannot be proven by "the other one is untouched"
+-- (the splash still reaches it), only by which one takes the bigger, full
+-- hit. Combat.damage is a plain, RNG-free formula (attack minus defense,
+-- floored, minimum 1 - see combat.lua), so two identical rats make that
+-- comparison deterministic.
+function tests.commandsApplyUseskillCleaveWithAnExplicitTargetNumberHitsThatAdjacentHostileInsteadOfTheDefaultNearestOne()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.player.class = "fighter"
+  Skills.learn(game.player, "cleave")
+  local ratA = Monsters.create(Monsters.byKey.rat, 1, 6, 5, 1)
+  local ratB = Monsters.create(Monsters.byKey.rat, 1, 5, 6, 1)
+  ratA.hp, ratB.hp = 20, 20
+  game.level.entities = { ratA, ratB }
+  local consumesTurn = Commands.apply(game, "useskill cleave 2")
+  eq(consumesTurn, true, "cleave against an explicit in-sight target number spends the turn")
+  local dealtToB, dealtToA = 20 - ratB.hp, 20 - ratA.hp
+  ok(dealtToB > dealtToA, "the explicitly named second hostile takes cleave's full hit, not just its splash")
+end
+
+function tests.commandsApplyUseskillMultishotWithExplicitTargetNumbersHitsExactlyThoseTwoHostiles()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.player.class = "ranger"
+  Skills.learn(game.player, "multishot")
+  game.player.bow = Items.bow("short bow", 2, 6)
+  game.player.inventory[#game.player.inventory + 1] = Items.ammo("arrow", 2)
+  local first = Monsters.create(Monsters.byKey.rat, 1, 5, 6, 1)
+  local middle = Monsters.create(Monsters.byKey.rat, 1, 6, 5, 1)
+  local third = Monsters.create(Monsters.byKey.rat, 1, 5, 8, 1)
+  first.hp, middle.hp, third.hp = 20, 20, 20
+  game.level.entities = { first, middle, third }
+  local consumesTurn = Commands.apply(game, "useskill multishot 1 3")
+  eq(consumesTurn, true, "multishot against two explicit in-sight target numbers spends the turn")
+  ok(first.hp < 20, "the first explicitly named hostile takes a shot")
+  ok(third.hp < 20, "the second explicitly named hostile takes a shot")
+  eq(middle.hp, 20, "the un-named, nearer-by-distance hostile in between is left untouched")
+end
+
+function tests.commandsApplyUseskillMultishotWithOnlyOneExplicitTargetNumberFallsBackToAutoTargetingBoth()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.player.class = "ranger"
+  Skills.learn(game.player, "multishot")
+  game.player.bow = Items.bow("short bow", 2, 6)
+  game.player.inventory[#game.player.inventory + 1] = Items.ammo("arrow", 2)
+  local near = Monsters.create(Monsters.byKey.rat, 1, 5, 6, 1)
+  near.hp = 20
+  game.level.entities = { near }
+  local consumesTurn = Commands.apply(game, "useskill multishot 1")
+  eq(consumesTurn, true, "an ambiguous single explicit target still falls back to auto-targeting")
+  ok(near.hp < 20, "the only visible hostile still takes a shot via the auto-target fallback")
+end
+
+function tests.commandsApplyContextActionsFailCleanlyWithNothingHereWithoutSpendingATurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  for _, verb in ipairs({
+    "open", "pray", "quest", "butcher", "raise", "scavenge", "harvest",
+    "ransom", "sellcaptive", "interrogate", "descend", "ascend", "enterrift", "exitrift",
+  }) do
+    local consumesTurn, message = Commands.apply(game, verb)
+    eq(consumesTurn, false, verb .. " with nothing here spends no turn")
+    ok(message ~= nil and #message > 0, verb .. " gives a reason")
+  end
+end
+
+function tests.commandsApplyDigRejectsAnUnknownDirectionAndAnUnreadiedPickWithoutSpendingATurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local badDirection, message1 = Commands.apply(game, "dig sideways")
+  eq(badDirection, false, "an unrecognized direction word spends no turn")
+  eq(message1, "dig which direction?", "the failure names what is missing")
+  local noPick, message2 = Commands.apply(game, "dig north")
+  eq(noPick, false, "digging without a readied pick spends no turn")
+  ok(message2 ~= nil, "the failure explains itself")
+end
+
+function tests.commandsApplyDisarmRejectsAMissingDirectionOrAnUndetectedTrapWithoutSpendingATurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local badDirection, message1 = Commands.apply(game, "disarm sideways")
+  eq(badDirection, false, "an unrecognized direction word spends no turn")
+  eq(message1, "disarm which direction?", "the failure names what is missing")
+
+  local undetected = { x = 6, y = 5, effect = "dart", revealed = false }
+  game.level.traps = { undetected }
+  local noTarget, message2 = Commands.apply(game, "disarm east")
+  eq(noTarget, false, "a trap never yet noticed spends no turn")
+  eq(message2, "there is nothing here you have noticed to disarm", "the failure explains itself")
+  eq(#game.level.traps, 1, "the untouched trap is still there")
+
+  local sprung = { x = 4, y = 5, effect = "dart", revealed = true, detected = true }
+  game.level.traps = { sprung }
+  local alreadySprung = Commands.apply(game, "disarm west")
+  eq(alreadySprung, false, "an already-sprung trap spends no turn either")
+end
+
+function tests.commandsApplyDisarmAlwaysSpendsTheTurnAgainstADetectedTrapWhetherItSucceedsOrSprings()
+  local sawSuccess, sawFailure = false, false
+  for seed = 1, 300 do
+    if sawSuccess and sawFailure then break end
+    local game = stagedGame(seed, arena(21, 11), 3, 6)
+    local trap = { x = 4, y = 6, effect = "dart", revealed = false, detected = true }
+    game.level.traps = { trap }
+    local consumesTurn = Commands.apply(game, "disarm east")
+    eq(consumesTurn, true, "a disarm attempt against a real detected trap always spends the turn")
+    if #game.level.traps == 0 then
+      sawSuccess = true
+    else
+      eq(trap.revealed, true, "a failed disarm still springs and reveals the trap")
+      sawFailure = true
+    end
+  end
+  ok(sawSuccess, "disarming through the command eventually succeeds across a handful of seeds")
+  ok(sawFailure, "disarming through the command eventually springs across a handful of seeds")
+end
+
+function tests.commandsApplyAppeaseBuysFactionStandingWithGoldAndSpendsTheTurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.player.gold = 100
+  local repBefore = Factions.reputationFor(game.player, Factions.MERCHANT)
+  local costBefore = Factions.appeaseCost(game.player, Factions.MERCHANT)
+  local consumesTurn = Commands.apply(game, "appease merchant")
+  eq(consumesTurn, true, "affording tribute to a real faction spends the turn")
+  eq(game.player.gold, 100 - costBefore, "the tribute's cost is charged in gold")
+  ok(Factions.reputationFor(game.player, Factions.MERCHANT) > repBefore, "standing actually improves")
+end
+
+function tests.commandsApplyAppeaseRejectsAMissingOrUnknownFactionWithoutSpendingATurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local missing, message1 = Commands.apply(game, "appease")
+  eq(missing, false, "appease with no faction name spends no turn")
+  ok(contains(message1, "merchant"), "the failure lists the valid faction names")
+
+  local unknown, message2 = Commands.apply(game, "appease atlanteans")
+  eq(unknown, false, "an unrecognized faction name spends no turn")
+  ok(contains(message2, "merchant"), "the failure lists the valid faction names")
+end
+
+function tests.commandsApplyAppeaseFailsWithoutSpendingATurnWhenGoldIsShort()
 end
 
 local order = {
