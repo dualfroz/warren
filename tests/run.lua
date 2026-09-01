@@ -12585,6 +12585,352 @@ function tests.branchesBuildIsDeterministicAndGeneratesDeeperThanItsOrigin()
   local b = Branches.build(11, 6, {})
   eq(table.concat(a.map.tiles), table.concat(b.map.tiles),
     "the same world seed and origin depth always build the same pocket floor")
+  eq(a.depth, 6 + Branches.DEPTH_BONUS, "a pocket floor is generated at its origin depth plus the fixed bonus")
+  local c = Branches.build(11, 7, {})
+  ok(table.concat(a.map.tiles) ~= table.concat(c.map.tiles), "a different origin depth builds a different pocket floor")
+end
+
+function tests.branchesBuildNeverPlacesAChasmOrTheWinningAmulet()
+  for seed = 1, 6 do
+    for depth = 6, 10 do
+      local level = Branches.build(seed, depth, {})
+      for _, glyph in ipairs(level.map.tiles) do
+        ok(glyph ~= Tiles.CHASM, "a pocket floor never generates a chasm with nowhere lower to fall")
+      end
+      for _, ground in ipairs(level.floorItems) do
+        ok(ground.item.kind ~= Items.AMULET, "a pocket floor never generates the winning amulet")
+      end
+    end
+  end
+end
+
+function tests.builderPlacesARiftShardFromDepthFourAndARiftFromDepthSix()
+  local shardLevel = Builder.build(4, Rng.new(1), {})
+  local foundShard = false
+  for _, ground in ipairs(shardLevel.floorItems) do
+    if ground.item.kind == Items.RIFTSTONE then foundShard = true end
+  end
+  ok(foundShard, "this seed's depth-4 floor places a rift shard")
+
+  local riftLevel = Builder.build(6, Rng.new(1), {})
+  ok(#riftLevel.rifts >= 1, "this seed's depth-6 floor tears open a rift")
+end
+
+function tests.riftsAndShardsStayOffFloorsAboveTheirOwnThreshold()
+  for seed = 1, 6 do
+    for depth = 1, 3 do
+      local level = Builder.build(depth, Rng.new(seed), {})
+      for _, ground in ipairs(level.floorItems) do
+        ok(ground.item.kind ~= Items.RIFTSTONE, "no rift shard appears above depth 4")
+      end
+    end
+    for depth = 1, 5 do
+      local level = Builder.build(depth, Rng.new(seed), {})
+      eq(#level.rifts, 0, "no rift appears above depth 6")
+    end
+  end
+end
+
+function tests.riftFieldsSurviveALevelSerializationRoundTrip()
+  local level = arena(21, 11)
+  level.rifts = { { x = 6, y = 5 } }
+  eq(level:riftAt(6, 5), level.rifts[1], "Level:riftAt finds the rift by position")
+  ok(level:riftAt(1, 1) == nil, "Level:riftAt finds nothing off-position")
+  local restored = Level.fromData(level:toData())
+  eq(#restored.rifts, 1, "a rift survives a level round trip")
+  eq(restored.rifts[1].x, 6, "the rift's position survives a round trip")
+  eq(restored:riftAt(6, 5), restored.rifts[1], "Level:riftAt finds the restored rift by position")
+end
+
+function tests.gameEnterRiftFailsWithoutARiftUnderfootOrWithoutAShard()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  ok(not game:enterRift(), "entering fails with no rift on the current cell")
+  game.level.rifts = { { x = 5, y = 5 } }
+  ok(not game:enterRift(), "a first crossing fails without a carried shard")
+  eq(game.rift or false, false, "a failed crossing never sets the rift flag")
+end
+
+function tests.gameEnterRiftSpendsTheShardAndSwapsToTheCachedPocketFloor()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.level.rifts = { { x = 5, y = 5 } }
+  game.player.inventory[#game.player.inventory + 1] = Items.riftstone()
+  local invBefore = #game.player.inventory
+  local mainLevel = game.level
+  ok(game:enterRift(), "entering a rift underfoot with a shard in hand succeeds")
+  eq(#game.player.inventory, invBefore - 1, "the shard is spent on the first crossing")
+  eq(game.rift, true, "the rift flag is set while across a crossing")
+  eq(game.level.depth, game.depth + Branches.DEPTH_BONUS, "the pocket floor is generated deeper than the origin")
+  eq(game.player.x, game.level.upX, "the player lands on the pocket floor's own entry point")
+  eq(game.player.y, game.level.upY, "the player lands on the pocket floor's own entry point")
+  ok(game.riftReturn ~= nil, "a return point is remembered")
+  eq(game.riftReturn.level, mainLevel, "the return point remembers the exact main-track level object")
+end
+
+function tests.gameDescendAndAscendAreBothBlockedWhileAcrossARift()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.level.rifts = { { x = 5, y = 5 } }
+  game.player.inventory[#game.player.inventory + 1] = Items.riftstone()
+  game:enterRift()
+  local depthBefore, levelBefore = game.depth, game.level
+  game.player.x, game.player.y = game.level.downX, game.level.downY
+  ok(not game:descend(), "descend refuses to fire while the player is across a rift")
+  game.player.x, game.player.y = game.level.upX, game.level.upY
+  ok(not game:ascend(), "ascend refuses to fire while the player is across a rift")
+  eq(game.depth, depthBefore, "depth is untouched by either refusal")
+  eq(game.level, levelBefore, "the active level is untouched by either refusal")
+end
+
+function tests.gameExitRiftRestoresTheExactMainTrackLevelDepthAndPosition()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local mainLevel = game.level
+  game.level.rifts = { { x = 5, y = 5 } }
+  game.player.inventory[#game.player.inventory + 1] = Items.riftstone()
+  game:enterRift()
+  ok(not game:exitRift(), "exiting fails before the player reaches the pocket floor's own exit")
+  game.player.x, game.player.y = game.level.downX, game.level.downY
+  ok(game:exitRift(), "exiting at the pocket floor's own exit point succeeds")
+  eq(game.rift, false, "the rift flag clears on exit")
+  eq(game.riftReturn, nil, "the return point is cleared once used")
+  eq(game.level, mainLevel, "the exact original level object is restored, not a rebuilt copy")
+  eq(game.depth, 1, "the origin depth is restored")
+  eq(game.player.x, 5, "the player's exact departure position is restored")
+  eq(game.player.y, 5, "the player's exact departure position is restored")
+end
+
+function tests.gameReenteringAStabilizedRiftNeverSpendsASecondShard()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.level.rifts = { { x = 5, y = 5 } }
+  game.player.inventory[#game.player.inventory + 1] = Items.riftstone()
+  game:enterRift()
+  local pocketLevel = game.level
+  game.player.x, game.player.y = game.level.downX, game.level.downY
+  game:exitRift()
+  local invBefore = #game.player.inventory
+  game:enterRift()
+  eq(game.level, pocketLevel, "re-entering the same rift restores the exact cached pocket floor")
+  eq(#game.player.inventory, invBefore, "re-entering an already-stabilized rift spends no second shard")
+end
+
+function tests.gameRiftPocketFloorPersistsStateAcrossALeaveAndReturn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.level.rifts = { { x = 5, y = 5 } }
+  game.player.inventory[#game.player.inventory + 1] = Items.riftstone()
+  game:enterRift()
+  local orc = Monsters.create(Monsters.byKey.orc, 1, game.level.upX, game.level.upY, game.level.depth)
+  orc.hp = 0
+  game.level.entities = { orc }
+  game.player.x, game.player.y = game.level.downX, game.level.downY
+  game:exitRift()
+  game.player.x, game.player.y = 5, 5
+  game:enterRift()
+  eq(game.level.entities[1].hp, 0, "the pocket floor remembers a monster killed on an earlier crossing")
+end
+
+-- Same abandonment bug Game:descend/Game:ascend had (see the ally-carrying
+-- tests near gameAscendCarriesAnActiveNemesisAlongButNeverRollsANewOne),
+-- just at the two other call sites that swap self.level: Game:enterRift and
+-- Game:exitRift share the exact same Game:detachCarriedAllies/
+-- Game:plantCarriedAllies pair.
+function tests.gameEnterRiftAndExitRiftBothCarryALivingCompanionAcrossTheCrossing()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.level.rifts = { { x = 5, y = 5 } }
+  game.player.inventory[#game.player.inventory + 1] = Items.riftstone()
+  local mainLevel = game.level
+  local golem = Companions.summon(game, "golem")
+  ok(golem ~= nil, "the companion bonds before crossing")
+
+  ok(game:enterRift(), "entering the rift succeeds with a shard in hand")
+  eq(game.rift, true, "the game is now across the rift")
+  ok(game:hasCompanion(), "the companion crosses into the rift's pocket floor too")
+  local strandedOnMain = 0
+  for _, entity in ipairs(mainLevel.entities) do
+    if entity.kind == "companion" then strandedOnMain = strandedOnMain + 1 end
+  end
+  eq(strandedOnMain, 0, "the companion is not left stranded on the main-track floor")
+
+  game.player.x, game.player.y = game.level.downX, game.level.downY
+  local pocketLevel = game.level
+  ok(game:exitRift(), "exiting the rift succeeds at its own downstairs")
+  eq(game.rift, false, "back on the main track")
+  ok(game:hasCompanion(), "the companion follows back out of the rift as well")
+  local strandedInPocket = 0
+  for _, entity in ipairs(pocketLevel.entities) do
+    if entity.kind == "companion" then strandedInPocket = strandedInPocket + 1 end
+  end
+  eq(strandedInPocket, 0, "the companion is not left stranded on the pocket floor either")
+end
+
+function tests.choosePlayerActionEntersAWellHealedRiftUnderfootButSkipsItWhenBadlyHurt()
+  local hurt = stagedGame(1, arena(21, 11), 5, 5)
+  hurt.level.rifts = { { x = 5, y = 5 } }
+  hurt.player.inventory[#hurt.player.inventory + 1] = Items.riftstone()
+  hurt.player.hp = math.floor(hurt.player.maxHp * 0.5)
+  hurt:choosePlayerAction()
+  eq(hurt.rift or false, false, "the autopilot never spends a shard while badly hurt")
+
+  local healthy = stagedGame(1, arena(21, 11), 5, 5)
+  healthy.level.rifts = { { x = 5, y = 5 } }
+  healthy.player.inventory[#healthy.player.inventory + 1] = Items.riftstone()
+  healthy:choosePlayerAction()
+  eq(healthy.rift, true, "the autopilot crosses a rift underfoot on sight while at good health")
+end
+
+function tests.choosePlayerActionStepsThroughAndThenExitsARiftUnderAutopilot()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.level.rifts = { { x = 5, y = 5 } }
+  game.player.inventory[#game.player.inventory + 1] = Items.riftstone()
+  game:choosePlayerAction()
+  ok(game.rift, "the autopilot has crossed into the pocket floor")
+  game.player.x, game.player.y = game.level.downX, game.level.downY
+  game:choosePlayerAction()
+  eq(game.rift, false, "standing at the pocket floor's own exit, the autopilot immediately steps back out")
+end
+
+function tests.renderDrawsARiftGlyphWhenVisible()
+  local rendered = stagedGame(1, arena(21, 11), 3, 6)
+  rendered.level.rifts = { { x = 5, y = 6 } }
+  rendered:computeVisible()
+  ok(contains(rendered:render(), "Q"), "a rift on a visible cell renders as its glyph")
+end
+
+function tests.gameSaveLoadRoundTripsAnActiveRiftCrossing()
+  local game = Game.new(9)
+  game.level.rifts = { { x = game.player.x, y = game.player.y } }
+  game.player.inventory[#game.player.inventory + 1] = Items.riftstone()
+  ok(game:enterRift(), "the staged rift crossing succeeds")
+  local path = os.tmpname()
+  game:save(path)
+  local restored = Game.load(path)
+  os.remove(path)
+  eq(restored.rift, true, "the rift flag survives a save/load round trip")
+  eq(restored.depth, game.depth, "depth survives the round trip")
+  eq(table.concat(restored.level.map.tiles), table.concat(game.level.map.tiles),
+    "the active pocket floor's map survives the round trip")
+  eq(restored.riftReturn.x, game.riftReturn.x, "the remembered return position survives the round trip")
+  eq(restored.riftReturn.y, game.riftReturn.y, "the remembered return position survives the round trip")
+  eq(restored.riftReturn.depth, game.riftReturn.depth, "the remembered return depth survives the round trip")
+  restored.player.x, restored.player.y = restored.level.downX, restored.level.downY
+  ok(restored:exitRift(), "exiting still works correctly after a save/load round trip")
+  eq(restored.rift, false, "the rift flag clears after exiting post-load")
+end
+
+function tests.gameSaveLoadRoundTripsAnActiveHordeArena()
+  local game = Game.new(11)
+  game:startHorde()
+  -- Clear wave one so the round trip has to prove more than just "wave one
+  -- survives" - the wave counter must actually be the one Horde.tick
+  -- advanced to, not always reset back to its Horde.newState() default.
+  for _, entity in ipairs(game.level.entities) do entity.hp = 0 end
+  game:cleanupDead()
+  game:endPlayerTurn()
+  eq(game.horde.wave, 2, "the staged run has advanced to wave two before saving")
+  local path = os.tmpname()
+  game:save(path)
+  local restored = Game.load(path)
+  os.remove(path)
+  ok(restored.horde, "an active horde run survives a save/load round trip at all")
+  eq(restored.horde.wave, 2, "the exact wave in progress survives the round trip")
+  eq(restored.level.generator, "horde", "the restored level is still tagged as the arena")
+  eq(table.concat(restored.level.map.tiles), table.concat(game.level.map.tiles),
+    "the arena's own map survives the round trip rather than falling back to the abandoned floor")
+  eq(#restored.level.entities, #game.level.entities, "wave two's monster count survives the round trip")
+  eq(restored.player.x, game.player.x, "the player's arena position survives the round trip")
+  eq(restored.player.y, game.player.y, "the player's arena position survives the round trip")
+  for _, entity in ipairs(restored.level.entities) do entity.hp = 0 end
+  restored:cleanupDead()
+  restored:endPlayerTurn()
+  eq(restored.horde.wave, 3, "the restored run's Horde.tick still advances waves normally after loading")
+end
+
+function tests.gameSaveLoadOfAnOrdinaryRunNeverGainsAHordeField()
+  local game = Game.new(3)
+  local path = os.tmpname()
+  game:save(path)
+  local restored = Game.load(path)
+  os.remove(path)
+  eq(restored.horde, nil, "a run that never entered the arena has no horde field after a round trip")
+  eq(restored.level.generator, game.level.generator,
+    "an ordinary floor's own generator survives the round trip unaffected by the horde snapshot fields")
+end
+
+-- commands.lua: the typed-command parser/dispatcher layered on top of the
+-- same granular Game:<action> methods choosePlayerAction already drives, and
+-- Game:manualStep, its integration into the turn cycle (see game.lua's
+-- Game:beginTurn/autoStep for the shared pre-turn head both share).
+
+function tests.commandsParseSplitsAVerbAndArgsLowercasedAndTrimmed()
+  local parsed = Commands.parse("  ThRoW  3  ")
+  eq(parsed.verb, "throw", "the verb is lowercased")
+  eq(parsed.args[1], "3", "the remaining token becomes an arg")
+  eq(Commands.parse(""), nil, "an empty line parses to nil")
+  eq(Commands.parse("   "), nil, "an all-whitespace line parses to nil")
+end
+
+function tests.commandsApplyRejectsAnUnknownVerbWithoutSpendingATurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local consumesTurn, message = Commands.apply(game, "dance")
+  eq(consumesTurn, false, "an unrecognized verb spends no turn")
+  ok(contains(message, "unknown command"), "the message names the bad verb")
+end
+
+function tests.commandsApplyMovingIntoAWallFailsWithoutSpendingATurn()
+  local game = stagedGame(1, arena(21, 11), 2, 2)
+  local consumesTurn, message = Commands.apply(game, "north")
+  eq(consumesTurn, false, "walking into the arena's own boundary wall spends no turn")
+  eq(message, "you cannot go that way", "the failure explains itself")
+  eq(game.player.x, 2, "the player never actually moves on a rejected step")
+  eq(game.player.y, 2, "the player never actually moves on a rejected step")
+end
+
+function tests.commandsApplyMovementBumpsIntoAnAdjacentHostileAsAnAttack()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 6, 5, 1)
+  rat.hp = 20
+  game.level.entities = { rat }
+  local consumesTurn = Commands.apply(game, "east")
+  eq(consumesTurn, true, "bumping into a hostile spends the turn")
+  eq(game.player.x, 5, "the player does not step onto the monster's own tile")
+  ok(rat.hp < 20, "the bump attack actually lands through Game:movePlayer")
+end
+
+function tests.commandsApplyAttackAliasesMovementIntoAnExplicitDirection()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 6, 5, 1)
+  rat.hp = 20
+  game.level.entities = { rat }
+  local consumesTurn = Commands.apply(game, "attack east")
+  eq(consumesTurn, true, "attack <dir> spends the turn")
+  ok(rat.hp < 20, "attack <dir> lands the same bump attack a plain direction would")
+  local rejected, message = Commands.apply(game, "attack sideways")
+  eq(rejected, false, "attack with an unrecognized direction word spends no turn")
+  eq(message, "attack which direction?", "the failure names what is missing")
+end
+
+function tests.commandsApplyWaitAlwaysSucceedsAndSpendsTheTurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local consumesTurn, message = Commands.apply(game, "wait")
+  eq(consumesTurn, true, "waiting always spends the turn")
+  eq(message, "you wait", "waiting reports itself")
+end
+
+function tests.commandsApplyPickupSweepsFloorItemsAtThePlayersFeetAndSpendsTheTurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.level.floorItems = { { x = 5, y = 5, item = Items.gold(15) } }
+  local goldBefore = game.player.gold
+  local consumesTurn = Commands.apply(game, "pickup")
+  eq(consumesTurn, true, "pickup always spends the turn")
+  eq(game.player.gold, goldBefore + 15, "gold sitting on the player's own tile is swept up")
+  eq(#game.level.floorItems, 0, "the picked-up item leaves the floor")
+end
+
+function tests.commandsApplyUseDrinksAPotionByInventoryIndexAndSpendsTheTurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local before = #game.player.inventory
+  local consumesTurn = Commands.apply(game, "use 1")
+  eq(consumesTurn, true, "using a valid inventory item spends the turn")
+  eq(#game.player.inventory, before - 1, "the consumed potion leaves the inventory")
+end
+
 end
 
 local order = {
