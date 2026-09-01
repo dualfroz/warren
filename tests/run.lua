@@ -11547,6 +11547,1044 @@ function tests.builderDiggingThroughAPrefabVaultsOuterWallOpensARouteToItsSealed
     "digging through the outer wall opens a genuine route into the vault's previously sealed interior")
 end
 
+function tests.prefabVaultFieldsSurviveSerialization()
+  local level = arena(21, 11)
+  level.prefabVaults = { { name = "guardPost", x = 5, y = 4, w = 7, h = 5 } }
+  local restored = Level.fromData(level:toData())
+  eq(#restored.prefabVaults, 1, "the prefab vault list survives a round trip")
+  eq(restored.prefabVaults[1].name, "guardPost", "a placed vault's template name survives a round trip")
+  eq(restored.prefabVaults[1].x, 5, "a placed vault's anchor x survives a round trip")
+  eq(restored.prefabVaults[1].w, 7, "a placed vault's footprint width survives a round trip")
+end
+
+function tests.saveGameFnv1a32MatchesThePublishedTestVectors()
+  eq(SaveGame.fnv1a32(""), 2166136261, "the empty string hashes to the FNV-1a32 offset basis")
+  eq(SaveGame.fnv1a32("a"), 3826002220, "a single byte matches the published FNV-1a32 test vector")
+  eq(SaveGame.fnv1a32("warren"), SaveGame.fnv1a32("warren"), "hashing the same string twice is deterministic")
+  ok(SaveGame.fnv1a32("warren") ~= SaveGame.fnv1a32("warreo"), "a one-character change changes the hash")
+end
+
+function tests.saveGameEncodeDecodeRoundTripsAValueUnchanged()
+  local codec = SaveGame.new({})
+  local data = { hp = 12, name = "vault-keeper", tags = { "brave", "unlucky" } }
+  local decoded = codec.decode(codec.encode(data))
+  eq(Serialize.encode(decoded), Serialize.encode(data), "a value survives an encode/decode round trip byte for byte")
+end
+
+function tests.saveGameSaveThenLoadRoundTripsThroughARealFile()
+  local codec = SaveGame.new({})
+  local path = os.tmpname()
+  codec.save(path, { hp = 12, tags = { "brave", "unlucky" } })
+  local data = codec.load(path)
+  os.remove(path)
+  eq(data.hp, 12, "a saved number survives a real file round trip")
+  eq(data.tags[1], "brave", "a saved array survives a real file round trip")
+  eq(data.tags[2], "unlucky", "array order survives a real file round trip")
+end
+
+function tests.saveGameLoadReportsMissingRatherThanErroringOnANonexistentFile()
+  local codec = SaveGame.new({})
+  local data, err = codec.load("/tmp/warren_savegame_does_not_exist_998877.sav")
+  eq(data, nil, "a missing file yields no data")
+  eq(err, "missing", "the reason is reported as missing, distinct from corruption")
+end
+
+function tests.saveGameDecodeRejectsTextThatIsNotValidLuaAtAll()
+  local codec = SaveGame.new({})
+  local data, err = codec.decode("{ this is not } valid ( lua at all")
+  eq(data, nil, "unparseable text yields no data")
+  ok(contains(err or "", "corrupt"), "the failure is reported as corruption")
+end
+
+function tests.saveGameDecodeDetectsATamperedPayloadViaChecksumMismatch()
+  local codec = SaveGame.new({})
+  local text = codec.encode({ marker = "TAMPERMARKER", count = 3 })
+  local tampered = text:gsub("TAMPERMARKER", "TAMPERMARKED", 1)
+  ok(tampered ~= text, "the substitution actually changed the encoded text")
+  local data, err = codec.decode(tampered)
+  eq(data, nil, "a payload that no longer matches its checksum is rejected")
+  ok(contains(err or "", "checksum mismatch"), "the rejection names the checksum as the reason")
+end
+
+function tests.saveGameDecodeRefusesASaveFromAVersionNewerThanTheCodecSupports()
+  -- One throwaway migration just to make CURRENT_VERSION 2 for this check.
+  local codec = SaveGame.new({ function(d) return d end })
+  local payload = Serialize.encode({ x = 1 })
+  local envelope = {
+    magic = "WARRENSAVE", version = codec.CURRENT_VERSION + 1,
+    checksum = SaveGame.fnv1a32(payload), payload = payload,
+  }
+  local data, err = codec.decode(Serialize.encode(envelope))
+  eq(data, nil, "a save newer than this codec understands is refused rather than guessed at")
+  ok(contains(err or "", "future version"), "the refusal names the version mismatch as the reason")
+end
+
+function tests.saveGameWithNoMigrationHistoryPassesLegacyDataThroughUnchanged()
+  local codec = SaveGame.new({})
+  local path = os.tmpname()
+  Serialize.saveFile(path, { greeting = "hi", count = 7 })
+  local data, err = codec.load(path)
+  os.remove(path)
+  eq(err, nil, "a magic-less legacy file loads without an error")
+  eq(data.greeting, "hi", "legacy string fields survive untouched")
+  eq(data.count, 7, "legacy numeric fields survive untouched")
+end
+
+function tests.saveGameMigrationChainAppliesEachStepInOrderStartingFromVersionOne()
+  local codec = SaveGame.new({
+    [1] = function(d) d.trail = d.trail or {}; table.insert(d.trail, "one"); return d end,
+    [2] = function(d) d.trail = d.trail or {}; table.insert(d.trail, "two"); return d end,
+  })
+  eq(codec.CURRENT_VERSION, 3, "two migrations put the current version one past the last step")
+  local path = os.tmpname()
+  Serialize.saveFile(path, { trail = {} })
+  local data = codec.load(path)
+  os.remove(path)
+  eq(#data.trail, 2, "both migration steps ran")
+  eq(data.trail[1], "one", "step one ran before step two")
+  eq(data.trail[2], "two", "step two ran after step one")
+end
+
+function tests.saveGameMigrationChainSkipsStepsAlreadyPastTheStoredVersion()
+  local codec = SaveGame.new({
+    [1] = function(d) d.trail = d.trail or {}; table.insert(d.trail, "one"); return d end,
+    [2] = function(d) d.trail = d.trail or {}; table.insert(d.trail, "two"); return d end,
+  })
+  local payload = Serialize.encode({ trail = {} })
+  local envelope = {
+    magic = "WARRENSAVE", version = 2,
+    checksum = SaveGame.fnv1a32(payload), payload = payload,
+  }
+  local data = codec.decode(Serialize.encode(envelope))
+  eq(#data.trail, 1, "a save already at version 2 only runs the one remaining step")
+  eq(data.trail[1], "two", "the remaining step is the one from version 2 onward, not version 1's")
+end
+
+function tests.metaLoadUpgradesALegacyPreEnvelopeFileWithoutLosingItsRenown()
+  local path = os.tmpname()
+  Serialize.saveFile(path, {
+    renown = 77, totalRuns = 3, wins = 1, bestDepth = 4,
+    achievements = { boss_slayer = true }, perks = { vigor = true },
+  })
+  local meta = Meta.load(path)
+  os.remove(path)
+  eq(meta.renown, 77, "renown from a pre-envelope legacy file is not discarded")
+  eq(meta.achievements.boss_slayer, true, "achievements from a legacy file survive the upgrade")
+  eq(#meta.graves, 0, "graves defaults in for a file predating the graves feature")
+  eq(#meta.leaderboard, 0, "leaderboard defaults in for a file predating the leaderboard feature")
+  eq(#meta.runHistory, 0, "runHistory defaults in for a file predating streaks")
+end
+
+function tests.metaLoadStartsFreshWithoutCrashingOnACorruptedFile()
+  local path = os.tmpname()
+  local meta = Meta.new()
+  meta.renown = 500
+  Meta.save(meta, path)
+  local file = assert(io.open(path, "r"))
+  local text = file:read("a")
+  file:close()
+  local tampered = text:gsub("500", "999", 1)
+  local out = assert(io.open(path, "w"))
+  out:write(tampered)
+  out:close()
+  local restored = Meta.load(path)
+  os.remove(path)
+  eq(restored.renown, 0, "a checksum-broken meta file starts fresh rather than trusting tampered renown")
+end
+
+function tests.gameLoadUpgradesALegacyPreEnvelopeSaveMissingNewerPlayerFields()
+  local game = Game.new(1, { class = "fighter" })
+  local data = game:toData()
+  data.playerExtra.essence = nil
+  data.playerExtra.skills = nil
+  data.playerExtra.skillPoints = nil
+  data.playerExtra.skillCooldowns = nil
+  data.playerExtra.reputation = nil
+  data.playerExtra.sanity = nil
+  data.stats.vaultsOpened = nil
+  data.stats.setPiecesFound = nil
+  local path = os.tmpname()
+  Serialize.saveFile(path, data)
+  local restored = Game.load(path)
+  os.remove(path)
+  eq(restored.player.essence, 0, "essence defaults in for a save predating it")
+  eq(restored.stats.vaultsOpened, 0, "vaultsOpened defaults in for a save predating it")
+  eq(restored.stats.setPiecesFound, 0, "setPiecesFound defaults in for a save predating it")
+  eq(type(restored.player.skills), "table", "skills defaults to an empty table for a save predating the skill tree")
+  eq(restored.player.skillPoints, 0, "skillPoints defaults in for a save predating the skill tree")
+  eq(type(restored.player.skillCooldowns), "table",
+    "skillCooldowns defaults to an empty table for a save predating the skill tree")
+  eq(type(restored.player.reputation), "table", "reputation defaults to an empty table for a save predating it")
+  eq(restored.player.sanity, Sanity.MAX, "sanity defaults to full for a save predating the sanity system")
+end
+
+function tests.gameLoadRaisesAClearErrorOnATruncatedSaveFileInsteadOfCrashingObscurely()
+  local game = Game.new(1)
+  local path = os.tmpname()
+  game:save(path)
+  local file = assert(io.open(path, "r"))
+  local text = file:read("a")
+  file:close()
+  local out = assert(io.open(path, "w"))
+  out:write(text:sub(1, 20))
+  out:close()
+  local success, err = pcall(Game.load, path)
+  os.remove(path)
+  eq(success, false, "loading a truncated save fails rather than silently misloading")
+  ok(contains(err or "", "corrupt"), "the failure names corruption instead of an obscure nil-call error")
+end
+
+function tests.gameLoadRaisesAClearErrorForASaveFromAFutureVersion()
+  local payload = Serialize.encode({ marker = 1 })
+  local envelope = {
+    magic = "WARRENSAVE", version = 999,
+    checksum = SaveGame.fnv1a32(payload), payload = payload,
+  }
+  local path = os.tmpname()
+  local file = assert(io.open(path, "w"))
+  file:write(Serialize.encode(envelope))
+  file:close()
+  local success, err = pcall(Game.load, path)
+  os.remove(path)
+  eq(success, false, "loading a save from a newer format fails rather than misinterpreting it")
+  ok(contains(err or "", "future version"), "the failure names the version mismatch")
+end
+
+-- A dead-end room reachable from the player's own room only by turning a
+-- corner, so a straight sightline between the two ends always crosses solid
+-- rock while a four-directional flood (or a walker) can still reach it.
+local function noiseCornerArena()
+  local map = Map.new(15, 9)
+  for x = 2, 5 do map:set(x, 3, Map.FLOOR) end
+  for y = 3, 5 do map:set(5, y, Map.FLOOR) end
+  return Level.new({
+    depth = 1, generator = "arena", map = map,
+    entities = {}, floorItems = {}, traps = {}, lights = {}, dark = false, explored = {},
+    upX = 2, upY = 3, downX = 5, downY = 5,
+  })
+end
+
+function tests.noisePropagateDecaysByExactlyOneLoudnessPerStepThroughOpenFloor()
+  local level = arena(21, 11)
+  local field = Noise.propagate(level.map, 5, 5, 4)
+  eq(Noise.intensityAt(field, level.map, 5, 5), 4, "the origin itself keeps the full starting loudness")
+  eq(Noise.intensityAt(field, level.map, 6, 5), 3, "one step away has decayed by exactly one")
+  eq(Noise.intensityAt(field, level.map, 7, 5), 2, "two steps away has decayed by exactly two")
+  eq(Noise.intensityAt(field, level.map, 8, 5), 1, "three steps away has decayed by exactly three")
+  eq(Noise.intensityAt(field, level.map, 9, 5), 0, "four steps away has decayed to nothing")
+  eq(Noise.intensityAt(field, level.map, 10, 5), 0, "five steps away never even carried a trailing zero forward")
+end
+
+function tests.noisePropagateNeverCrossesASolidWallEvenWhenTheOtherSideIsCloseByEuclideanDistance()
+  local level = wallSplitArena()
+  local field = Noise.propagate(level.map, 5, 6, 20)
+  ok(Noise.intensityAt(field, level.map, 10, 6) > 0, "loudness reaches all the way up to the dividing wall")
+  eq(Noise.intensityAt(field, level.map, 12, 6), 0, "nothing at all gets through to the far side of the wall")
+end
+
+function tests.noisePropagateBendsAroundACornerToReachACellWithNoStraightLineAtAll()
+  local level = noiseCornerArena()
+  ok(not Los.clear(level.map, 2, 3, 5, 5), "no straight sightline exists between the two ends of the bend")
+  local field = Noise.propagate(level.map, 2, 3, 10)
+  ok(Noise.intensityAt(field, level.map, 5, 5) > 0, "the flood still reaches the far end by turning the corner")
+  eq(Noise.intensityAt(field, level.map, 5, 5), 10 - 5, "the intensity there reflects the corridor's actual walked distance, five steps")
+end
+
+function tests.noisePropagateFromAWallOriginStillReachesItsWalkableNeighbours()
+  local level = arena(21, 11)
+  level.map:set(10, 6, Map.WALL)
+  local field = Noise.propagate(level.map, 10, 6, 5)
+  eq(Noise.intensityAt(field, level.map, 10, 6), 5, "the unwalkable origin itself still records the starting loudness")
+  eq(Noise.intensityAt(field, level.map, 11, 6), 4, "a walkable neighbour of the struck wall still hears it one step quieter")
+  eq(Noise.intensityAt(field, level.map, 9, 6), 4, "every walkable side of the wall hears it, not just one")
+end
+
+function tests.noiseIntensityAtIsZeroOutOfBoundsAndWhereverTheFloodNeverReached()
+  local level = arena(21, 11)
+  local field = Noise.propagate(level.map, 5, 5, 3)
+  eq(Noise.intensityAt(field, level.map, -3, 5), 0, "a cell outside the map bounds reads as silent")
+  eq(Noise.intensityAt(field, level.map, 5, 5000), 0, "a wildly out of range cell reads as silent rather than erroring")
+  eq(Noise.intensityAt(field, level.map, 19, 9), 0, "a cell the flood never reached reads as silent")
+end
+
+function tests.noisePropagateWithZeroOrNegativeLoudnessReachesNothing()
+  local level = arena(21, 11)
+  eq(next(Noise.propagate(level.map, 5, 5, 0)), nil, "zero loudness produces an entirely empty field")
+  eq(next(Noise.propagate(level.map, 5, 5, -3)), nil, "negative loudness produces an entirely empty field too")
+end
+
+function tests.gameEmitNoiseEventuallyStirsADormantMonsterWithinRangeIntoSearchingAtTheNoisesOrigin()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 7, 6, 1)
+  orc.awareness = Stealth.DORMANT
+  game.level.entities = { orc }
+  local stirred = false
+  for _ = 1, 200 do
+    game:emitNoise(3, 6, Noise.MELEE)
+    if orc.awareness ~= Stealth.DORMANT then stirred = true; break end
+  end
+  ok(stirred, "a dormant monster within the flood's reach eventually stirs across enough noisy bursts")
+  eq(orc.awareness, Stealth.SEARCHING, "hearing a noise only starts a search, unlike Stealth.alert's outright hunting")
+  eq(orc.lastKnownX, 3, "the search heads for the noise's own origin")
+  eq(orc.lastKnownY, 6, "the search heads for the noise's own origin")
+end
+
+function tests.gameEmitNoiseNeverStirsADormantMonsterTheFloodCannotReach()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 19, 6, 1)
+  orc.awareness = Stealth.DORMANT
+  game.level.entities = { orc }
+  for _ = 1, 200 do
+    game:emitNoise(3, 6, Noise.MELEE)
+  end
+  eq(orc.awareness, Stealth.DORMANT, "a monster far outside even the loudest reach used here never stirs")
+end
+
+function tests.gameEmitNoiseNeverAffectsAMonsterThatIsAlreadyAware()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  orc.awareness = Stealth.HUNTING
+  orc.lastKnownX, orc.lastKnownY = 99, 99
+  game.level.entities = { orc }
+  game:emitNoise(3, 6, Noise.MELEE)
+  eq(orc.awareness, Stealth.HUNTING, "an already-aware monster is untouched by a noise burst")
+  eq(orc.lastKnownX, 99, "its existing last-known position is left exactly as it was")
+end
+
+function tests.gamePlayerAttackCanStirADormantBystanderThatIsNotEvenTheTarget()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local target = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  local bystander = Monsters.create(Monsters.byKey.orc, 2, 8, 6, 1)
+  bystander.awareness = Stealth.DORMANT
+  game.level.entities = { target, bystander }
+  local stirred = false
+  for _ = 1, 200 do
+    target.hp = target.maxHp
+    game:playerAttack(target)
+    if bystander.awareness ~= Stealth.DORMANT then stirred = true; break end
+  end
+  ok(stirred, "a sustained melee fight eventually stirs a wild bystander who was never the target")
+  eq(bystander.awareness, Stealth.SEARCHING, "the bystander only starts searching, having merely heard the clash")
+end
+
+function tests.gameMonsterMeleeCanStirADormantBystanderTooNotJustPlayerActions()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local attacker = Monsters.create(Monsters.byKey.orc, 1, 4, 6, 1)
+  local bystander = Monsters.create(Monsters.byKey.orc, 2, 8, 6, 1)
+  bystander.awareness = Stealth.DORMANT
+  game.level.entities = { attacker, bystander }
+  local stirred = false
+  for _ = 1, 200 do
+    game.player.hp = game.player.maxHp
+    game:monsterMelee(attacker)
+    if bystander.awareness ~= Stealth.DORMANT then stirred = true; break end
+  end
+  ok(stirred, "a monster hitting the player is exactly as loud as the player hitting back")
+end
+
+function tests.gameCastSpellOnlyEmitsNoiseOnASuccessfulCastNeverOnAFailedOne()
+  local game = stagedGame(5, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 6, 6, 1)
+  local bystander = Monsters.create(Monsters.byKey.orc, 2, 9, 6, 1)
+  bystander.awareness = Stealth.DORMANT
+  game.level.entities = { rat, bystander }
+  game.player.mana = 0
+  for _ = 1, 200 do
+    game:castSpell("missile", rat)
+  end
+  eq(bystander.awareness, Stealth.DORMANT, "two hundred failed casts for lack of mana never make a sound")
+
+  game.player.mana = 999
+  local stirred = false
+  for _ = 1, 200 do
+    rat.hp = rat.maxHp
+    game:castSpell("missile", rat)
+    if bystander.awareness ~= Stealth.DORMANT then stirred = true; break end
+  end
+  ok(stirred, "a spell that actually goes off is loud enough to eventually stir a nearby bystander")
+end
+
+function tests.gameDigEmitsNoiseFromTheStruckCellEvenThoughItStartsUnwalkable()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.level.map:set(4, 6, Tiles.WALL)
+  game.player.pick = Items.pick("miner's pick", 20)
+  local bystander = Monsters.create(Monsters.byKey.orc, 1, 9, 6, 1)
+  bystander.awareness = Stealth.DORMANT
+  game.level.entities = { bystander }
+  local stirred = false
+  for _ = 1, 200 do
+    game:dig(1, 0)
+    if bystander.awareness ~= Stealth.DORMANT then stirred = true; break end
+    if not game.player.pick then game.player.pick = Items.pick("miner's pick", 20) end
+    if game.level.map:get(4, 6) == Tiles.FLOOR then game.level.map:set(4, 6, Tiles.WALL) end
+  end
+  ok(stirred, "the racket of a pick striking solid rock still carries even though the struck cell starts unwalkable")
+end
+
+function tests.diseaseInfectSeedsIncubationAndRefusesToStackASecondInfection()
+  local host = { name = "dummy", hp = 20 }
+  ok(Disease.infect(host, Disease.PARASITES), "infecting a clean host succeeds")
+  ok(Disease.isInfected(host), "the host now carries an infection")
+  eq(host.disease.incubation, Disease.defs[Disease.PARASITES].incubation, "incubation starts at the affliction's own listed value")
+  eq(host.disease.stage, 0, "a freshly seeded infection has not erupted yet")
+  ok(not Disease.infect(host, Disease.ROT), "a second affliction cannot take hold while one is already active")
+  eq(host.disease.key, Disease.PARASITES, "the original infection is left completely untouched by the refused attempt")
+end
+
+function tests.diseaseUnknownKeyNeverInfects()
+  local host = { name = "dummy", hp = 20 }
+  ok(not Disease.infect(host, "swamp fever"), "an unrecognised affliction key never takes hold")
+  ok(not Disease.isInfected(host), "the host stays clean")
+end
+
+function tests.diseaseIsInfectedAndHasEruptedTrackIncubationVsActiveStageSeparately()
+  local host = { name = "dummy", hp = 20 }
+  Disease.infect(host, Disease.ROT)
+  ok(Disease.isInfected(host), "an incubating host already counts as infected")
+  ok(not Disease.hasErupted(host), "but has not yet erupted while incubation is still counting down")
+  host.disease.stage = 1
+  ok(Disease.hasErupted(host), "once staged past zero the infection counts as erupted")
+end
+
+function tests.diseaseTickCountsIncubationDownInSilenceThenErupts()
+  local host = { name = "dummy", hp = 20 }
+  Disease.infect(host, Disease.PARASITES)
+  local incubation = Disease.defs[Disease.PARASITES].incubation
+  for i = 1, incubation - 1 do
+    local line = Disease.tick(host)
+    eq(line, nil, "each turn still incubating produces no visible symptom")
+    eq(host.disease.stage, 0, "the infection has not erupted yet at turn " .. i)
+  end
+  local eruptionLine = Disease.tick(host)
+  ok(contains(eruptionLine, "breaks out"), "the turn incubation runs out, the eruption is reported")
+  eq(host.disease.stage, 1, "the infection is now active at stage one")
+end
+
+function tests.diseaseTickDealsStagePotencyThroughResistancesAndEscalatesOnItsFixedSchedule()
+  local host = { name = "dummy", hp = 1000 }
+  Disease.infect(host, Disease.ROT)
+  host.disease.stage = 1
+  host.disease.sinceStage = 0
+  local def = Disease.defs[Disease.ROT]
+  local hpBefore = host.hp
+  Disease.tick(host)
+  eq(host.hp, hpBefore - def.stagePotency[1], "a stage-one tick deals exactly that stage's listed potency")
+  for _ = 2, def.stageTurns - 1 do
+    Disease.tick(host)
+  end
+  eq(host.disease.stage, 1, "the stage holds steady right up until its full window has elapsed")
+  local escalationLine = Disease.tick(host)
+  ok(contains(escalationLine, "worsens"), "the tick that completes the window reports the escalation")
+  eq(host.disease.stage, 2, "the infection has moved on to stage two")
+  eq(host.disease.sinceStage, 0, "the new stage starts its own window fresh")
+end
+
+function tests.diseaseTickNeverEscalatesPastTheTopStage()
+  local host = { name = "dummy", hp = 1000 }
+  Disease.infect(host, Disease.PLAGUE)
+  host.disease.stage = Disease.MAX_STAGE
+  host.disease.sinceStage = 0
+  local def = Disease.defs[Disease.PLAGUE]
+  for _ = 1, def.stageTurns * 3 do
+    Disease.tick(host)
+  end
+  eq(host.disease.stage, Disease.MAX_STAGE, "the top stage never escalates any further, however long it lingers")
+end
+
+function tests.diseaseAnImmuneHostTakesNoDamageButStillEscalatesOnSchedule()
+  local host = { name = "dummy", hp = 1000, resist = { poison = Resistances.IMMUNE } }
+  Disease.infect(host, Disease.ROT)
+  host.disease.stage = 1
+  host.disease.sinceStage = 0
+  local def = Disease.defs[Disease.ROT]
+  local hpBefore = host.hp
+  for _ = 1, def.stageTurns - 1 do
+    local line = Disease.tick(host)
+    eq(line, nil, "an immune host takes no damage, so a plain tick has nothing to report")
+  end
+  eq(host.hp, hpBefore, "an immune host never loses hp to the infection at all")
+  local escalationLine = Disease.tick(host)
+  ok(contains(escalationLine, "worsens"), "immunity blocks the damage but not the clock - the stage still worsens on schedule")
+end
+
+function tests.diseaseCureLiftsAnInfectionAtAnyStageAndReportsFalseWhenThereWasNothingToLift()
+  local host = { name = "dummy", hp = 20 }
+  eq(Disease.cure(host), false, "curing a clean host reports nothing was lifted")
+  Disease.infect(host, Disease.PARASITES)
+  ok(Disease.cure(host), "curing an incubating infection succeeds")
+  ok(not Disease.isInfected(host), "the host is clean again")
+  Disease.infect(host, Disease.PLAGUE)
+  host.disease.stage = 3
+  ok(Disease.cure(host), "curing works exactly the same on a fully erupted top-stage infection")
+  ok(not Disease.isInfected(host), "the host is clean again regardless of how far the infection had progressed")
+end
+
+function tests.diseaseStagePotencyIsZeroWhileIncubatingOrUninfected()
+  local host = { name = "dummy", hp = 20 }
+  eq(Disease.stagePotency(host), 0, "an uninfected host has no stage potency at all")
+  Disease.infect(host, Disease.ROT)
+  eq(Disease.stagePotency(host), 0, "a still-incubating infection has not erupted into any potency yet")
+  host.disease.stage = 2
+  eq(Disease.stagePotency(host), Disease.defs[Disease.ROT].stagePotency[2], "an erupted stage reports its own listed potency")
+end
+
+function tests.gameMonsterMeleeCanInfectThePlayerViaABiteCarryingSpeciesButNeverStacksASecondInfection()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 4, 6, 1)
+  game.level.entities = { rat }
+  game.player.hp = 10000
+  game.player.maxHp = 10000
+  local infected = false
+  for _ = 1, 400 do
+    game:monsterMelee(rat)
+    if Disease.isInfected(game.player) then infected = true; break end
+  end
+  ok(infected, "enough bites from a parasite-carrying species eventually infect the player")
+  eq(game.player.disease.key, Disease.PARASITES, "the player caught exactly the species' own carried affliction")
+  local firstIncubation = game.player.disease.incubation
+  for _ = 1, 50 do
+    game:monsterMelee(rat)
+  end
+  ok(game.player.disease.incubation <= firstIncubation, "further bites while already sick never restart or stack a second infection")
+end
+
+function tests.gameMonsterMeleeNeverInfectsFromASpeciesWithNoBiteDisease()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  local goblin = Monsters.create(Monsters.byKey.goblin, 1, 4, 6, 1)
+  eq(goblin.biteDisease, nil, "a goblin carries no disease of its own to begin with")
+  game.level.entities = { goblin }
+  game.player.hp = 10000
+  game.player.maxHp = 10000
+  for _ = 1, 400 do
+    game:monsterMelee(goblin)
+  end
+  ok(not Disease.isInfected(game.player), "four hundred goblin bites never infect anyone, since goblins carry nothing to catch")
+end
+
+function tests.gameEndPlayerTurnTicksThePlayersDiseaseAndLogsItsEruption()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Disease.infect(game.player, Disease.PARASITES)
+  local incubation = Disease.defs[Disease.PARASITES].incubation
+  for _ = 1, incubation - 1 do
+    game:endPlayerTurn()
+    eq(game.player.disease.stage, 0, "the infection keeps quietly incubating turn by turn")
+  end
+  game:endPlayerTurn()
+  eq(game.player.disease.stage, 1, "the infection erupts on schedule as the player's own turns tick past")
+  eq(game.log:last(), "you break out in gut parasites",
+    "the eruption is reported in the message log with correct you-are-the-subject grammar, not the third-person 'breaks out' a named monster would get")
+end
+
+function tests.gameUseItemDrinkingACurePotionLiftsTheInfectionAndIdentifiesThePotion()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Disease.infect(game.player, Disease.ROT)
+  game.player.inventory = { Items.potionOf("cure") }
+  local used = game:useItem(1)
+  eq(used, true, "drinking the potion succeeds")
+  ok(not Disease.isInfected(game.player), "the cure potion lifts the infection entirely")
+  ok(contains(game.log:last(), "cleansed"), "the log confirms the cure took effect")
+  eq(#game.player.inventory, 0, "the spent potion leaves the inventory like any other")
+end
+
+function tests.gameUseItemDrinkingACurePotionAlsoLiftsHostileStatusesNotJustDisease()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Status.apply(game.player, Status.POISON, 5, 2)
+  Status.apply(game.player, Status.CONFUSE, 6, 1)
+  Status.apply(game.player, Status.STRENGTH, 30, 3)
+  game.player.inventory = { Items.potionOf("cure") }
+  local used = game:useItem(1)
+  eq(used, true, "drinking the potion succeeds")
+  ok(not Status.has(game.player, Status.POISON), "the cure potion lifts poison even with no disease present")
+  ok(not Status.has(game.player, Status.CONFUSE), "the cure potion lifts confusion too")
+  ok(Status.has(game.player, Status.STRENGTH), "the cure potion never touches a buff like strength")
+  ok(contains(game.log:last(), "fades"), "the log reports the lifted statuses when there was no disease to mention")
+end
+
+function tests.gameUseItemDrinkingACurePotionReportsBothDiseaseAndStatusesWhenBothArePresent()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  Disease.infect(game.player, Disease.ROT)
+  Status.apply(game.player, Status.POISON, 5, 2)
+  game.player.inventory = { Items.potionOf("cure") }
+  game:useItem(1)
+  ok(not Disease.isInfected(game.player), "the infection is lifted alongside the status effect")
+  ok(not Status.has(game.player, Status.POISON), "the status effect is lifted alongside the infection")
+  ok(contains(game.log:last(), "cleansed away") and contains(game.log:last(), "fades"),
+    "the single log line credits both the disease cure and the status cure")
+end
+
+function tests.gameUseItemDrinkingACurePotionWithNothingToCureIsHonestInTheLog()
+  local game = stagedGame(1, arena(21, 11), 3, 6)
+  game.player.inventory = { Items.potionOf("cure") }
+  local used = game:useItem(1)
+  eq(used, true, "the potion is still consumed even when there is nothing to cleanse")
+  ok(contains(game.log:last(), "nothing to cleanse"), "the log admits nothing was actually cured")
+end
+
+function tests.diseaseAndBiteDiseaseFieldsSurviveALevelSerializationRoundTrip()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 6, 5, 1)
+  Disease.infect(rat, Disease.PLAGUE)
+  rat.disease.stage = 2
+  game.level.entities = { rat }
+
+  local restored = Level.fromData(game.level:toData())
+  eq(restored.entities[1].biteDisease, Disease.PARASITES, "the species' own carried affliction survives a level round trip")
+  eq(restored.entities[1].disease.key, Disease.PLAGUE, "the active infection's key survives a level round trip")
+  eq(restored.entities[1].disease.stage, 2, "the active infection's progressed stage survives a level round trip")
+end
+
+-- captives.lua: netting a battered monster alive instead of finishing it
+-- off, and cashing the resulting captive in for goodwill, gold or intel.
+
+function tests.captivesEligibleAcceptsABatteredWildHostileAndRejectsATooHealthyOne()
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 6, 6, 1)
+  rat.hp = 1
+  ok(Captives.eligible(rat), "a wild hostile battered down to a sliver of hp is eligible for a net")
+  rat.hp = rat.maxHp
+  ok(not Captives.eligible(rat), "a target still at full health is too fierce to net")
+end
+
+function tests.captivesEligibleExcludesBossesMimicsGravesNemesesAndTheVendingShopkeeper()
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 6, 6, 3)
+  orc.hp = 1
+  orc.isBoss = true
+  ok(not Captives.eligible(orc), "a boss is excluded from netting even when battered")
+  orc.isBoss = false
+  orc.mimic = true
+  ok(not Captives.eligible(orc), "a mimic is excluded from netting even when battered")
+  orc.mimic = false
+  orc.grave = true
+  ok(not Captives.eligible(orc), "a grave shade is excluded from netting even when battered")
+  orc.grave = false
+  orc.nemesis = true
+  ok(not Captives.eligible(orc), "a nemesis is excluded from netting even when battered")
+  orc.nemesis = false
+  ok(Captives.eligible(orc), "the same battered orc becomes eligible again once none of the exclusions apply")
+  local shopkeeper = Monsters.create(Monsters.byKey.shopkeeper, 2, 6, 6, 4)
+  shopkeeper.hp = 1
+  ok(not Captives.eligible(shopkeeper), "the vending shopkeeper is never eligible for a net even when battered")
+end
+
+function tests.captivesCanReachRespectsRangeAndLineOfSight()
+  local level = arena(21, 11)
+  ok(Captives.canReach(level.map, 3, 6, 3 + Captives.RANGE, 6), "a target at exactly max range with a clear line is reachable")
+  ok(not Captives.canReach(level.map, 3, 6, 3 + Captives.RANGE + 1, 6), "a target one cell beyond max range is unreachable")
+  level.map:set(5, 6, Tiles.WALL)
+  ok(not Captives.canReach(level.map, 3, 6, 7, 6), "a wall blocking the line of sight makes an in-range target unreachable")
+end
+
+function tests.captivesValueOfMatchesKillXpAndAddsAnEliteBonus()
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 6, 6, 3)
+  eq(Captives.valueOf(orc), Monsters.xpFor(orc), "a plain monster's capture value equals its kill xp")
+  orc.elite = true
+  orc.eliteTier = "champion"
+  local baseXp = Monsters.xpFor(orc)
+  eq(Captives.valueOf(orc), baseXp + Elites.xpBonus(orc, baseXp),
+    "an elite's capture value adds the same bonus a kill's xp would")
+  ok(Captives.valueOf(orc) > baseXp, "the elite bonus actually raises the capture value above the plain kill xp")
+end
+
+function tests.captivesResolveRefusesWithNoClearThrowWithoutSpendingTheNet()
+  local game = stagedGame(4, arena(21, 11), 2, 2)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 19, 9, 1)
+  rat.hp = 1
+  game.level.entities = { rat }
+  local net = Items.net()
+  local success, lines = Captives.resolve(game, game.player, net, rat)
+  eq(success, false, "a net thrown beyond range never leaves the hand")
+  ok(contains(lines[1], "clear throw"), "the reason given is the lack of a clear throw")
+end
+
+function tests.captivesResolveWastesTheNetOnATargetStillTooHealthyToSubdue()
+  local game = stagedGame(4, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 6, 6, 1)
+  game.level.entities = { rat }
+  local net = Items.net()
+  local success, lines = Captives.resolve(game, game.player, net, rat)
+  eq(success, true, "a net thrown at a still-healthy target still leaves the hand")
+  eq(#game.level.captives, 0, "no captive is created from a target too healthy to subdue")
+  eq(rat.hp, rat.maxHp, "the target takes no damage from a wasted net")
+  ok(contains(lines[1], "fierce"), "the log explains the target was too fierce to net")
+end
+
+function tests.captivesResolveCanThrashFreeAndStillSpendTheNet()
+  local game = stagedGame(4, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 6, 6, 1)
+  rat.hp = 1
+  game.level.entities = { rat }
+  game.rng = Rng.new(1)
+  local net = Items.net()
+  local success, lines = Captives.resolve(game, game.player, net, rat)
+  eq(success, true, "a lost catch roll still leaves the net thrown")
+  eq(#game.level.captives, 0, "no captive is created when the target thrashes free")
+  eq(rat.hp, 1, "a thrashing target takes no further damage")
+  ok(rat:isAlive(), "a target that thrashes free is still alive")
+  ok(contains(lines[1], "thrashes free"), "the log reports the target thrashing free")
+end
+
+function tests.captivesResolveCatchesABatteredTargetIntoACaptiveAndZeroesItsHp()
+  local game = stagedGame(4, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 6, 6, 1)
+  rat.hp = 1
+  game.level.entities = { rat }
+  game.rng = Rng.new(2)
+  local net = Items.net()
+  local success, lines = Captives.resolve(game, game.player, net, rat)
+  eq(success, true, "a successful catch leaves the net thrown")
+  eq(#game.level.captives, 1, "a successful catch adds exactly one captive")
+  local captive = game.level.captives[1]
+  eq(captive.name, rat.name, "the captive keeps the caught monster's name")
+  eq(captive.species, rat.species, "the captive keeps the caught monster's species")
+  eq(captive.faction, rat.faction, "the captive keeps the caught monster's faction")
+  eq(captive.value, Monsters.xpFor(rat), "the captive's value matches Captives.valueOf")
+  eq(rat.hp, 0, "the caught monster's hp is zeroed")
+  ok(not rat:isAlive(), "the caught monster is no longer alive")
+  ok(contains(lines[1], "bound"), "the log reports the net dropping true")
+end
+
+function tests.gameCaptureAtRemovesTheCaughtMonsterFromTheLevelWithoutAwardingAKill()
+  local game = stagedGame(4, arena(21, 11), 3, 6)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 6, 6, 1)
+  rat.hp = 1
+  game.level.entities = { rat }
+  local before = #game.player.inventory
+  game.player.inventory[#game.player.inventory + 1] = Items.net()
+  local index = #game.player.inventory
+  game.rng = Rng.new(2)
+  local xpBefore = game.player.xp
+  local killsBefore = game.stats.kills
+  local success = game:captureAt(index, rat)
+  eq(success, true, "a successful net capture reports the item as thrown")
+  eq(#game.player.inventory, before, "the net leaves the inventory once thrown")
+  eq(#game.level.entities, 0, "the captured monster is swept from the level's entities")
+  eq(#game.level.captives, 1, "the captured monster becomes exactly one level captive")
+  eq(game.player.xp, xpBefore, "a capture grants no xp")
+  eq(game.stats.kills, killsBefore, "a capture is never counted as a kill")
+  eq(#game.level.corpses, 0, "a captured monster leaves no corpse behind")
+end
+
+function tests.gameCaptureAtLeavesTheTargetAliveAndTheNetUnspentWhenOutOfRange()
+  local game = stagedGame(4, arena(21, 11), 2, 2)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 19, 9, 1)
+  rat.hp = 1
+  game.level.entities = { rat }
+  game.player.inventory[#game.player.inventory + 1] = Items.net()
+  local index = #game.player.inventory
+  local before = #game.player.inventory
+  local success = game:captureAt(index, rat)
+  eq(success, false, "a capture attempt beyond range fails")
+  eq(#game.player.inventory, before, "a failed capture attempt does not consume the net")
+  ok(rat:isAlive(), "a failed capture attempt leaves the target alive")
+end
+
+function tests.gameRansomCaptiveWarmsFactionStandingWithNoGoldChange()
+  local game = stagedGame(4, arena(21, 11), 5, 5)
+  game.level.captives = { { x = 5, y = 5, species = "rat", faction = Factions.VERMIN, name = "rat", value = 3 } }
+  local goldBefore = game.player.gold
+  local repBefore = Factions.reputationFor(game.player, Factions.VERMIN)
+  local success = game:ransomCaptive()
+  eq(success, true, "ransoming a held captive succeeds")
+  eq(#game.level.captives, 0, "ransoming removes the captive from the level")
+  eq(game.player.gold, goldBefore, "ransoming changes no gold")
+  eq(Factions.reputationFor(game.player, Factions.VERMIN), repBefore + Captives.RANSOM_REP_GAIN,
+    "ransoming warms the captive's own faction standing")
+end
+
+function tests.gameSellCaptivePaysGoldAndCoolsFactionStanding()
+  local game = stagedGame(4, arena(21, 11), 5, 5)
+  game.level.captives = { { x = 5, y = 5, species = "rat", faction = Factions.VERMIN, name = "rat", value = 7 } }
+  local goldBefore = game.player.gold
+  local repBefore = Factions.reputationFor(game.player, Factions.VERMIN)
+  local success = game:sellCaptive()
+  eq(success, true, "selling a held captive succeeds")
+  eq(#game.level.captives, 0, "selling removes the captive from the level")
+  eq(game.player.gold, goldBefore + 7, "selling pays exactly the captive's own value in gold")
+  eq(Factions.reputationFor(game.player, Factions.VERMIN), repBefore - Captives.SELL_REP_LOSS,
+    "selling cools the captive's own faction standing")
+end
+
+function tests.gameInterrogateCaptiveRevealsEveryHiddenDoorAndGrantsEssence()
+  local game = stagedGame(4, arena(21, 11), 5, 5)
+  game.level.secretDoors = {
+    { x = 8, y = 8, discovered = false },
+    { x = 9, y = 9, discovered = false },
+    { x = 10, y = 10, discovered = true },
+  }
+  game.level.captives = { { x = 5, y = 5, species = "rat", faction = Factions.VERMIN, name = "rat", value = 8 } }
+  local essenceBefore = game.player.essence
+  local success = game:interrogateCaptive()
+  eq(success, true, "interrogating a held captive succeeds")
+  eq(#game.level.captives, 0, "interrogating removes the captive from the level")
+  ok(game.level.secretDoors[1].discovered, "interrogating reveals a previously hidden door")
+  ok(game.level.secretDoors[2].discovered, "interrogating reveals every previously hidden door, not just one")
+  eq(game.player.essence, essenceBefore + 4, "interrogating grants essence equal to half the captive's value")
+end
+
+function tests.captiveFieldsSurviveALevelSerializationRoundTrip()
+  local level = arena(21, 11)
+  level.captives = { { x = 5, y = 5, species = "rat", faction = Factions.VERMIN, name = "rat", value = 3 } }
+  local restored = Level.fromData(level:toData())
+  eq(#restored.captives, 1, "a held captive survives a level round trip")
+  eq(restored.captives[1].name, "rat", "the captive's name survives a round trip")
+  eq(restored.captives[1].faction, Factions.VERMIN, "the captive's faction survives a round trip")
+  eq(restored.captives[1].value, 3, "the captive's value survives a round trip")
+  eq(restored:captiveAt(5, 5), restored.captives[1], "Level:captiveAt finds the restored captive by position")
+end
+
+function tests.autopilotNetsABatteredAdjacentMonsterInsteadOfFinishingItInMeleeWhenCarryingANet()
+  local game = stagedGame(4, arena(21, 11), 5, 5)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 6, 5, 1)
+  rat.hp = 1
+  game.level.entities = { rat }
+  game.player.inventory[#game.player.inventory + 1] = Items.net()
+  game.rng = Rng.new(2)
+  game:choosePlayerAction()
+  eq(#game.level.captives, 1, "the autopilot nets the battered adjacent monster instead of finishing it off")
+  eq(#game.level.entities, 0, "the netted monster is removed from the level's entities")
+end
+
+function tests.autopilotSellsAHeldCaptiveOnSight()
+  local game = stagedGame(4, arena(21, 11), 5, 5)
+  game.level.captives = { { x = 5, y = 5, species = "rat", faction = Factions.VERMIN, name = "rat", value = 5 } }
+  local goldBefore = game.player.gold
+  game:choosePlayerAction()
+  eq(#game.level.captives, 0, "the autopilot cashes in a held captive on sight")
+  eq(game.player.gold, goldBefore + 5, "the autopilot sells rather than ransoms or interrogates on its own")
+end
+
+function tests.builderOccasionallyPlacesANetFromDepthFive()
+  local level = Builder.build(5, Rng.new(10), {})
+  local found
+  for _, ground in ipairs(level.floorItems) do
+    if ground.item.kind == Items.NET then found = ground.item end
+  end
+  ok(found ~= nil, "this seed's depth-5 floor places a net")
+end
+
+function tests.netsStayOffFloorsAboveDepthFive()
+  for seed = 1, 8 do
+    for depth = 1, 4 do
+      local level = Builder.build(depth, Rng.new(seed), {})
+      for _, ground in ipairs(level.floorItems) do
+        ok(ground.item.kind ~= Items.NET, "no net appears above depth 5")
+      end
+    end
+  end
+end
+
+function tests.hordeBuildArenaIsFullyEnclosedWithAClearCentreReachableFromEveryCorner()
+  local map, cx, cy = Horde.buildArena(Rng.new(1), Horde.WIDTH, Horde.HEIGHT)
+  for x = 1, Horde.WIDTH do
+    eq(map:get(x, 1), Tiles.WALL, "the top border is solid wall")
+    eq(map:get(x, Horde.HEIGHT), Tiles.WALL, "the bottom border is solid wall")
+  end
+  for y = 1, Horde.HEIGHT do
+    eq(map:get(1, y), Tiles.WALL, "the left border is solid wall")
+    eq(map:get(Horde.WIDTH, y), Tiles.WALL, "the right border is solid wall")
+  end
+  ok(map:isWalkable(cx, cy), "the centre cell the player starts on is always clear")
+  for _, anchor in ipairs(Horde.spawnAnchors(Horde.WIDTH, Horde.HEIGHT)) do
+    ok(Astar.find(map, cx, cy, anchor.x, anchor.y) ~= nil,
+      "every corner anchor is reachable from the centre")
+  end
+end
+
+function tests.hordeBuildArenaIsDeterministicForAFixedSeedAndDiffersAcrossSeeds()
+  local mapA = Horde.buildArena(Rng.new(5), Horde.WIDTH, Horde.HEIGHT)
+  local mapB = Horde.buildArena(Rng.new(5), Horde.WIDTH, Horde.HEIGHT)
+  eq(table.concat(mapA.tiles), table.concat(mapB.tiles), "the same seed always carves the same pillars")
+  local mapC = Horde.buildArena(Rng.new(6), Horde.WIDTH, Horde.HEIGHT)
+  ok(table.concat(mapA.tiles) ~= table.concat(mapC.tiles), "a different seed carves a different arena")
+end
+
+function tests.hordeSpawnPointsAreUniqueWalkableCellsAndAlwaysCoverAMaxWave()
+  local map = Horde.buildArena(Rng.new(3), Horde.WIDTH, Horde.HEIGHT)
+  local points = Horde.spawnPoints(map)
+  ok(#points >= Horde.MAX_COUNT, "the spawn queue always has room for a maximum-size wave")
+  local seen = {}
+  for _, point in ipairs(points) do
+    local key = point.x .. "," .. point.y
+    ok(not seen[key], "no spawn cell is ever offered twice")
+    seen[key] = true
+    ok(map:isWalkable(point.x, point.y), "every offered spawn cell is walkable")
+  end
+end
+
+function tests.hordeCountForClimbsWithWaveThenCapsAtMaxCount()
+  eq(Horde.countFor(1), Horde.BASE_COUNT, "wave one spawns the base count")
+  eq(Horde.countFor(4), Horde.BASE_COUNT + 3, "count climbs by one per wave")
+  eq(Horde.countFor(50), Horde.MAX_COUNT, "count never exceeds the maximum")
+end
+
+function tests.hordeEssenceForIsZeroBeforeTheFirstWaveAndProportionalAfter()
+  eq(Horde.essenceFor(0), 0, "no reward is owed before any wave has been cleared")
+  eq(Horde.essenceFor(3), 3 * Horde.ESSENCE_PER_WAVE, "reward scales linearly with the wave cleared")
+end
+
+function tests.hordePoolExcludesThePassiveVendingShopkeeperEvenAtAQualifyingDepth()
+  local pool = Horde.pool(Monsters.byKey.shopkeeper.minDepth)
+  for _, spec in ipairs(pool) do
+    ok(spec.key ~= "shopkeeper", "the arena never draws the passive shopkeeper into a wave")
+  end
+  ok(#pool > 0, "other species at the same depth still populate the pool")
+end
+
+function tests.hordeClearedIsVacuouslyTrueOnAnEmptyArenaAndFalseWhileAnyMonsterLives()
+  local level = arena(Horde.WIDTH, Horde.HEIGHT)
+  ok(Horde.cleared(level), "an arena that never had a monster placed counts as cleared")
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 5, 5, 1)
+  level.entities = { rat }
+  ok(not Horde.cleared(level), "a living monster keeps the arena from counting as cleared")
+  rat.hp = 0
+  ok(Horde.cleared(level), "the arena counts as cleared again once its last monster dies")
+end
+
+function tests.hordeClearedIgnoresCarriedAlliesAndOnlyCountsHostileMonsters()
+  local level = arena(Horde.WIDTH, Horde.HEIGHT)
+  local golem = Entity.new({ kind = "companion", name = "clay golem", x = 3, y = 3, hp = 26, maxHp = 26 })
+  local hireling = Entity.new({ kind = "hireling", name = "sellsword", x = 4, y = 3, hp = 20, maxHp = 20 })
+  local thrall = Entity.new({ kind = "thrall", name = "rat thrall", x = 5, y = 3, hp = 4, maxHp = 4 })
+  level.entities = { golem, hireling, thrall }
+  ok(Horde.cleared(level), "three living allies with no hostile monster among them still count as cleared")
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 5, 5, 1)
+  level.entities[#level.entities + 1] = rat
+  ok(not Horde.cleared(level), "a living hostile monster still blocks clearance even alongside living allies")
+  rat.hp = 0
+  ok(Horde.cleared(level), "clearance returns once the monster dies, regardless of the allies still standing")
+end
+
+function tests.hordeSpawnWaveNeverStacksTwoMonstersOnOneCellAndEverySpawnStartsHunting()
+  local game = Game.new(11)
+  game:startHorde()
+  local level = game.level
+  local seen = {}
+  eq(#level.entities, Horde.countFor(1), "the first wave spawns exactly its own count")
+  for _, entity in ipairs(level.entities) do
+    local key = entity.x .. "," .. entity.y
+    ok(not seen[key], "no two monsters ever spawn on the same cell")
+    seen[key] = true
+    eq(entity.awareness, Stealth.HUNTING, "an arena spawn starts already hunting, never asleep")
+  end
+end
+
+function tests.gameStartHordeBeginsAtWaveOneCenteredAndWithoutAStartingReward()
+  local game = Game.new(11)
+  local essenceBefore, hpBefore = game.player.essence, game.player.hp
+  game:startHorde()
+  eq(game.horde.wave, 1, "starting a horde run begins at wave one")
+  eq(game.level.generator, "horde", "the arena level is tagged as a horde level")
+  eq(game.player.essence, essenceBefore, "bootstrapping wave one owes no essence reward")
+  eq(game.player.hp, hpBefore, "a player already at full health is not over-healed on entry")
+  ok(game.level.map:isWalkable(game.player.x, game.player.y), "the player starts on a walkable cell")
+end
+
+function tests.gameEndPlayerTurnAdvancesTheHordeWaveBanksEssenceAndHealsOnceEveryMonsterDies()
+  local game = Game.new(11)
+  game:startHorde()
+  game.player.hp = game.player.maxHp - 1
+  local essenceBefore = game.player.essence
+  for _, entity in ipairs(game.level.entities) do entity.hp = 0 end
+  game:cleanupDead()
+  game:endPlayerTurn()
+  eq(game.horde.wave, 2, "clearing wave one advances to wave two")
+  eq(game.player.essence, essenceBefore + Horde.essenceFor(1), "clearing a wave banks its essence reward")
+  eq(game.player.hp, game.player.maxHp, "clearing a wave heals a rest slice, capped at max hp")
+  eq(#game.level.entities, Horde.countFor(2), "wave two spawns its own larger count")
+end
+
+function tests.gameStartHordeCarriesEveryLivingAllyIntoTheArenaInsteadOfAbandoningThem()
+  local game = Game.new(11)
+  local oldLevel = game.level
+  local golem = Companions.summon(game, "golem")
+  local hireling = Mercenaries.hire(game, "sellsword")
+  local rat = Monsters.create(Monsters.byKey.rat, 99, game.player.x + 1, game.player.y, 1)
+  Corpses.spawn(game.level, rat)
+  local thrall = Reanimation.raise(game, game.level.corpses[1])
+  ok(golem ~= nil and hireling ~= nil and thrall ~= nil, "all three allies bond before entering the arena")
+
+  game:startHorde()
+  ok(game:hasCompanion(), "the companion is with the player in the arena")
+  ok(game:hasHireling(), "the hireling is with the player in the arena")
+  local thrallFound
+  for _, entity in ipairs(game.level.entities) do
+    if entity.kind == "thrall" then thrallFound = entity end
+  end
+  eq(thrallFound, thrall, "the very same thrall instance enters the arena, not a rebuilt one")
+
+  local leftBehind = 0
+  for _, entity in ipairs(oldLevel.entities) do
+    if entity.kind == "companion" or entity.kind == "hireling" or entity.kind == "thrall" then
+      leftBehind = leftBehind + 1
+    end
+  end
+  eq(leftBehind, 0, "none of the three allies are stranded on the abandoned floor")
+end
+
+function tests.gameEndPlayerTurnStillAdvancesHordeWavesWithACarriedCompanionPresent()
+  local game = Game.new(11)
+  Companions.summon(game, "golem")
+  game:startHorde()
+  ok(game:hasCompanion(), "the companion made it into wave one's arena")
+  for _, entity in ipairs(game.level.entities) do
+    if entity.kind == "monster" then entity.hp = 0 end
+  end
+  game:cleanupDead()
+  game:endPlayerTurn()
+  eq(game.horde.wave, 2, "a living companion in the arena never blocks wave clearance from advancing")
+  ok(game:hasCompanion(), "the companion survives into wave two alongside the player")
+end
+
+function tests.gameEndPlayerTurnLeavesAnUnclearedHordeWaveUntouched()
+  local game = Game.new(11)
+  game:startHorde()
+  local countBefore = #game.level.entities
+  game:endPlayerTurn()
+  eq(game.horde.wave, 1, "a wave still holding a living monster never advances")
+  eq(#game.level.entities, countBefore, "an uncleared wave's monster count is untouched")
+end
+
+function tests.hordeNeverPromotesAnEliteInEitherOfTheFirstTwoWavesRegardlessOfSeed()
+  for seed = 1, 5 do
+    local game = Game.new(seed)
+    game:startHorde()
+    for _, entity in ipairs(game.level.entities) do
+      ok(not entity.elite, "no wave-one monster is ever promoted to elite, depth is below the minimum")
+    end
+    for _, e in ipairs(game.level.entities) do e.hp = 0 end
+    game:cleanupDead()
+    game:endPlayerTurn()
+    for _, entity in ipairs(game.level.entities) do
+      ok(not entity.elite, "no wave-two monster is ever promoted to elite either")
+    end
+  end
+end
+
+function tests.hordeEventuallyPromotesElitesOnceWavesCrossTheMinimumDepth()
+  local game = Game.new(7)
+  game:startHorde()
+  local sawElite = false
+  for _ = 2, 6 do
+    for _, e in ipairs(game.level.entities) do e.hp = 0 end
+    game:cleanupDead()
+    game:endPlayerTurn()
+    for _, entity in ipairs(game.level.entities) do
+      if entity.elite then sawElite = true end
+    end
+  end
+  ok(sawElite, "this fixed seed rolls at least one elite once waves reach the minimum depth")
+end
+
+function tests.branchesSeedForIsDeterministicAndVariesWithEitherInput()
+  eq(Branches.seedFor(42, 6), Branches.seedFor(42, 6), "the same world seed and depth always derive the same rift seed")
+  ok(Branches.seedFor(42, 6) ~= Branches.seedFor(42, 7), "a different origin depth derives a different rift seed")
+  ok(Branches.seedFor(42, 6) ~= Branches.seedFor(43, 6), "a different world seed derives a different rift seed")
+end
+
+function tests.branchesBuildIsDeterministicAndGeneratesDeeperThanItsOrigin()
+  local a = Branches.build(11, 6, {})
+  local b = Branches.build(11, 6, {})
+  eq(table.concat(a.map.tiles), table.concat(b.map.tiles),
+    "the same world seed and origin depth always build the same pocket floor")
 end
 
 local order = {
