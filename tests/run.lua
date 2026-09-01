@@ -11374,6 +11374,179 @@ function tests.builderOccasionallyPlacesAGateBlockPuzzleOnceADoorwayIsAvailable(
         if ground.item.name and ground.item.name:find("gate%-forged", 1) then treasureFound = ground.item end
       end
       ok(treasureFound ~= nil, "the puzzle's guaranteed treasure is placed somewhere on the floor")
+      break
+    end
+  end
+  ok(found, "at least one of the sampled seeds places a gate/block/plate puzzle")
+end
+
+-- Every gate the builder actually places must be genuinely solvable with a
+-- single shove and must never seal the only route to the stairs down: the
+-- block always starts one further cardinal step out from the plate, so
+-- shoving it from that exact approach cell always lands it on the plate,
+-- and the reachability check in builder.lua guarantees an alternate route
+-- to the stairs exists whenever a gate is actually placed.
+function tests.builderOnlyEverPlacesASolvableGatePuzzleThatNeverSealsTheOnlyRoute()
+  local checked = 0
+  for seed = 1, 200 do
+    local level = Builder.build(5, Rng.new(seed), {})
+    if #level.gates == 1 then
+      checked = checked + 1
+      local gate, plate, block = level.gates[1], level.plates[1], level.blocks[1]
+      local dx, dy = plate.x - block.x, plate.y - block.y
+      local approachX, approachY = block.x - dx, block.y - dy
+      local path = Astar.find(level.map, level.upX, level.upY, approachX, approachY, function(x, y)
+        if x == approachX and y == approachY then return false end
+        if level:blockAt(x, y) then return true end
+        return not level.map:isPassable(x, y, false)
+      end)
+      ok(path ~= nil, "seed " .. seed .. ": the block's approach cell is reachable without crossing the gate")
+      local pushed = Blocks.push(level, block, dx, dy)
+      ok(pushed, "seed " .. seed .. ": a single shove from the approach cell always succeeds")
+      eq(block.x, plate.x, "seed " .. seed .. ": the shoved block lands exactly on its plate's x")
+      eq(block.y, plate.y, "seed " .. seed .. ": the shoved block lands exactly on its plate's y")
+      -- The gate tile itself is still sealed at this point (pushing the
+      -- block only just happened, above, and nothing re-ran Blocks.
+      -- updateGates), so this walks the actual map exactly as generated -
+      -- the direct proof builder.lua's own safety check is real, not just
+      -- asserted by this test's own reasoning about it.
+      ok(reachableFrom(level.map, level.upX, level.upY, level.downX, level.downY),
+        "seed " .. seed .. ": the stairs down stay reachable even treating the gate as a wall")
+    end
+  end
+  ok(checked > 0, "at least one of the sampled seeds actually placed a gate to check")
+end
+
+function tests.blockPlateAndGateFieldsSurviveSerialization()
+  local level = arena(21, 11)
+  level.map:set(6, 6, Tiles.GATE_OPEN)
+  level.blocks = { { x = 5, y = 5 } }
+  level.plates = { { x = 4, y = 6, gateX = 6, gateY = 6 } }
+  level.gates = { { x = 6, y = 6, open = true } }
+  local restored = Level.fromData(level:toData())
+  eq(#restored.blocks, 1, "the block list survives a round trip")
+  eq(restored.blocks[1].x, 5, "a block's position survives a round trip")
+  eq(#restored.plates, 1, "the plate list survives a round trip")
+  eq(restored.plates[1].gateX, 6, "a plate's gate link survives a round trip")
+  eq(#restored.gates, 1, "the gate list survives a round trip")
+  eq(restored.gates[1].open, true, "a gate's open state survives a round trip")
+end
+
+function tests.gameBlockPuzzleStateSurvivesSaveLoad()
+  local game = Game.new(1)
+  local bx, by = game.player.x + 2, game.player.y
+  game.level.map:set(bx + 1, by, Tiles.GATE_OPEN)
+  game.level.blocks = { { x = bx, y = by } }
+  game.level.plates = { { x = bx + 1, y = by, gateX = bx + 1, gateY = by } }
+  game.level.gates = { { x = bx + 1, y = by, open = true } }
+  local path = os.tmpname()
+  game:save(path)
+  local restored = Game.load(path)
+  os.remove(path)
+  eq(#restored.level.blocks, 1, "the block list survives a save/load round trip")
+  eq(restored.level.blocks[1].x, bx, "a block's position survives a save/load round trip")
+  eq(restored.level.gates[1].open, true, "a gate's open state survives a save/load round trip")
+end
+
+function tests.prefabVaultsNeverAppearBeforeDepthThree()
+  for seed = 1, 40 do
+    for depth = 1, 2 do
+      local level = Builder.build(depth, Rng.new(seed), {})
+      eq(#level.prefabVaults, 0, "no hand-authored vault appears above the first two floors")
+    end
+  end
+end
+
+-- Each of the three hand-authored vaults (see gen/prefab.lua) actually turns
+-- up in the wild on a fixed, known seed, and the shape the builder actually
+-- stamps onto the floor's map is byte-identical to calling Prefab.stamp
+-- directly on a fresh scratch map with the same template - proof the
+-- builder's own placement pass never mutates or desyncs the template it drew.
+function tests.builderStampsEachHandAuthoredVaultMatchingAFreshPrefabStampOfTheSameTemplate()
+  local cases = {
+    { seed = 5, name = "treasureCell" },
+    { seed = 12, name = "guardPost" },
+    { seed = 50, name = "flooded" },
+  }
+  for _, case in ipairs(cases) do
+    local level = Builder.build(4, Rng.new(case.seed), {})
+    eq(#level.prefabVaults, 1, "seed " .. case.seed .. "'s depth-4 floor places exactly one hand-authored vault")
+    local placed = level.prefabVaults[1]
+    eq(placed.name, case.name, "seed " .. case.seed .. " places the expected named vault")
+
+    local template
+    for _, candidate in ipairs(Prefab.vaults) do
+      if candidate.name == case.name then template = candidate end
+    end
+    local scratch = Map.new(placed.w + 4, placed.h + 4)
+    Prefab.stamp(scratch, template, 2, 2)
+    local same = true
+    for row = 0, placed.h - 1 do
+      for col = 0, placed.w - 1 do
+        if scratch:get(2 + col, 2 + row) ~= level.map:get(placed.x + col, placed.y + row) then
+          same = false
+        end
+      end
+    end
+    ok(same, case.name .. ": the floor's stamped footprint matches a fresh Prefab.stamp of the same template exactly")
+  end
+end
+
+-- A hand-authored vault is walled off behind solid, untouched rock with no
+-- carved corridor leading in (see builder.lua's own placement comment): the
+-- one way in is digging.lua's pick. This proves that concretely rather than
+-- just trusting builder.lua's own reasoning about it - the vault's interior
+-- is unreachable by ordinary movement, some cell on its outer wall genuinely
+-- borders the already-reachable dungeon, and clearing that one cell down to
+-- floor (the same two-swing progression digging.lua's own Digging.swing
+-- drives) opens a real route all the way in.
+function tests.builderDiggingThroughAPrefabVaultsOuterWallOpensARouteToItsSealedInterior()
+  local level = Builder.build(4, Rng.new(49), {})
+  eq(#level.prefabVaults, 1, "seed 49's depth-4 floor places exactly one hand-authored vault")
+  local vault = level.prefabVaults[1]
+  eq(vault.name, "guardPost", "this fixed seed places the guard post vault")
+
+  local wallX, wallY, extX, extY
+  for y = vault.y, vault.y + vault.h - 1 do
+    for x = vault.x, vault.x + vault.w - 1 do
+      -- A corner cell sits on both edges at once, so stepping "inward" from
+      -- whichever single exterior neighbour found it would walk straight
+      -- into a different wall row/column instead of the interior - only a
+      -- pure edge cell (on exactly one side) keeps the inward step on the
+      -- template's own single wall-thickness axis.
+      local verticalEdge = (x == vault.x or x == vault.x + vault.w - 1) and y > vault.y and y < vault.y + vault.h - 1
+      local horizontalEdge = (y == vault.y or y == vault.y + vault.h - 1) and x > vault.x and x < vault.x + vault.w - 1
+      local onBoundary = verticalEdge or horizontalEdge
+      if onBoundary and not wallX then
+        for _, n in ipairs(orthogonalNeighbours(x, y)) do
+          local nx, ny = n[1], n[2]
+          local outside = nx < vault.x or nx > vault.x + vault.w - 1 or ny < vault.y or ny > vault.y + vault.h - 1
+          if outside and level.map:inBounds(nx, ny) and reachableFrom(level.map, level.upX, level.upY, nx, ny) then
+            wallX, wallY, extX, extY = x, y, nx, ny
+          end
+        end
+      end
+    end
+  end
+  ok(wallX ~= nil, "at least one of the vault's outer wall cells borders the already-reachable dungeon")
+  eq(level.map:get(wallX, wallY), Tiles.WALL, "the bordering cell reads as a plain wall before any digging")
+  ok(not reachableFrom(level.map, level.upX, level.upY, wallX, wallY),
+    "the wall cell itself is not reachable by ordinary movement while it is still solid rock")
+
+  local inX, inY = 2 * wallX - extX, 2 * wallY - extY
+  ok(not reachableFrom(level.map, level.upX, level.upY, inX, inY),
+    "the vault's interior stays fully sealed off before the wall is dug through")
+
+  ok(Digging.canDig(level.map, wallX, wallY), "the bordering wall cell is a valid digging target")
+  level.map:set(wallX, wallY, Tiles.RUBBLE)
+  level.map:set(wallX, wallY, Tiles.FLOOR)
+  ok(reachableFrom(level.map, level.upX, level.upY, wallX, wallY),
+    "after two swings clear the wall down to floor, the dug cell joins the reachable dungeon")
+  ok(level.map:isWalkable(inX, inY), "the cell just inside the dug wall is real, walkable vault interior")
+  ok(reachableFrom(level.map, level.upX, level.upY, inX, inY),
+    "digging through the outer wall opens a genuine route into the vault's previously sealed interior")
+end
+
 end
 
 local order = {
