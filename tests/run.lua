@@ -13277,6 +13277,179 @@ function tests.commandsApplyAppeaseRejectsAMissingOrUnknownFactionWithoutSpendin
 end
 
 function tests.commandsApplyAppeaseFailsWithoutSpendingATurnWhenGoldIsShort()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.player.gold = 0
+  local repBefore = Factions.reputationFor(game.player, Factions.MERCHANT)
+  local consumesTurn = Commands.apply(game, "appease merchant")
+  eq(consumesTurn, false, "an unaffordable tribute spends no turn")
+  eq(game.player.gold, 0, "no gold is spent on a failed tribute")
+  eq(Factions.reputationFor(game.player, Factions.MERCHANT), repBefore, "standing is untouched")
+end
+
+function tests.commandsApplyHordeEntersTheArenaAtWaveOneAndSpendsTheTurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local consumesTurn = Commands.apply(game, "horde")
+  eq(consumesTurn, true, "entering the horde arena spends the turn")
+  eq(game.horde.wave, 1, "the arena begins at wave one")
+  eq(game.level.generator, "horde", "the current level is swapped for the arena")
+end
+
+function tests.commandsApplyHordeRefusesToRestartAnArenaAlreadyInProgressWithoutSpendingATurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  Commands.apply(game, "horde")
+  for _, entity in ipairs(game.level.entities) do entity.hp = 0 end
+  game:cleanupDead()
+  game:endPlayerTurn()
+  local waveBefore = game.horde.wave
+  local consumesTurn, message = Commands.apply(game, "horde")
+  eq(consumesTurn, false, "re-entering an arena already in progress spends no turn")
+  eq(game.horde.wave, waveBefore, "wave progress already made is left untouched")
+  ok(message ~= nil, "the refusal explains itself")
+end
+
+function tests.commandsApplyInformationalVerbsNeverSpendATurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local turnBefore = game.turn
+  for _, verb in ipairs({ "inventory", "status", "look", "help" }) do
+    local consumesTurn, message = Commands.apply(game, verb)
+    eq(consumesTurn, false, verb .. " never spends a turn")
+    ok(message ~= nil and #message > 0, verb .. " always answers with something")
+  end
+  eq(game.turn, turnBefore, "none of the informational commands advanced the turn counter")
+end
+
+function tests.commandsApplyLookListsOnlyVisibleHostilesByName()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 8, 5, 1)
+  game.level.entities = { rat }
+  local consumesTurn, message = Commands.apply(game, "look")
+  eq(consumesTurn, false, "look never spends a turn")
+  ok(contains(message, rat.name), "look names a visible hostile")
+end
+
+-- examine.lua: detailed, read-only inspection of a single inventory item or
+-- a visible monster. Every function is pure (identify state and the item/
+-- monster passed in are never mutated), so these are exercised directly
+-- rather than only through Commands.apply.
+
+function tests.examineItemDescribesAPlainWeaponsPowerAndDurability()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local weapon = Items.weapon("dagger", 3)
+  local description = Examine.item(game.identify, weapon)
+  ok(contains(description, "dagger"), "the report names the item")
+  ok(contains(description, "power 3"), "the report states the weapon's power")
+  ok(contains(description, "durability 30/30"), "a pristine weapon reports full durability")
+  ok(contains(description, "worth " .. Shop.priceOf(weapon) .. " gold"), "the report prices the item")
+end
+
+function tests.examineItemFlagsABrokenWeaponAndAFullyTemperedBonus()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local weapon = Items.weapon("sword", 4)
+  weapon.durability = 0
+  weapon.temper = 2
+  local description = Examine.item(game.identify, weapon)
+  ok(contains(description, "(broken)"), "a broken weapon is flagged as broken")
+  ok(contains(description, "tempered +2"), "the report states the temper level")
+end
+
+function tests.examineItemDescribesARingsFlatAttackAndDefenseBonus()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local ring = Items.ring("ring of the tide", 1, 2)
+  ok(contains(Examine.item(game.identify, ring), "attack +1, defense +2"), "the report states the ring's flat bonuses")
+end
+
+function tests.examineItemDescribesAnAffixSocketedGemRunewordAndRevealedCurse()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local weapon = Items.weapon("sword", 4)
+  Affixes.decorate(weapon, Affixes.weapon[3])
+  Crafting.socket(game.player, weapon, Crafting.gem(Crafting.FROST, 1))
+  Runewords.socket(weapon, Runewords.rune("sol"))
+  Runewords.socket(weapon, Runewords.rune("ith"))
+  Curses.afflict(weapon, Curses.pool.weapon[1])
+  Curses.reveal(weapon)
+  local description = Examine.item(game.identify, weapon)
+  ok(contains(description, "affix: flaming"), "the report names the rolled affix")
+  ok(contains(description, "on hit: burning, 3 turns, potency 2"), "the report states the affix's on-hit rider")
+  ok(contains(description, "socketed: tier 1 frost gem"), "the report states the socketed gem")
+  ok(contains(description, "runeword Zenith: attack +3"), "the report names the completed runeword and its bonus")
+  ok(contains(description, "cursed (weakness)"), "a revealed curse is called out by name")
+end
+
+function tests.examineItemNamesAnArtifactsUniquePowerAndASetPiecesSetName()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local artifact = Artifacts.create("bloodfang")
+  ok(contains(Examine.item(game.identify, artifact), "artifact power: lifesteal"), "the report names the artifact's unique power")
+  local setPiece = Sets.create("ironclad", "weapon")
+  ok(contains(Examine.item(game.identify, setPiece), "set piece: Ironclad"), "the report names the set the piece belongs to")
+end
+
+function tests.examineItemListsTheElementalResistanceAWornArtifactGrants()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local cinderplate = Artifacts.create("cinderplate")
+  ok(contains(Examine.item(game.identify, cinderplate), "grants: fire resist"), "the report states the resistance the artifact grants")
+end
+
+function tests.examineItemShowsAPotionsDisguisedLabelWithoutLeakingItsIdentity()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local potion = Items.potionOf("poison")
+  local description = Examine.item(game.identify, potion)
+  ok(not contains(description, "potion of poison"), "an unidentified potion's true name stays hidden")
+  ok(contains(description, "worth 6 gold"), "the report still prices the item off its real, hidden effect")
+end
+
+function tests.examineMonsterReportsHpAttackDefenseAndDefaultsToHuntingAwareness()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 8, 5, 1)
+  local description = Examine.monster(game.player, rat)
+  ok(contains(description, rat.name), "the report names the monster")
+  ok(contains(description, string.format("hp %d/%d", rat.hp, rat.maxHp)), "the report states current and max hp")
+  ok(contains(description, "hunting you"), "a hand-built monster with no awareness field defaults to hunting")
+end
+
+function tests.examineMonsterReportsDormantAwarenessForAnUnwokenWildMonster()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 8, 5, 1)
+  rat.awareness = Stealth.DORMANT
+  ok(contains(Examine.monster(game.player, rat), "asleep"), "a dormant monster reports as asleep")
+end
+
+function tests.examineMonsterReportsItsFactionAndTheCurrentReputationTier()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local kobold = Monsters.create(Monsters.byKey.kobold, 1, 8, 5, 1)
+  Factions.adjust(game.player, Factions.GOBLINOID, 30)
+  ok(contains(Examine.monster(game.player, kobold), "faction: goblinoid (friendly)"),
+    "the report states the faction and its current reputation tier")
+end
+
+function tests.examineMonsterListsAnElitesTierAndEachAffixItRolled()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 8, 5, 1)
+  orc.elite, orc.eliteTier, orc.eliteAffixes = true, "champion", { "brutal", "swift" }
+  ok(contains(Examine.monster(game.player, orc), "champion: brutal, swift"),
+    "the report names the elite tier and each affix it rolled")
+end
+
+function tests.examineMonsterFlagsAnEnragedAndDesperateBossTogether()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local warlord = Bosses.create(Bosses.byKey.warlord, 1, 8, 5)
+  warlord.enraged, warlord.desperate = true, true
+  ok(contains(Examine.monster(game.player, warlord), "boss, enraged, desperate"),
+    "the report flags both boss phase tags together")
+end
+
+function tests.examineMonsterReportsANonNormalResistanceFromItsBaseProfile()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local troll = Monsters.create(Monsters.byKey.troll, 1, 8, 5, 1)
+  ok(contains(Examine.monster(game.player, troll), "resistances: fire weak"),
+    "the report states the troll's innate fire weakness")
+end
+
+function tests.examineMonsterListsActiveStatusEffectsWithRemainingDuration()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 8, 5, 1)
+  Status.apply(rat, Status.POISON, 4, 2)
+  ok(contains(Examine.monster(game.player, rat), "afflicted: poison (4)"),
+    "the report lists the active status and its remaining duration")
 end
 
 local order = {
