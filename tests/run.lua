@@ -13452,6 +13452,1044 @@ function tests.examineMonsterListsActiveStatusEffectsWithRemainingDuration()
     "the report lists the active status and its remaining duration")
 end
 
+-- Only reachable through infighting.lua's own bite chance (a rival monster
+-- or the player's own companion/hireling/thrall can now catch a disease
+-- from a carrier's bite, see infightingStrikeCanTransmitTheAttackersBite
+-- DiseaseToAnyDefenderNotJustThePlayer above) - shown the same way the
+-- afflicted-statuses line just above already surfaces a fact invisible on
+-- the bare map glyph.
+function tests.examineMonsterReportsADiseaseCaughtThroughInfighting()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 8, 5, 1)
+  ok(not contains(Examine.monster(game.player, orc), "diseased"), "a healthy monster's report mentions no disease")
+  Disease.infect(orc, Disease.PLAGUE)
+  ok(contains(Examine.monster(game.player, orc), "diseased: black plague (incubating)"),
+    "an incubating infection shows up in a monster's examine report")
+  orc.disease.stage = 1
+  ok(contains(Examine.monster(game.player, orc), "diseased: black plague (stage 1)"),
+    "an erupted infection reports its current stage in a monster's examine report")
+end
+
+-- commands.lua: `examine <n>`/`examine monster <n>`, the interface half of
+-- examine.lua a typed session reaches through.
+
+function tests.commandsApplyExamineDescribesAnInventoryItemWithoutSpendingATurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.player.inventory = { Items.weapon("dagger", 3) }
+  local turnBefore = game.turn
+  local consumesTurn, message = Commands.apply(game, "examine 1")
+  eq(consumesTurn, false, "examine never spends a turn")
+  eq(game.turn, turnBefore, "the turn counter stays put")
+  ok(contains(message, "dagger") and contains(message, "power 3"), "the report describes the inventory item")
+  local aliased = Commands.apply(game, "x 1")
+  eq(aliased, false, "the x alias behaves identically and never spends a turn")
+end
+
+function tests.commandsApplyExamineMonsterDescribesTheSameEntryLookJustNumbered()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local rat = Monsters.create(Monsters.byKey.rat, 1, 8, 5, 1)
+  local orc = Monsters.create(Monsters.byKey.orc, 2, 9, 6, 1)
+  game.level.entities = { rat, orc }
+  local _, lookMessage = Commands.apply(game, "look")
+  ok(contains(lookMessage, "1) " .. rat.name), "look numbers the rat first")
+  ok(contains(lookMessage, "2) " .. orc.name), "look numbers the orc second")
+  local consumesTurn, examineMessage = Commands.apply(game, "examine monster 2")
+  eq(consumesTurn, false, "examining a monster never spends a turn")
+  ok(contains(examineMessage, orc.name), "examine monster 2 describes the same monster look numbered 2")
+end
+
+function tests.commandsApplyExamineFailsCleanlyOnBadOrMissingArgumentsWithoutSpendingATurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  eq(Commands.apply(game, "examine"), false, "examine with no argument spends no turn")
+  eq(Commands.apply(game, "examine 1"), false, "examining an empty inventory slot spends no turn")
+  eq(Commands.apply(game, "examine monster"), false, "examine monster with no index spends no turn")
+  eq(Commands.apply(game, "examine monster 1"), false, "examining with nothing in sight spends no turn")
+end
+
+function tests.commandsApplyHelpMentionsExamine()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local _, message = Commands.apply(game, "help")
+  ok(contains(message, "examine"), "help mentions examine")
+end
+
+-- commands.lua: crafting/economy verbs (forge/merge/socket/socketrune/
+-- temper/enchant/disenchant/repair/steal/dismiss/learn/brew), the interface
+-- half of the API a typed session could not reach before this session.
+
+function tests.commandsApplyForgeAndMergeDriveTheGemPipelineAndSpendTheTurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.player.essence = Crafting.FORGE_COST * 2
+  ok(Commands.apply(game, "forge fire"), "forging a known element spends the turn")
+  ok(Commands.apply(game, "forge fire"), "forging a second matching gem spends the turn")
+  local a, b
+  for i, item in ipairs(game.player.inventory) do
+    if item.kind == Items.GEM then
+      if not a then a = i else b = i end
+    end
+  end
+  local consumesTurn = Commands.apply(game, "merge " .. a .. " " .. b)
+  eq(consumesTurn, true, "merging two matching gems spends the turn")
+end
+
+function tests.commandsApplyForgeRejectsAMissingOrUnknownElementWithoutSpendingATurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local missing, message1 = Commands.apply(game, "forge")
+  eq(missing, false, "forge with no element spends no turn")
+  ok(message1 ~= nil, "the failure names what is missing")
+  game.player.essence = Crafting.FORGE_COST
+  local unknown = Commands.apply(game, "forge lava")
+  eq(unknown, false, "an unrecognized element spends no turn")
+end
+
+function tests.commandsApplyMergeRejectsAMissingOrMismatchedPairWithoutSpendingATurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local missing, message = Commands.apply(game, "merge")
+  eq(missing, false, "merge with no indices spends no turn")
+  ok(message ~= nil, "the failure names what is missing")
+  game.player.inventory = { Crafting.gem(Crafting.FIRE, 1), Crafting.gem(Crafting.FROST, 1) }
+  local mismatched = Commands.apply(game, "merge 1 2")
+  eq(mismatched, false, "mismatched gems spend no turn")
+  eq(#game.player.inventory, 2, "a rejected merge leaves both gems untouched")
+end
+
+function tests.commandsApplySocketTemperEnchantDisenchantDriveTheEquippedWeaponAndSpendTheTurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local weapon = Items.weapon("dagger", 2)
+  Items.equipWeapon(weapon, game.player)
+  game.player.inventory = { Crafting.gem(Crafting.FIRE, 1) }
+
+  local socketed = Commands.apply(game, "socket weapon 1")
+  eq(socketed, true, "socketing a gem into the equipped weapon spends the turn")
+  eq(weapon.socket.element, Crafting.FIRE, "the socketed gem's element lands on the weapon")
+
+  game.player.essence = Crafting.temperCost(weapon)
+  local tempered = Commands.apply(game, "temper weapon")
+  eq(tempered, true, "tempering the equipped weapon spends the turn")
+
+  game.player.essence = Crafting.ENCHANT_COST
+  local enchanted = Commands.apply(game, "enchant weapon vicious")
+  eq(enchanted, true, "enchanting the equipped weapon spends the turn")
+  eq(weapon.affix.key, "vicious", "the chosen affix lands on the weapon")
+
+  local disenchanted = Commands.apply(game, "disenchant weapon")
+  eq(disenchanted, true, "disenchanting the equipped weapon spends the turn")
+  eq(weapon.affix, nil, "the affix is gone once disenchanted")
+end
+
+function tests.commandsApplySocketRuneCompletesARunewordAndSpendsTheTurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  Items.equipWeapon(Items.weapon("sword", 4), game.player)
+  game.player.inventory = { Runewords.rune("sol"), Runewords.rune("ith") }
+  ok(Commands.apply(game, "socketrune weapon 1"), "socketing the first rune spends the turn")
+  local consumesTurn, message = Commands.apply(game, "socketrune weapon 1")
+  eq(consumesTurn, true, "completing the runeword spends the turn")
+  ok(contains(game.log:last(), "Zenith"), "completing a runeword is announced by name")
+end
+
+function tests.commandsApplyCraftingVerbsFailCleanlyWithBadTargetsWithoutSpendingATurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  for _, verb in ipairs({ "socket", "socketrune", "temper", "enchant", "disenchant" }) do
+    local consumesTurn, message = Commands.apply(game, verb)
+    eq(consumesTurn, false, verb .. " with no target spends no turn")
+    ok(message ~= nil and #message > 0, verb .. " explains what it needs")
+  end
+  Items.equipWeapon(Items.weapon("dagger", 2), game.player)
+  local badSocket = Commands.apply(game, "socket weapon 1")
+  eq(badSocket, false, "socketing with an empty inventory slot spends no turn")
+end
+
+function tests.commandsApplyRepairFixesTheEquippedWeaponAndSpendsTheTurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  Items.equipWeapon(Items.weapon("sword", 4), game.player)
+  game.player.weapon.durability = 0
+  game.player.gold = 1000
+  local consumesTurn = Commands.apply(game, "repair weapon")
+  eq(consumesTurn, true, "repairing an affordable broken weapon spends the turn")
+  eq(game.player.weapon.durability, Durability.MAX, "the weapon comes back to full durability")
+end
+
+function tests.commandsApplyRepairRejectsAnUnknownSlotOrAnEmptyPurseWithoutSpendingATurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local badSlot, message = Commands.apply(game, "repair shield")
+  eq(badSlot, false, "an unrecognized slot spends no turn")
+  eq(message, "repair what? weapon, armor or bow", "the failure names the valid slots")
+  Items.equipWeapon(Items.weapon("sword", 4), game.player)
+  game.player.weapon.durability = 0
+  game.player.gold = 0
+  local shortPurse = Commands.apply(game, "repair weapon")
+  eq(shortPurse, false, "an empty purse cannot repair, and spends no turn")
+end
+
+function tests.commandsApplyStealTakesTheWardedWareUnderfootAndSpendsTheTurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local keeper = Monsters.create(Monsters.byKey.shopkeeper, 1, 10, 10, 4)
+  game.level.entities = { keeper }
+  game.level.floorItems = { { x = 5, y = 5, item = Items.scroll("identify"), price = 18, shopId = keeper.id } }
+  local invBefore = #game.player.inventory
+  local consumesTurn = Commands.apply(game, "steal")
+  eq(consumesTurn, true, "stealing a warded ware underfoot spends the turn")
+  eq(#game.player.inventory, invBefore + 1, "the stolen item joins the inventory")
+  eq(keeper.hostile, true, "the keeper turns hostile after the theft")
+end
+
+function tests.commandsApplyStealFailsWithNothingWardedUnderfootWithoutSpendingATurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local consumesTurn, message = Commands.apply(game, "steal")
+  eq(consumesTurn, false, "stealing with nothing underfoot spends no turn")
+  eq(message, "there is nothing here worth stealing", "the failure explains itself")
+end
+
+function tests.commandsApplyDismissReleasesTheHirelingAndSpendsTheTurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  Mercenaries.hire(game, "sellsword")
+  ok(game:hasHireling(), "the hire itself succeeded")
+  local consumesTurn = Commands.apply(game, "dismiss")
+  eq(consumesTurn, true, "dismissing an under-contract hireling spends the turn")
+  eq(game:hasHireling(), false, "the hireling is gone")
+end
+
+function tests.commandsApplyDismissFailsWithNoHirelingWithoutSpendingATurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local consumesTurn = Commands.apply(game, "dismiss")
+  eq(consumesTurn, false, "dismissing with nobody under contract spends no turn")
+end
+
+function tests.commandsApplyLearnSpendsAPointNeverATurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.player.class = "fighter"
+  game.player.skillPoints = 1
+  local turnBefore = game.turn
+  local success = Commands.apply(game, "learn cleave")
+  eq(success, false, "learning a skill never spends a turn")
+  eq(game.turn, turnBefore, "the turn counter is untouched by learning")
+  eq(Skills.has(game.player, "cleave"), true, "the skill is actually learned")
+  eq(game.player.skillPoints, 0, "the skill point is spent")
+  ok(contains(game.log:last(), "learn"), "learning is logged")
+
+  local missing, message = Commands.apply(game, "learn")
+  eq(missing, false, "learn with no skill name spends no turn")
+  ok(message ~= nil, "the failure names what is missing")
+
+  local alreadyKnown = Commands.apply(game, "learn cleave")
+  eq(alreadyKnown, false, "re-learning an already-known skill spends no turn")
+  ok(contains(game.log:last(), "already"), "the failure to re-learn is logged")
+end
+
+-- Skills.active/Skills.passive keys are camelCase (secondWind, poisonBlade,
+-- manaShield), but Commands.parse lowercases every token including a typed
+-- skill name before any handler sees it - a player typing the skill's own
+-- printed name would otherwise never match it. Typed exactly as a human
+-- would type it (mixed case), routed through the real Commands.apply/parse
+-- pipeline, not a pre-lowercased literal.
+function tests.commandsApplyLearnAcceptsTheSkillsOwnCamelCaseSpellingDespiteTheParserLowercasingIt()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.player.class = "fighter"
+  game.player.level = 5
+  game.player.skillPoints = 2
+  local success = Commands.apply(game, "learn secondWind")
+  eq(success, false, "learning a skill never spends a turn")
+  eq(Skills.has(game.player, "secondWind"), true, "the camelCase skill is actually learned under its real key")
+  ok(contains(game.log:last(), "second wind"), "learning is logged under the skill's real name")
+
+  local rogue = stagedGame(2, arena(21, 11), 5, 5)
+  rogue.player.class = "rogue"
+  rogue.player.level = 5
+  rogue.player.skillPoints = 2
+  Commands.apply(rogue, "learn poisonBlade")
+  eq(Skills.has(rogue.player, "poisonBlade"), true, "a differently-classed camelCase skill also resolves correctly")
+
+  local mage = stagedGame(3, arena(21, 11), 5, 5)
+  mage.player.class = "mage"
+  mage.player.level = 5
+  mage.player.skillPoints = 2
+  Commands.apply(mage, "learn manaShield")
+  eq(Skills.has(mage.player, "manaShield"), true, "a camelCase PASSIVE skill resolves too, not only active ones")
+end
+
+function tests.commandsApplyUseskillAcceptsACamelCaseSkillNameDespiteTheParserLowercasingIt()
+  local game = stagedGame(4, arena(21, 11), 5, 5)
+  game.player.class = "fighter"
+  game.player.level = 5
+  Skills.learn(game.player, "secondWind")
+  game.player.hp = 1
+  local consumesTurn = Commands.apply(game, "useskill secondWind")
+  eq(consumesTurn, true, "using a camelCase-named skill by its real spelling spends the turn")
+  ok(game.player.hp > 1, "second wind actually healed the player, proving the real skill ran")
+  eq(game.player.skillCooldowns.secondWind, Skills.active.secondWind.cooldown,
+    "the cooldown lands on the real camelCase key, not a lowercased one")
+
+  local rogue = stagedGame(5, arena(21, 11), 5, 5)
+  rogue.player.class = "rogue"
+  rogue.player.level = 5
+  Skills.learn(rogue.player, "poisonBlade")
+  local consumesTurn2 = Commands.apply(rogue, "useskill poisonBlade")
+  eq(consumesTurn2, true, "using poisonBlade by its real camelCase spelling spends the turn")
+  eq(rogue.player.pendingPoisonBlade, true, "the venom is actually readied, proving the real skill ran")
+end
+
+function tests.commandsApplyBrewCombinesTwoHerbsAtACauldronAndSpendsTheTurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.level.cauldrons = { { x = 5, y = 5 } }
+  game.player.inventory = { Alchemy.herb(Alchemy.SUNPETAL), Alchemy.herb(Alchemy.BLOODROOT) }
+  local consumesTurn = Commands.apply(game, "brew 1 2")
+  eq(consumesTurn, true, "brewing two herbs at a cauldron underfoot spends the turn")
+  eq(game.player.inventory[1].kind, Items.POTION, "the brewed potion replaces the spent herbs")
+end
+
+function tests.commandsApplyBrewFailsAwayFromACauldronWithoutSpendingATurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.player.inventory = { Alchemy.herb(Alchemy.SUNPETAL), Alchemy.herb(Alchemy.BLOODROOT) }
+  local consumesTurn = Commands.apply(game, "brew 1 2")
+  eq(consumesTurn, false, "brewing away from any cauldron spends no turn")
+  eq(#game.player.inventory, 2, "a failed brew for lack of a cauldron spends nothing")
+  local missing, message = Commands.apply(game, "brew")
+  eq(missing, false, "brew with no indices spends no turn")
+  ok(message ~= nil, "the failure names what is missing")
+end
+
+-- Real bug found while manually verifying the new moonbell/sunpetal curdle
+-- pairing through the full command pipeline: Game:brewAt returns false both
+-- when nothing was ever attempted (no cauldron, bad indices) and when a real
+-- attempt curdled (both herbs already spent, gas already vented) - the old
+-- handler read either shape of false as "give the turn back", so a player
+-- who curdled a pairing got a free retry exactly like a typo would. Fixed by
+-- duplicating the preconditions in the handler (same shape as disarm's own
+-- fix earlier today) so anything that reaches Game:brewAt always spends the
+-- turn regardless of which of its two outcomes it lands on.
+function tests.commandsApplyBrewSpendsTheTurnEvenWhenThePairingCurdles()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.level.cauldrons = { { x = 5, y = 5 } }
+  game.player.inventory = { Alchemy.herb(Alchemy.SUNPETAL), Alchemy.herb(Alchemy.NIGHTCAP) }
+  local consumesTurn, message = Commands.apply(game, "brew 1 2")
+  eq(consumesTurn, true, "a curdled brew still consumed a real attempt and must spend the turn")
+  eq(message, nil, "the curdle's own log line speaks for it, like a successful brew's message does")
+  eq(#game.player.inventory, 0, "the curdle already spent both herbs before the handler ever saw the outcome")
+  ok(contains(game.log:recent(1)[1] or "", "curdle"), "the curdle is still logged through the command pipeline")
+end
+
+function tests.commandsApplyBrewRejectsTheSameIndexTwiceOrANonHerbItemWithoutSpendingATurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.level.cauldrons = { { x = 5, y = 5 } }
+  game.player.inventory = { Alchemy.herb(Alchemy.SUNPETAL), Items.potion(10) }
+  local sameIndex = Commands.apply(game, "brew 1 1")
+  eq(sameIndex, false, "naming the same inventory slot twice spends no turn")
+  local nonHerb = Commands.apply(game, "brew 1 2")
+  eq(nonHerb, false, "pairing a herb with a non-herb item spends no turn")
+  eq(#game.player.inventory, 2, "neither rejected attempt spends any item")
+end
+
+function tests.commandsApplyHelpMentionsTheCraftingAndEconomyVerbs()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local _, message = Commands.apply(game, "help")
+  for _, word in ipairs({ "steal", "dismiss", "learn", "forge", "merge", "brew", "socket", "temper", "enchant", "repair" }) do
+    ok(contains(message, word), "help mentions " .. word)
+  end
+end
+
+function tests.commandsApplyHelpMentionsAppeaseDisarmAndHorde()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local _, message = Commands.apply(game, "help")
+  for _, word in ipairs({ "appease", "disarm", "horde" }) do
+    ok(contains(message, word), "help mentions " .. word)
+  end
+end
+
+-- Game:manualStep - the turn-cycle integration around commands.lua.
+
+function tests.gameManualStepEndsTheTurnOnlyWhenTheCommandActuallySucceeds()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local turnBefore = game.turn
+  local consumesTurn = game:manualStep("north")
+  eq(consumesTurn, true, "a valid move spends the turn")
+  eq(game.turn, turnBefore + 1, "Game:manualStep advances the turn counter on a successful command")
+end
+
+function tests.gameManualStepLeavesTheTurnCounterUntouchedOnARejectedCommand()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local turnBefore = game.turn
+  local consumesTurn, message = game:manualStep("nonsense")
+  eq(consumesTurn, false, "an unrecognized command reports failure")
+  ok(message ~= nil, "the rejection carries a reason")
+  eq(game.turn, turnBefore, "the turn counter never advances on a rejected command")
+end
+
+function tests.gameManualStepIsIdempotentAcrossRepeatedRejectedCommandsWithinOneUnspentTurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  Status.apply(game.player, Status.POISON, 5, 5)
+  game:manualStep("nonsense")
+  local hpAfterFirst = game.player.hp
+  local durationAfterFirst = game.player.statuses[1].duration
+  game:manualStep("gibberish")
+  eq(game.player.hp, hpAfterFirst,
+    "a second rejected command within the same unspent turn does not re-tick poison damage")
+  eq(game.player.statuses[1].duration, durationAfterFirst,
+    "...nor does it re-decrement the poison's own remaining duration")
+end
+
+function tests.gameManualStepStunnedPlayerIgnoresTheTypedCommandButStillSpendsTheTurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  -- Duration 2, not 1: Status.tick (run inside beginTurn, before the skip
+  -- check) decrements duration first, so a duration-1 stun would already
+  -- have expired by the time Status.skipsTurn looks for it this same turn.
+  Status.apply(game.player, Status.STUN, 2, 0)
+  local turnBefore = game.turn
+  local px, py = game.player.x, game.player.y
+  local consumesTurn = game:manualStep("north")
+  eq(consumesTurn, true, "a stunned turn is spent regardless of the typed command")
+  eq(game.player.x, px, "the player never actually moves while stunned")
+  eq(game.player.y, py, "the player never actually moves while stunned")
+  eq(game.turn, turnBefore + 1, "the stunned turn still advances the turn counter")
+end
+
+function tests.gameManualStepHaltsWithoutSpendingATurnOnceTheRunIsAlreadyWon()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.won = true
+  local turnBefore = game.turn
+  local consumesTurn = game:manualStep("north")
+  eq(consumesTurn, false, "a manual command after victory spends no turn")
+  eq(game.turn, turnBefore, "the turn counter never advances once the run is already won")
+end
+
+-- Game:autoExplore / commands.lua's "explore" - autoexplore, repeating
+-- Game:exploreStep turn after turn inside a single call instead of forcing
+-- the player to retype "explore" once per step, and stopping itself the
+-- instant something worth their attention shows up.
+
+function tests.gameAutoExploreWalksTowardUnexploredTerrainUntilTheWholeReachableAreaIsSeen()
+  local level = arena(25, 15)
+  local game = stagedGame(1, level, 3, 3)
+  local turnBefore = game.turn
+  local consumesTurn, message = game:autoExplore()
+  eq(consumesTurn, true, "a run with real ground left to cover spends turns")
+  eq(message, "you have finished exploring", "a completed run reports it finished")
+  ok(game.turn > turnBefore, "autoExplore actually advances the turn counter")
+  local map = level.map
+  local allSeen = true
+  for y = 2, 14 do
+    for x = 2, 24 do
+      if not level.explored[map:index(x, y)] then allSeen = false end
+    end
+  end
+  ok(allSeen, "every walkable cell in the reachable room ends up explored")
+end
+
+function tests.gameAutoExploreReportsNothingLeftWithoutSpendingATurnWhenAlreadyFullyExplored()
+  local game = stagedGame(1, arena(11, 9), 5, 5)
+  local turnBefore = game.turn
+  local consumesTurn, message = game:autoExplore()
+  eq(consumesTurn, false, "a room already fully visible from the start spends no turn")
+  eq(message, "there is nothing left to explore", "the refusal explains why")
+  eq(game.turn, turnBefore, "the turn counter never advances")
+end
+
+function tests.gameAutoExploreHaltsWithoutSpendingATurnOnceTheRunIsAlreadyWon()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.won = true
+  local turnBefore = game.turn
+  local consumesTurn, message = game:autoExplore()
+  eq(consumesTurn, false, "an autoexplore attempt after victory spends no turn")
+  eq(message, "there is nothing left to do", "the refusal matches Game:manualStep's own halted message")
+  eq(game.turn, turnBefore, "the turn counter never advances once the run is already won")
+end
+
+function tests.gameAutoExploreStopsTheInstantThePlayerTakesDamage()
+  local game = stagedGame(1, arena(25, 15), 3, 3)
+  Status.apply(game.player, Status.POISON, 5, 4)
+  local turnBefore = game.turn
+  local hpBefore = game.player.hp
+  local consumesTurn, message = game:autoExplore()
+  eq(consumesTurn, true, "the interrupted turn itself still spends")
+  eq(message, "you stop exploring - you have taken damage", "the interrupt explains itself")
+  eq(game.turn, turnBefore + 1, "exactly the one turn that took the damage was spent")
+  eq(game.player.hp, hpBefore - 4, "the poison tick's own damage lands normally before the interrupt fires")
+end
+
+function tests.gameAutoExploreRefusesToStartWhileAHostileIsAlreadyInSight()
+  local level = arena(21, 11)
+  local game = stagedGame(1, level, 5, 5)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 7, 5, 1)
+  orc.awareness = Stealth.DORMANT
+  level.entities = { orc }
+  game:computeVisible()
+  local turnBefore = game.turn
+  local consumesTurn, message = game:autoExplore()
+  eq(consumesTurn, false, "a hostile already visible refuses to even start")
+  eq(message, "a monster is already in sight", "the refusal names the reason")
+  eq(game.turn, turnBefore, "the turn counter never advances")
+end
+
+-- The room is wide open (not a corridor) on purpose: Game:exploreStep's own
+-- BFS treats an entity's tile as unreachable (see game.lua), so a monster
+-- sitting in a one-wide corridor would simply wall off the far end and
+-- "nothing left to explore" would fire before the player ever got close
+-- enough to see it - a real, separately-confirmed property of exploreStep,
+-- not the thing this test means to exercise. A big room lets the BFS route
+-- around the orc's single tile instead, so sight is what actually stops
+-- this run. Both the room's height and the orc's row sit well within the
+-- player's initial vision radius (8), so the whole approach plays out along
+-- a single row and Stealth.WAKE_RADIUS (6, smaller than that same vision
+-- radius) guarantees the orc is seen before it is ever close enough to roll
+-- a wake of its own (see stealth.lua's canSpot) - the interrupt below is
+-- proven to fire on sight alone, never on contact, without relying on RNG.
+function tests.gameAutoExploreStopsTheMomentAHostileComesIntoSightWithoutEngagingIt()
+  local level = arena(30, 11)
+  local game = stagedGame(2, level, 3, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 25, 6, 1)
+  orc.awareness = Stealth.DORMANT
+  level.entities = { orc }
+  local turnBefore = game.turn
+  local hpBefore = game.player.hp
+  local orcHpBefore = orc.hp
+  local consumesTurn, message = game:autoExplore()
+  eq(consumesTurn, true, "real ground was covered before the interrupt fired")
+  eq(message, "you stop exploring - a monster is in sight", "the interrupt names a sighted hostile")
+  eq(game.turn, turnBefore + 14, "exactly the steps needed to bring the orc within vision range 8 were taken")
+  eq(game.player.hp, hpBefore, "no damage was taken - explore stops on sight, not on contact")
+  eq(orc.hp, orcHpBefore, "the orc is only spotted, never engaged")
+  ok(game.visible[level.map:index(orc.x, orc.y)], "the orc really is the thing that got seen")
+  eq(orc.x, 25, "the still-dormant orc never took a single step of its own")
+  eq(orc.awareness, Stealth.DORMANT, "and never woke up at all")
+end
+
+function tests.gameManualStepDrivenExploreSpendsExactlyAsManyTurnsAsCallingGameAutoExploreDirectly()
+  local direct = stagedGame(9, arena(25, 15), 3, 3)
+  direct:autoExplore()
+  local viaManualStep = stagedGame(9, arena(25, 15), 3, 3)
+  viaManualStep:manualStep("explore")
+  eq(viaManualStep.turn, direct.turn,
+    "routing explore through Game:manualStep must not end the turn a second time on top of what " ..
+    "autoExplore already closed itself")
+end
+
+function tests.commandsApplyExploreDrivesGameAutoExploreAndReturnsItsResult()
+  local game = stagedGame(1, arena(11, 9), 5, 5)
+  local consumesTurn, message = Commands.apply(game, "explore")
+  eq(consumesTurn, false, "a room already fully visible from the start spends no turn")
+  eq(message, "there is nothing left to explore", "the command surfaces Game:autoExplore's own message verbatim")
+end
+
+function tests.commandsApplyHelpMentionsExplore()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local _, message = Commands.apply(game, "help")
+  ok(contains(message, "explore"), "help mentions explore")
+end
+
+function tests.commandsApplyHelpMentionsTheOptionalTargetNumberOnEveryTargetedVerb()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local _, message = Commands.apply(game, "help")
+  ok(contains(message, "throw <n> [target]"), "help spells out throw's optional target number")
+  ok(contains(message, "fire [target]"), "help spells out fire's optional target number")
+  ok(contains(message, "capture <n> [target]"), "help spells out capture's optional target number")
+  ok(contains(message, "cast <spell> [target]"), "help spells out cast's optional target number")
+  ok(contains(message, "useskill <skill> [target]"), "help spells out useskill's optional target number")
+end
+
+function tests.gameRestUntilHealedRefusesWithoutSpendingATurnWhenAlreadyAtFullHealth()
+  local game = stagedGame(1, arena(11, 9), 5, 5)
+  local turnBefore = game.turn
+  local consumesTurn, message = game:restUntilHealed()
+  eq(consumesTurn, false, "resting at full health spends no turn")
+  eq(message, "you are already at full health", "the refusal explains why")
+  eq(game.turn, turnBefore, "the turn counter never advances")
+end
+
+function tests.gameRestUntilHealedRefusesWithoutSpendingATurnWhileAHostileIsAlreadyInSight()
+  local level = arena(21, 11)
+  local game = stagedGame(1, level, 5, 5)
+  game.player.hp = game.player.maxHp - 5
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 7, 5, 1)
+  orc.awareness = Stealth.DORMANT
+  level.entities = { orc }
+  game:computeVisible()
+  local turnBefore = game.turn
+  local consumesTurn, message = game:restUntilHealed()
+  eq(consumesTurn, false, "a hostile already visible refuses to even start")
+  eq(message, "a monster is already in sight", "the refusal names the reason")
+  eq(game.turn, turnBefore, "the turn counter never advances")
+end
+
+function tests.gameRestUntilHealedHealsTurnByTurnUntilFullThenStops()
+  local game = stagedGame(1, arena(11, 9), 5, 5)
+  game.player.hp = game.player.maxHp - 6
+  Status.apply(game.player, Status.REGEN, 20, 2)
+  local turnBefore = game.turn
+  local consumesTurn, message = game:restUntilHealed()
+  eq(consumesTurn, true, "a rest that actually heals spends turns")
+  eq(message, "you rest until your wounds close", "a completed rest reports it finished")
+  eq(game.player.hp, game.player.maxHp, "hp is capped exactly at maxHp, never over it")
+  eq(game.turn, turnBefore + 3, "exactly ceil(6/2) turns of the regen tick were needed")
+end
+
+-- Deliberately the same "nothing left to explore" shape as autoExplore's own
+-- steps==0 refusal, but rest's equivalent needs a *second* unchanged turn
+-- before it gives up rather than judging the first one alone - see
+-- Game:restUntilHealed's own comment for why: a real player's typed "rest"
+-- always runs through Game:manualStep, which already primes one turn of
+-- ticking before this function's loop ever gets to take its own first
+-- hpBefore snapshot, so that first reading alone cannot be trusted.
+function tests.gameRestUntilHealedStopsAfterTwoUnchangedTurnsWhenNothingIsHealingThePlayer()
+  local game = stagedGame(1, arena(11, 9), 5, 5)
+  game.player.hp = game.player.maxHp - 5
+  local turnBefore = game.turn
+  local consumesTurn, message = game:restUntilHealed()
+  eq(consumesTurn, true, "the turns spent checking still count as spent")
+  eq(message, "you stop resting - nothing here is healing you", "the interrupt explains itself")
+  eq(game.turn, turnBefore + 2, "exactly two turns were spent before giving up")
+  eq(game.player.hp, game.player.maxHp - 5, "hp is unchanged - nothing was healing it in the first place")
+end
+
+function tests.gameRestUntilHealedStopsTheInstantThePlayerTakesDamage()
+  local game = stagedGame(1, arena(11, 9), 5, 5)
+  game.player.hp = game.player.maxHp - 5
+  Status.apply(game.player, Status.POISON, 5, 4)
+  local turnBefore = game.turn
+  local hpBefore = game.player.hp
+  local consumesTurn, message = game:restUntilHealed()
+  eq(consumesTurn, true, "the interrupted turn itself still spends")
+  eq(message, "you stop resting - you have taken damage", "the interrupt explains itself")
+  eq(game.turn, turnBefore + 1, "exactly the one turn that took the damage was spent")
+  eq(game.player.hp, hpBefore - 4, "the poison tick's own damage lands normally before the interrupt fires")
+end
+
+-- Same row placement trick as autoExplore's own sight-interrupt test, but
+-- mirrored: here the *player* stands still (resting) and the orc is the one
+-- that has to close the distance on its own, so it starts HUNTING (already
+-- aware, not DORMANT) rather than relying on stealth.lua's wake roll - the
+-- point of this test is Game:canSeePlayer's own chase range (10) reaching
+-- further than the player's own vision radius (8), not the wake mechanic.
+-- Status.REGEN is applied so the run has real healing to interrupt (see
+-- Game:restUntilHealed's own comment - two turns are needed before "nothing
+-- is healing you" could even fire, and this scenario resolves before that).
+function tests.gameRestUntilHealedStopsTheMomentAHostileComesIntoSightWithoutEngagingIt()
+  local level = arena(30, 11)
+  local game = stagedGame(2, level, 20, 6)
+  game.player.hp = game.player.maxHp - 20
+  Status.apply(game.player, Status.REGEN, 50, 1)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 11, 6, 1)
+  orc.awareness = Stealth.HUNTING
+  level.entities = { orc }
+  game:computeVisible()
+  ok(not game.visible[level.map:index(orc.x, orc.y)], "the orc starts out of sight")
+  local turnBefore = game.turn
+  local hpBefore = game.player.hp
+  local orcHpBefore = orc.hp
+  local consumesTurn, message = game:restUntilHealed()
+  eq(consumesTurn, true, "real turns were spent healing before the interrupt fired")
+  eq(message, "you stop resting - a monster is in sight", "the interrupt names a sighted hostile")
+  eq(game.turn, turnBefore + 2, "exactly the steps needed to bring the orc within vision range 8 were taken")
+  ok(game.player.hp > hpBefore, "the turns spent before the interrupt actually healed the player")
+  eq(orc.hp, orcHpBefore, "the orc is only spotted, never engaged")
+  ok(game.visible[level.map:index(orc.x, orc.y)], "the orc really is the thing that got seen")
+  eq(orc.awareness, Stealth.HUNTING, "the orc's own awareness is unaffected by simply being spotted")
+end
+
+function tests.gameManualStepDrivenRestSpendsExactlyAsManyTurnsAsCallingGameRestUntilHealedDirectly()
+  local direct = stagedGame(9, arena(11, 9), 5, 5)
+  direct.player.hp = direct.player.maxHp - 6
+  Status.apply(direct.player, Status.REGEN, 20, 2)
+  direct:restUntilHealed()
+  local viaManualStep = stagedGame(9, arena(11, 9), 5, 5)
+  viaManualStep.player.hp = viaManualStep.player.maxHp - 6
+  Status.apply(viaManualStep.player, Status.REGEN, 20, 2)
+  viaManualStep:manualStep("rest")
+  eq(viaManualStep.turn, direct.turn,
+    "routing rest through Game:manualStep must not end the turn a second time on top of what " ..
+    "restUntilHealed already closed itself, and must credit the turn manualStep primes before " ..
+    "Commands.apply ever runs to the same run rather than losing it")
+  eq(viaManualStep.player.hp, direct.player.hp, "both paths heal the player by the same total amount")
+end
+
+function tests.commandsApplyRestDrivesGameRestUntilHealedAndReturnsItsResult()
+  local game = stagedGame(1, arena(11, 9), 5, 5)
+  local consumesTurn, message = Commands.apply(game, "rest")
+  eq(consumesTurn, false, "a player already at full health spends no turn")
+  eq(message, "you are already at full health", "the command surfaces Game:restUntilHealed's own message verbatim")
+end
+
+function tests.commandsApplyHelpMentionsRest()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local _, message = Commands.apply(game, "help")
+  ok(contains(message, "rest"), "help mentions rest")
+end
+
+-- Splits an otherwise-open arena into two floor regions with a solid wall
+-- column at x == gapX between them - used only to build a destination that is
+-- provably unreachable from the player's own side, for Game:travelTo's "no
+-- route exists" refusal below.
+local function splitArena(w, h, gapX)
+  local map = Map.new(w, h)
+  for y = 2, h - 1 do
+    for x = 2, gapX - 1 do map:set(x, y, Map.FLOOR) end
+    for x = gapX + 1, w - 1 do map:set(x, y, Map.FLOOR) end
+  end
+  return Level.new({
+    depth = 1, generator = "arena", map = map,
+    entities = {}, floorItems = {}, traps = {}, lights = {}, dark = false, explored = {},
+    upX = 2, upY = 2, downX = w - 1, downY = h - 1,
+  })
+end
+
+function tests.gameTravelToWalksTheShortestPathAndArrivesAtTheDestination()
+  local level = arena(21, 11)
+  local game = stagedGame(1, level, 3, 6)
+  local expectedSteps = #game:playerPathTo(level.downX, level.downY) - 1
+  local turnBefore = game.turn
+  local consumesTurn, message = game:travelTo(level.downX, level.downY)
+  eq(consumesTurn, true, "a real trip spends turns")
+  eq(message, "you arrive", "arriving reports so")
+  eq(game.player.x, level.downX, "the player actually reaches the destination x")
+  eq(game.player.y, level.downY, "the player actually reaches the destination y")
+  eq(game.turn, turnBefore + expectedSteps, "exactly the shortest path's own number of steps were spent")
+end
+
+function tests.gameTravelToRefusesWithoutSpendingATurnWhenAlreadyThere()
+  local level = arena(11, 9)
+  local game = stagedGame(1, level, level.downX, level.downY)
+  local turnBefore = game.turn
+  local consumesTurn, message = game:travelTo(level.downX, level.downY)
+  eq(consumesTurn, false, "already standing on the destination spends no turn")
+  eq(message, "you are already there", "the refusal explains why")
+  eq(game.turn, turnBefore, "the turn counter never advances")
+end
+
+function tests.gameTravelToRefusesWithoutSpendingATurnWhenNoRouteExists()
+  local level = splitArena(21, 9, 11)
+  local game = stagedGame(1, level, 3, 5)
+  local turnBefore = game.turn
+  local consumesTurn, message = game:travelTo(level.downX, level.downY)
+  eq(consumesTurn, false, "an unreachable destination refuses to even start")
+  eq(message, "you cannot find a path there", "the refusal names the reason")
+  eq(game.turn, turnBefore, "the turn counter never advances")
+end
+
+function tests.gameTravelToRefusesWithoutSpendingATurnWhileAHostileIsAlreadyInSight()
+  local level = arena(21, 11)
+  local game = stagedGame(1, level, 5, 5)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 7, 5, 1)
+  orc.awareness = Stealth.DORMANT
+  level.entities = { orc }
+  game:computeVisible()
+  local turnBefore = game.turn
+  local consumesTurn, message = game:travelTo(level.downX, level.downY)
+  eq(consumesTurn, false, "a hostile already visible refuses to even start")
+  eq(message, "a monster is already in sight", "the refusal names the reason")
+  eq(game.turn, turnBefore, "the turn counter never advances")
+end
+
+function tests.gameTravelToHaltsWithoutSpendingATurnOnceTheRunIsAlreadyWon()
+  local level = arena(21, 11)
+  local game = stagedGame(1, level, 5, 5)
+  game.won = true
+  local turnBefore = game.turn
+  local consumesTurn, message = game:travelTo(level.downX, level.downY)
+  eq(consumesTurn, false, "a travel attempt after victory spends no turn")
+  eq(message, "there is nothing left to do", "the refusal matches Game:manualStep's own halted message")
+  eq(game.turn, turnBefore, "the turn counter never advances once the run is already won")
+end
+
+function tests.gameTravelToStopsTheInstantThePlayerTakesDamage()
+  local level = arena(25, 15)
+  local game = stagedGame(1, level, 3, 3)
+  Status.apply(game.player, Status.POISON, 5, 4)
+  local turnBefore = game.turn
+  local hpBefore = game.player.hp
+  local consumesTurn, message = game:travelTo(level.downX, level.downY)
+  eq(consumesTurn, true, "the interrupted turn itself still spends")
+  eq(message, "you stop traveling - you have taken damage", "the interrupt explains itself")
+  eq(game.turn, turnBefore + 1, "exactly the one turn that took the damage was spent")
+  eq(game.player.hp, hpBefore - 4, "the poison tick's own damage lands normally before the interrupt fires")
+end
+
+-- Same row-placement trick as Game:autoExplore's own sight-interrupt test
+-- (see its comment for the exact reasoning: both the room's height and the
+-- orc's row sit well within the player's initial vision radius (8), and
+-- Stealth.WAKE_RADIUS (6) is smaller than that, so the orc is always seen
+-- before it could ever wake on its own). The destination (28, 6) sits well
+-- past the orc's own cell (25, 6) on the same row, but the interrupt fires
+-- purely from Game:anyHostileVisible at the top of the loop - before that
+-- turn's own move (and any path recomputation to route around the now-
+-- occupied cell) is ever attempted - so the two extra columns behind the orc
+-- never come into play; empirically confirmed to land on the exact same
+-- turn count as the analogous autoExplore test.
+function tests.gameTravelToStopsTheMomentAHostileComesIntoSightWithoutEngagingIt()
+  local level = arena(30, 11)
+  local game = stagedGame(2, level, 3, 6)
+  local orc = Monsters.create(Monsters.byKey.orc, 1, 25, 6, 1)
+  orc.awareness = Stealth.DORMANT
+  level.entities = { orc }
+  local turnBefore = game.turn
+  local hpBefore = game.player.hp
+  local orcHpBefore = orc.hp
+  local consumesTurn, message = game:travelTo(28, 6)
+  eq(consumesTurn, true, "real ground was covered before the interrupt fired")
+  eq(message, "you stop traveling - a monster is in sight", "the interrupt names a sighted hostile")
+  eq(game.turn, turnBefore + 14, "exactly the steps needed to bring the orc within vision range 8 were taken")
+  eq(game.player.hp, hpBefore, "no damage was taken - travel stops on sight, not on contact")
+  eq(orc.hp, orcHpBefore, "the orc is only spotted, never engaged")
+  ok(game.visible[level.map:index(orc.x, orc.y)], "the orc really is the thing that got seen")
+  eq(orc.x, 25, "the still-dormant orc never took a single step of its own")
+  eq(orc.awareness, Stealth.DORMANT, "and never woke up at all")
+end
+
+function tests.gameManualStepDrivenTravelSpendsExactlyAsManyTurnsAsCallingGameTravelToDirectly()
+  local level1 = arena(21, 11)
+  local direct = stagedGame(9, level1, 3, 6)
+  direct:travelTo(level1.downX, level1.downY)
+  local level2 = arena(21, 11)
+  local viaManualStep = stagedGame(9, level2, 3, 6)
+  viaManualStep:manualStep("travel down")
+  eq(viaManualStep.turn, direct.turn,
+    "routing travel through Game:manualStep must not end the turn a second time on top of what " ..
+    "travelTo already closed itself")
+  eq(viaManualStep.player.x, direct.player.x, "both paths reach the same destination x")
+  eq(viaManualStep.player.y, direct.player.y, "both paths reach the same destination y")
+end
+
+function tests.commandsApplyTravelDownDrivesGameTravelToTowardTheDownStairs()
+  local level = arena(21, 11)
+  local game = stagedGame(1, level, level.downX, level.downY)
+  local consumesTurn, message = Commands.apply(game, "travel down")
+  eq(consumesTurn, false, "already standing on the down stairs spends no turn")
+  eq(message, "you are already there", "the command surfaces Game:travelTo's own message verbatim")
+end
+
+function tests.commandsApplyTravelUpDrivesGameTravelToTowardTheUpStairs()
+  local level = arena(21, 11)
+  local game = stagedGame(1, level, level.upX, level.upY)
+  local consumesTurn, message = Commands.apply(game, "travel up")
+  eq(consumesTurn, false, "already standing on the up stairs spends no turn")
+  eq(message, "you are already there", "the command surfaces Game:travelTo's own message verbatim")
+end
+
+function tests.commandsApplyTravelWithoutAnArgumentFailsWithoutSpendingATurn()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local consumesTurn, message = Commands.apply(game, "travel")
+  eq(consumesTurn, false, "an unrecognized destination spends no turn")
+  eq(message, "travel where? down or up", "the failure explains the two valid destinations")
+end
+
+function tests.commandsApplyHelpMentionsTravel()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  local _, message = Commands.apply(game, "help")
+  ok(contains(message, "travel down/up"), "help mentions travel down/up")
+end
+
+-- Every test above exercises the engine in-process, by requiring src/ modules
+-- directly - never the actual `lua warren.lua ...` entry point a real player
+-- (or the --play REPL) invokes. That leaves argument parsing, the playLoop
+-- stdin/stdout loop, and the CLI-level wiring between flags and Game/Meta
+-- entirely unverified by automation (three prior sessions flagged this and
+-- checked it by hand instead). This section closes that gap: it spawns the
+-- real interpreter against the real warren.lua as a subprocess, the same way
+-- a player or a shell script would, and asserts on what actually comes back.
+local warrenEntry = scriptDir .. "/../warren.lua"
+local luaExe = arg[-1] or "lua"
+
+local function shellQuote(s)
+  return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
+end
+
+-- Runs `lua warren.lua <argv...>`, optionally piping stdinText in (for
+-- --play), and returns (combinedOutput, exitCode). stderr is folded into
+-- stdout so a crash's traceback shows up in the captured text instead of
+-- vanishing into the terminal.
+local function runWarrenCli(argv, stdinText)
+  local parts = { shellQuote(luaExe), shellQuote(warrenEntry) }
+  for _, a in ipairs(argv) do parts[#parts + 1] = shellQuote(a) end
+  local inPath
+  if stdinText then
+    inPath = os.tmpname()
+    local input = io.open(inPath, "w")
+    input:write(stdinText)
+    input:close()
+    parts[#parts + 1] = "<"
+    parts[#parts + 1] = shellQuote(inPath)
+  end
+  parts[#parts + 1] = "2>&1"
+  local proc = io.popen(table.concat(parts, " "), "r")
+  local output = proc:read("a")
+  local success, exitType, code = proc:close()
+  if inPath then os.remove(inPath) end
+  local exitCode = success and 0 or (exitType == "exit" and code or -1)
+  return output, exitCode
+end
+
+function tests.cliHeadlessAutoRunPrintsTheStatusBarAndExitsZero()
+  local output, code = runWarrenCli({ "--seed", "42", "--auto", "20" })
+  eq(code, 0, "a plain headless auto-run exits zero")
+  ok(contains(output, "HP "), "the status bar's HP field reaches real stdout")
+  ok(contains(output, "depth "), "the status bar's depth field reaches real stdout")
+  ok(not contains(output, "traceback"), "a routine auto-run never prints a Lua traceback")
+end
+
+function tests.cliPlayReplDrivesRealCommandsThroughRealStdin()
+  local script = "status\nlook\nlearn cleave\nlearn cleave\nforge fire\nhelp\nquit\n"
+  local output, code = runWarrenCli({ "--seed", "5", "--class", "fighter", "--play" }, script)
+  eq(code, 0, "a scripted --play session exits zero")
+  ok(contains(output, "you learn cleave"), "learn is wired through the real stdin loop")
+  ok(contains(output, "you already know that"), "a repeated learn is rejected through the real stdin loop")
+  ok(contains(output, "you see no threats nearby"), "look reaches the real command dispatcher")
+  ok(contains(output, "cannot forge: not enough essence"),
+    "forge's failure message reaches real stdout with a fresh fighter's zero essence")
+  ok(contains(output, "commands: north/south/east/west"), "help lists the command vocabulary over real stdout")
+end
+
+function tests.cliPlayLoopChargesATurnOnlyForCommandsThatActuallySucceed()
+  local script = "wait\nasdf\nstatus\nquit\n"
+  local output, code = runWarrenCli({ "--seed", "1", "--auto", "0", "--play" }, script)
+  eq(code, 0, "a mixed valid/invalid --play script still exits zero")
+  ok(contains(output, "unknown command: asdf"), "an unrecognized verb is reported over real stdout")
+  ok(contains(output, "turn 1"), "one successful wait (and one rejected typo) leaves the turn counter at exactly 1")
+  ok(not contains(output, "turn 2"), "the rejected typo never advances the turn counter a second time")
+end
+
+function tests.cliSaveThenLoadRoundTripsThroughTheRealEntryPoint()
+  local savePath = os.tmpname()
+  local saveOut, saveCode = runWarrenCli({ "--seed", "9", "--auto", "15", "--save", savePath })
+  eq(saveCode, 0, "--save exits zero")
+  ok(contains(saveOut, "saved to"), "--save reports where it wrote the file")
+  local saved = io.open(savePath, "r")
+  ok(saved ~= nil, "the save file actually exists on disk after --save")
+  if saved then
+    ok(#saved:read("a") > 0, "the save file is not empty")
+    saved:close()
+  end
+  local loadOut, loadCode = runWarrenCli({ "--load", savePath, "--auto", "0" })
+  os.remove(savePath)
+  eq(loadCode, 0, "--load exits zero")
+  ok(contains(loadOut, "turn 15"), "the loaded run resumes at exactly the turn it was saved on")
+end
+
+function tests.cliVerifyConfirmsADeterministicReplayThroughTheRealEntryPoint()
+  local output, code = runWarrenCli({ "--seed", "7", "--auto", "30", "--verify" })
+  eq(code, 0, "--verify exits zero")
+  ok(contains(output, "replay verified: seed 7 reproduces this run"),
+    "a meta-free run reports a verified replay over real stdout")
+end
+
+function tests.cliChallengePresetPrintsAChallengeLineAndAVerdict()
+  local output, code = runWarrenCli({ "--challenge", "3", "--auto", "40" })
+  eq(code, 0, "--challenge exits zero")
+  ok(contains(output, "challenge:"), "the challenge preset announces itself over real stdout")
+  ok(contains(output, "challenge honored") or contains(output, "challenge broken"),
+    "the challenge preset reaches a pass/fail verdict by the end of the run")
+end
+
+function tests.cliReportShowsFreshProgressionStateForANewMetaFile()
+  local metaPath = os.tmpname()
+  os.remove(metaPath)
+  local output, code = runWarrenCli({ "--meta", metaPath, "--report" })
+  os.remove(metaPath)
+  eq(code, 0, "--report against a brand-new --meta file exits zero")
+  ok(contains(output, "renown 0"), "a fresh meta file reports zero renown")
+  ok(contains(output, "streak:"), "the report includes the streak line")
+  ok(contains(output, "compendium:"), "the report includes the compendium section")
+  ok(contains(output, "leaderboard:"), "the report includes the leaderboard section")
+  ok(contains(output, "perk vigor"), "the report lists purchasable perks")
+end
+
+function tests.cliExportsRealLeaderboardAndCompendiumCsvFiles()
+  local metaPath = os.tmpname()
+  os.remove(metaPath)
+  local csvPath = os.tmpname()
+  local bestiaryPath = os.tmpname()
+  local output, code = runWarrenCli({
+    "--meta", metaPath, "--seed", "5", "--auto", "30",
+    "--export-csv", csvPath, "--export-compendium", bestiaryPath,
+  })
+  eq(code, 0, "a run with both export flags exits zero")
+  ok(contains(output, "leaderboard exported to"), "the CLI reports the leaderboard export path")
+  ok(contains(output, "compendium exported to"), "the CLI reports the compendium export path")
+  local csv = io.open(csvPath, "r")
+  ok(csv ~= nil, "the leaderboard CSV file exists on disk")
+  if csv then
+    local header = csv:read("l")
+    eq(header, "rank,score,className,depth,turn,won,seed", "the leaderboard CSV has the expected header row")
+    csv:close()
+  end
+  local bestiary = io.open(bestiaryPath, "r")
+  ok(bestiary ~= nil, "the compendium CSV file exists on disk")
+  if bestiary then
+    ok(#bestiary:read("a") > 0, "the compendium CSV is not empty")
+    bestiary:close()
+  end
+  os.remove(metaPath)
+  os.remove(csvPath)
+  os.remove(bestiaryPath)
+end
+
+function tests.cliLoadingAMissingSaveFileFailsLoudlyRatherThanSilently()
+  local output, code = runWarrenCli({ "--load", "/tmp/warren-tests-nonexistent-save-xyz.sav" })
+  eq(code, 1, "loading a save file that does not exist exits nonzero")
+  ok(contains(output, "cannot load save"), "the failure names the save-loading step, not a generic crash")
+  ok(contains(output, "missing"), "the failure explains that the file itself is what is missing")
+end
+
+-- Deliberately loose on exact numbers (unlike the in-process Game:autoExplore
+-- tests above, this drives a real builder-generated level rather than a
+-- hand-built arena) - it only asserts the one invariant a real player relying
+-- on this over actual stdin needs to hold: a single typed "explore" advances
+-- the turn counter by more than the one turn any other command would.
+function tests.cliPlayReplExploreAdvancesSeveralTurnsInASingleTypedCommand()
+  local script = "status\nexplore\nstatus\nquit\n"
+  local output, code = runWarrenCli({ "--seed", "5", "--class", "fighter", "--play" }, script)
+  eq(code, 0, "a scripted explore through --play exits zero")
+  ok(not contains(output, "traceback"), "explore over real stdin never crashes")
+  -- Every command re-renders the status bar (its own "turn %d" field) on top
+  -- of whatever reply message it printed, so "turn %d" shows up several
+  -- times per command rather than once per typed "status" - the turn number
+  -- only ever increases, so comparing the very first occurrence (the
+  -- opening render, before any command) against the very last (after
+  -- everything, including "explore") is robust to exactly how many of those
+  -- redundant re-renders there are.
+  local turns = {}
+  for turn in output:gmatch("turn (%d+)") do turns[#turns + 1] = tonumber(turn) end
+  ok(#turns >= 2, "the turn counter appears in the transcript")
+  ok(turns[#turns] > turns[1], "explore actually advances the turn counter through the real entry point")
+end
+
+-- A freshly created character always starts at full hp (see entity.lua), so
+-- this exercises rest's refusal path rather than a multi-turn heal - the
+-- healing/interrupt logic itself is already covered turn-by-turn by the
+-- gameRestUntilHealed* tests above; what this proves instead is that the
+-- real --play REPL actually reaches Commands.apply's "rest" handler and
+-- reports Game:restUntilHealed's own refusal without spending a turn,
+-- through the real entry point rather than by requiring src/ modules.
+function tests.cliPlayReplRestRefusesWithoutSpendingATurnAtFullHealth()
+  local script = "status\nrest\nstatus\nquit\n"
+  local output, code = runWarrenCli({ "--seed", "5", "--class", "fighter", "--play" }, script)
+  eq(code, 0, "a scripted rest through --play exits zero")
+  ok(not contains(output, "traceback"), "rest over real stdin never crashes")
+  ok(contains(output, "you are already at full health"), "the real entry point surfaces the refusal verbatim")
+  ok(not contains(output, "turn 1"), "the refused rest never advances the turn counter past the opening render")
+end
+
+-- Seed 1 with the fighter class was picked by hand (see how gameAutoExplore's
+-- own CLI test picked seed 5): "travel down" on this particular generated
+-- floor covers real ground before a monster comes into sight and interrupts
+-- it, exactly the multi-turn-then-interrupt shape gameTravelToStopsTheMoment
+-- AHostileComesIntoSightWithoutEngagingIt already proves turn-by-turn in
+-- isolation - this only proves the real --play entry point reaches it too.
+function tests.cliPlayReplTravelDownAdvancesSeveralTurnsInASingleTypedCommand()
+  local script = "status\ntravel down\nstatus\nquit\n"
+  local output, code = runWarrenCli({ "--seed", "1", "--class", "fighter", "--play" }, script)
+  eq(code, 0, "a scripted travel through --play exits zero")
+  ok(not contains(output, "traceback"), "travel over real stdin never crashes")
+  ok(contains(output, "you stop traveling - a monster is in sight"),
+    "the real entry point surfaces Game:travelTo's own interrupt verbatim")
+  local turns = {}
+  for turn in output:gmatch("turn (%d+)") do turns[#turns + 1] = tonumber(turn) end
+  ok(#turns >= 2, "the turn counter appears in the transcript")
+  ok(turns[#turns] > turns[1], "travel actually advances the turn counter through the real entry point")
+end
+
+-- Moonbell is the sixth herb (see alchemy.lua), added purely to make
+-- confuse/blind/levitate brewable - all three were only ever obtainable as
+-- loot, a trap, or a spell before this, a gap flagged (and deliberately not
+-- closed, since the existing five-herb grid was already fully assigned)
+-- across several earlier sessions today. Its own pair concentrates its
+end
+
 local order = {
   "rngDeterminism", "mapDeterminism", "tilesRegistry", "fovKnownScene", "losSightLine",
   "astarPathing", "combatResolution", "itemsAndEquipment", "affixes", "statusEffects",
