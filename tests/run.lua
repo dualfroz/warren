@@ -14488,15 +14488,265 @@ end
 -- loot, a trap, or a spell before this, a gap flagged (and deliberately not
 -- closed, since the existing five-herb grid was already fully assigned)
 -- across several earlier sessions today. Its own pair concentrates its
+-- dream-fog aspect into confusion, the same "own aspect turned inward" shape
+-- as every other same-herb recipe.
+function tests.alchemyMoonbellPairedWithItselfConcentratesIntoConfusion()
+  local potion = Alchemy.brew(Alchemy.MOONBELL, Alchemy.MOONBELL)
+  eq(potion.effect, "confuse", "a doubled moonbell brews its own dream-fog aspect")
+end
+
+-- Sunpetal (wakeful daylight) is the one aspect moonbell (dreaming night)
+-- outright opposes, the same shape as the pre-existing sunpetal/nightcap
+-- (light versus shade) and emberleaf/frostmoss (fire versus frost) curdles.
+function tests.alchemyMoonbellPairedWithSunpetalCurdlesOnTheDayVersusDreamOpposition()
+  local potion, reason = Alchemy.brew(Alchemy.SUNPETAL, Alchemy.MOONBELL)
+  eq(potion, nil, "day and dream herbs curdle rather than brewing a potion")
+  eq(reason, "curdle", "a curdled moonbell brew names its failure like any other opposed pair")
+end
+
+function tests.alchemyMoonbellPairedWithBloodrootBrewsClarity()
+  local potion = Alchemy.brew(Alchemy.BLOODROOT, Alchemy.MOONBELL)
+  eq(potion.effect, "clarity", "blood grounds the dreaming mind into clarity instead of confusion")
+  eq(potion.power, 30, "an unspecified recipe power falls back to the catalog default for its effect")
+end
+
+function tests.alchemyMoonbellPairedWithEmberleafBrewsBlindness()
+  local potion = Alchemy.brew(Alchemy.EMBERLEAF, Alchemy.MOONBELL)
+  eq(potion.effect, "blind", "fire's smoke thickened by dream-fog brews blindness")
+end
+
+function tests.alchemyMoonbellPairedWithFrostmossBrewsLevitation()
+  local potion = Alchemy.brew(Alchemy.FROSTMOSS, Alchemy.MOONBELL)
+  eq(potion.effect, "levitate", "frost's lightness carried by dream-fog brews levitation")
+end
+
+function tests.alchemyMoonbellPairedWithNightcapBrewsAStrongerPoisonThanEitherHerbAlone()
+  local blended = Alchemy.brew(Alchemy.NIGHTCAP, Alchemy.MOONBELL)
+  eq(blended.effect, "poison", "two shade-aspected herbs still blend into poison, like nightcap's other cross pairs")
+  ok(blended.power > Alchemy.recipes[Alchemy.pairKey(Alchemy.BLOODROOT, Alchemy.NIGHTCAP)].power,
+    "moonbell's nightcap blend is stronger than nightcap's weakest existing poison blend")
+  ok(blended.power < Alchemy.recipes[Alchemy.pairKey(Alchemy.NIGHTCAP, Alchemy.NIGHTCAP)].power,
+    "moonbell's nightcap blend still falls short of concentrated nightcap's own poison")
+end
+
+-- The five pre-existing herbs' own 15 recipes are untouched data (see
+-- alchemy.lua's own comment on why moonbell appends rather than inserts) -
+-- this pins the two still-standing curdles so a future change to the new
+-- pairings above could never silently perturb them.
+function tests.alchemyAddingMoonbellLeftEveryPreExistingRecipeUntouched()
+  eq(Alchemy.brew(Alchemy.SUNPETAL, Alchemy.SUNPETAL).power, 18, "concentrated sunpetal still heals for its original power")
+  local potion, reason = Alchemy.brew(Alchemy.SUNPETAL, Alchemy.NIGHTCAP)
+  eq(potion, nil, "sunpetal and nightcap still curdle")
+  eq(reason, "curdle", "the pre-existing curdle still names its failure the same way")
+  eq(Alchemy.brew(Alchemy.EMBERLEAF, Alchemy.FROSTMOSS), nil, "emberleaf and frostmoss still curdle too")
+  eq(Alchemy.brew(Alchemy.NIGHTCAP, Alchemy.NIGHTCAP).power, 7, "concentrated nightcap still brews its original poison power")
+end
+
+-- Exercises the full Game:brewAt pipeline (cauldron gating, inventory
+-- spending, Identify.reveal) with the new herb, not just Alchemy.brew in
+-- isolation - the unit-level recipe tests above already proved the fixed
+-- outcomes; this proves the interactive path a player actually uses reaches
+-- them unchanged.
+function tests.gameBrewAtCanBrewAMoonbellPairingAtACauldron()
+  local game = stagedGame(1, arena(21, 11), 5, 5)
+  game.level.cauldrons = { { x = 5, y = 5 } }
+  game.player.inventory = { Alchemy.herb(Alchemy.MOONBELL), Alchemy.herb(Alchemy.FROSTMOSS) }
+  ok(game:brewAt(1, 2), "brewing moonbell with frostmoss at a cauldron underfoot succeeds")
+  eq(#game.player.inventory, 1, "both source herbs are spent and one potion is added")
+  local brewed = game.player.inventory[1]
+  eq(brewed.effect, "levitate", "the brewed potion matches moonbell/frostmoss's fixed recipe")
+  ok(Identify.isKnown(game.identify, brewed), "brewing a moonbell potion yourself identifies its type for free, like any other brew")
+end
+
+function tests.buildersOccasionallyRollAMoonbellHerbAsForagingLoot()
+  local found
+  for seed = 1, 200 do
+    local level = Builder.build(1, Rng.new(seed), {})
+    for _, ground in ipairs(level.floorItems) do
+      if ground.item.kind == Items.HERB and ground.item.herb == Alchemy.MOONBELL then found = ground.item end
+    end
+    if found then break end
+  end
+  ok(found ~= nil, "a moonbell herb eventually turns up in the entrance-floor foraging loot across a handful of seeds")
+  eq(found.name, "moonbell herb", "a foraged moonbell herb carries its plain, unmasked name like any other herb")
 end
 
 local order = {
   "rngDeterminism", "mapDeterminism", "tilesRegistry", "fovKnownScene", "losSightLine",
   "astarPathing", "combatResolution", "itemsAndEquipment", "affixes", "statusEffects",
-  "scheduler", "generators", "connectivityRepair", "dungeonPersistence", "monsterAiChase", "monsterAiRanged",
-  "monsterAiFlee", "monsterAiDeterministic", "doorsAndKeys", "traps", "lightAndDark",
-  "identification", "effects", "messageLog", "weaponAffixOnHit", "saveLoadRoundTrip",
-  "deterministicPlaythrough", "autoplayDescends",
+  "scheduler", "generators",
+  "mazeGeneratorIsDeterministicDiffersAcrossSeedsAndLeavesEveryFloorCellReachable",
+  "mazeGeneratorIsRegisteredButExcludedFromTheDepthCycle",
+  "mazeGeneratorProducesOneWideCorridorsRatherThanOpenRooms",
+  "mazeGeneratorBraidingOpensSomeDeadEndsWithoutTouchingConnectivity",
+  "prefabVaultSizeMatchesItsWidestRowAndItsRowCount",
+  "prefabVaultFitsAcceptsAnAnchorWithAWallGapToEveryBorderAndRejectsOneWithout",
+  "prefabVaultStampWritesEveryGlyphAndCollectsTreasureMonsterAndLootMarkersInMapOrder",
+  "prefabVaultStampIsDeterministicForAFixedAnchor",
+  "builderCanBeExplicitlySteeredToAMazeFloorAndStillYieldsAPlayableLevel",
+  "connectivityRepair", "dungeonPersistence", "monsterAiChase", "monsterAiRanged",
+  "monsterAiFlee", "monsterAiDeterministic",
+  "aiActConfusedMonsterSometimesStumblesInsteadOfChasing",
+  "aiActWithoutConfusionAlwaysRunsTheNormalBehaviour",
+  "aiActBlindedArcherNeitherShootsNorChasesEvenWithAClearShot",
+  "gameAdjacentAllyFindsACompanionStandingRightNextToAMonster",
+  "gameAdjacentAllyIgnoresAHostileMonsterAndOnlyCountsCardinalAdjacency",
+  "gameAdjacentAllyBreaksTiesByTheLowerEntityIdAndIgnoresADeadAlly",
+  "aiChaseAttacksAnAllyBlockingTheOnlyCorridorToThePlayerInsteadOfIdlingForever",
+  "aiChasePrefersAnAdjacentPlayerOverAnAdjacentAllyWhenBothAreInMeleeRange",
+  "aiPackAttacksAnAllyBlockingTheOnlyCorridorToThePlayerInsteadOfIdlingForever",
+  "aiTunnelAttacksAnAllyBlockingItsOnlyGapInsteadOfIdling",
+  "aiRangedAttacksABlockingAllyWhenItHasNoLineOfSightToThePlayerAtAll",
+  "gameMoveMonsterAttacksAnAllyItBumpsIntoInsteadOfDoingNothing",
+  "aiActConfusedMonsterCanStumbleIntoAttackingABlockingAllyInsteadOfIdling",
+  "doorsAndKeys", "traps",
+  "gameSpringTrapConfuseEffectAppliesToAnyVictimNotJustThePlayer",
+  "gameSpringTrapBlindEffectAppliesToAnyVictimNotJustThePlayer",
+  "gameSpringTrapStunEffectAppliesToAnyVictimNotJustThePlayer",
+  "gameMovePlayerConfusionEitherFollowsTheChosenDirectionOrStumblesElsewhere",
+  "gameMovePlayerConfusionStumbleIntoAWallStillSpendsTheTurn",
+  "gameMovePlayerWithoutConfusionNeverStumbles",
+  "gameAllyActsConfusedReturnsFalseImmediatelyWithoutTheStatus",
+  "lightAndDark",
+  "identification", "identifyGivesEveryPotionTypeItsOwnDistinctUnidentifiedLook", "effects",
+  "effectsMessagesAddressThePlayerInSecondPersonNotThirdPersonSingular",
+  "effectsClarityMessageAddressesThePlayerPossessively",
+  "effectsCureMessagesAddressThePlayerPossessivelyForAllFourOutcomes", "hazards",
+  "shrinePrayGrantsWarBlessingWhenFavorHolds", "shrinePrayGrantsVitalityBlessing",
+  "shrinePrayGrantsWisdomBlessing", "shrinePrayGrantsFortuneBlessingAndCleansesAilments",
+  "shrinePrayCanCurseInsteadOfBless", "shrinePrayFailsWithoutEnoughGold",
+  "shrineCostAndCurseOddsRiseWithUse", "shrineFieldsSurviveSerialization",
+  "builderOccasionallyPlacesAShrineFromDepthFour", "shrinesStayOffTheShallowFloors",
+  "autopilotPraysAtAnUnspentShrineWhenAffordable", "autopilotSkipsAnAlreadyUsedShrine",
+  "shrineRendersItsGlyphWhenVisible",
+  "messageLog", "weaponAffixOnHit",
+  "progressionLeveling", "progressionMonsterKillGrantsXp",
+  "spellCastMissileKillsAndGrantsXp", "spellCastFailsWithoutSpendingState",
+  "spellLearnFromTome", "spellHealAndShield", "spellBlinkMovesWithinRadius",
+  "manaRegeneratesEachTurn",
+  "throwWeaponHitsAndLands", "throwWeaponKillGrantsXp", "throwPotionAppliesHostileEffect",
+  "throwConfusePotionAppliesTheStatusToTheTargetNotTheThrower",
+  "throwBlindPotionAppliesTheStatusToTheTargetNotTheThrower",
+  "throwLevitatePotionAppliesTheStatusToTheTargetNotTheThrower",
+  "throwOutOfRangeFails",
+  "rangedShotHitsAtRangeAndConsumesAmmo", "rangedShotKillGrantsXp", "rangedFailsWithoutAmmo",
+  "rangedFailsOutOfRange", "ammoStacksOnPickup",
+  "trollRegenerateUnlessBurning", "ratHasNoRegen", "wretchDeathBurstsPoisonSpores",
+  "dragonBreathIgnitesPlayer",
+  "necromancerSummonsZombie", "summonRespectsPopulationCap",
+  "curseAtRangeHurtsAndWeakens", "curseDamageIsMitigatedByThePlayersDefenseLikeAnyOtherAttack",
+  "curseBreaksThePlayersMeleeMomentumStack", "curseWearsThePlayersEquippedArmor",
+  "curseWithheldWhenAdjacent", "abilityCooldownBlocksImmediateReuse",
+  "shriekAtRangeBlindsThePlayer", "shriekWithheldWhenAdjacent", "shriekIsUnavailableOutOfRange",
+  "shriekBlindnessReducesTheVictimsEffectiveSightRadius",
+  "healerMendsNeediestAlly", "healerSkipsWhenAlliesAreHealthy",
+  "healerNeverMendsThePlayersOwnCompanionHirelingOrThrall",
+  "rallyBuffsAdjacentAllies", "rallySkipsWhenNoUnbuffedAlliesAdjacent",
+  "rallyNeverBuffsThePlayersOwnCompanionHirelingOrThrall",
+  "footpadStealsThenFlees", "footpadWithNothingToStealStillFlees",
+  "slimeSplitsOnSurvivedHit", "splitCapsAtTwoGenerations",
+  "takeMonsterTurnPrefersAbilityOverMovement", "takeMonsterTurnFallsBackToAiWhenOnCooldown",
+  "abilityFieldsSurviveSerialization",
+  "statusEffectKillGrantsXpAndLogsDeath",
+  "hazardKillDuringMonsterTurnGrantsXp", "hazardStepRunsOncePerPlayerRound",
+  "saveLoadRoundTrip", "deterministicPlaythrough", "autoplayDescends",
+  "amuletSpawnsOnFinalFloorOnly", "descendIsBlockedAtTheFinalFloor",
+  "ascendWithoutAmuletDoesNotWin", "ascendWithAmuletWinsTheGame", "wonGameHaltsTheAutopilot",
+  "autopilotFetchesTheAmuletAndWins",
+  "shopPriceCatalogScalesWithPower", "shopStockRollsAffordableWares",
+  "goldPickupAddsToWalletNotInventory",
+  "affordableWareIsBoughtAutomaticallyOnPickup", "unaffordableWareStaysOnTheGround",
+  "deadKeeperMakesWaresFreeToLoot", "stealingFromShopTurnsTheKeeperHostile",
+  "hostileShopkeeperChasesLikeAnyMonster", "passiveShopkeeperIgnoresTheAdjacentPlayer",
+  "sellItemGrantsHalfPriceAndRemovesIt", "builderOccasionallySeedsAShopWithMatchingWares",
+  "shopAndLooseGoldStayOffTheShallowFloors",
+  "classApplyGrantsFighterStatBonuses", "classApplyGrantsRogueGoldAndAttack",
+  "classApplyGrantsMageManaAndAttack", "classApplyGrantsRangerBowAndAmmo", "invalidClassIsIgnored",
+  "skillLearnRespectsClassLevelAndPoints", "skillCooldownBlocksImmediateReuseAndTicksDown",
+  "fighterCleaveHitsPrimaryAndAdjacentMonsters",
+  "fighterCleaveSplashRespectsAFireImmuneTargetLikeThePrimaryHitAlreadyDoes",
+  "fighterSecondWindRestoresPortionOfMaxHp",
+  "fighterBerserkBoostsAttackAtLowHp", "rogueBackstabDoublesDamageOnFullHpTarget",
+  "rogueEvasionCanFullyNegateMeleeHit", "poisonBladeAppliesPoisonOnNextMeleeHitOnly",
+  "pendingPoisonBladeReadinessSurvivesAGameSaveLoadRoundTrip",
+  "mageOverloadBoostsMissileDamage", "mageMeditateRestoresManaWithinCap",
+  "mageManaShieldRaisesDefenseWhileManaHeld", "rangerMultishotHitsTwoTargetsForOneArrow",
+  "rangerMultishotRespectsPhysicalResistanceOnBothSplitArrows",
+  "rangerCamouflageShrinksDetectionOnDarkFloors", "rangerTrueshotAddsFlatRangedDamage",
+  "effectiveRadiusBlindStatusOverridesLightAndWeatherToAMinimumOfOne",
+  "canSeePlayerBlindedMonsterOnlyDetectsThePlayerAtMeleeRange",
+  "autopilotLearnsSkillsAutomaticallyAsPointsAllow", "skillFieldsSurviveSerialization",
+  "craftingForgeSpendsEssenceForATierOneGem", "craftingMergeGemsCombinesMatchingPairsIntoTheNextTier",
+  "craftingSocketAddsPowerAndSwapsRiderOnResocket", "craftingTemperRaisesPowerAtRisingCostUpToACap",
+  "craftingTemperRefusesWithoutEnoughEssence", "craftingEnchantGrantsAChosenAffixOnce",
+  "craftingDisenchantStripsAffixAndRefundsEssence", "craftingSocketedGemRidersStackWithARolledAffixOnHit",
+  "craftingShockRiderActuallyStunsTheVictimOnItsNextTurnNotJustOnPaper",
+  "gameCraftingWrappersDriveTheFullPipeline", "monsterKillsGrantEssenceScaledToTheirXpReward",
+  "craftingFieldsSurviveSerialization",
+  "alchemyBrewResolvesAKnownPairToItsFixedPotion", "alchemyBrewIsOrderIndependent",
+  "alchemyBrewCurdlesOnAnOpposedPairing", "alchemyLookupRejectsAnUnknownHerb",
+  "gameBrewAtCombinesTwoHerbsIntoAPotionAtACauldron", "gameBrewAtFailsWithoutACauldronUnderfoot",
+  "gameBrewAtRequiresTwoHerbItems", "gameBrewAtCurdlesIntoGasInsteadOfAPotion",
+  "buildersScatterHerbsFromTheFirstFloor", "cauldronsStayOffTheEntranceFloor",
+  "buildersOccasionallyPlaceACauldronFromDepthTwo", "cauldronFieldsSurviveSerialization",
+  "cauldronRendersItsGlyphWhenVisible",
+  "nodesHarvestingAnOreVeinPaysEssenceAndSpendsACharge",
+  "nodesHarvestingAnOreVeinDoublesItsYieldDuringRichVeins",
+  "nodesHarvestingAGemSeamYieldsARawTierOneGemOfItsElement",
+  "nodesGoingFallowRefusesFurtherHarvestsUntilItReopens",
+  "nodesStepCountsDownAndReopensAFallowNode", "nodesFieldsSurviveSerialization",
+  "nodeRendersItsGlyphWhenVisible",
+  "gameHarvestNodeAtAnOreVeinAddsEssenceAndSpendsACharge",
+  "gameHarvestNodeFailsWithoutANodeUnderfoot", "gameHarvestNodeOnAFallowVeinFails",
+  "autopilotHarvestsAnOreVeinWhenIdleAndStandingOnIt", "autopilotSkipsAFallowNode",
+  "buildersNeverPlaceANodeOnTheEntranceFloor", "buildersAlwaysPlaceAtLeastOneNodeFromDepthTwoOn",
+  "corpsesSpawnsForAWildMonsterButNotForUndeadMimicOrBoss",
+  "corpsesNutritionScalesWithTheFelledSpeciesMaxHpClampedToAFixedBand",
+  "corpsesStepCountsDownAndRotsAwayEntirely",
+  "corpsesGoesRottenPastItsThresholdButStaysButcherableUntilThen",
+  "corpsesButcheringFreshMeatAddsFoodToInventoryAndConsumesTheCorpse",
+  "corpsesButcheringRottenMeatPoisonsThePlayerInsteadAndStillConsumesTheCorpse",
+  "corpseFieldsSurviveSerialization", "corpseRendersItsGlyphWhenVisible",
+  "gameAwardKillLeavesACorpseForAWildMonsterButNotForUndeadOrMimic",
+  "gameButcherCorpseAtFreshMeatFeedsThePlayerAndClearsTheCorpse",
+  "gameButcherCorpseFailsWithoutACorpseUnderfoot",
+  "autopilotButchersAFreshCorpseWhenIdleAndStandingOnIt",
+  "autopilotLeavesARottenCorpseAloneRatherThanRiskingPoison",
+  "hungerCurrentDefaultsToCapForAFreshEntity",
+  "hungerTierOfClassifiesEachBandAtItsBoundaries",
+  "hungerAttackAndDefensePenaltiesEscalateByTier",
+  "entityEffectiveAttackAndDefenseFoldInTheHungerPenalty",
+  "hungerSuppressesRegenOnlyAtWeakOrWorse",
+  "hungerTickDrainsByOneAndLogsOnlyOnATierCrossing",
+  "hungerTickBitesForOneHpEveryRoundWhileStarving",
+  "hungerEatCapsAtTheCeilingAndWastesAnOverfullMealIntoBloat",
+  "hungerEatBelowTheCeilingBanksNutritionWithNoWaste",
+  "hungerEatClampsAMealThatWouldOverflowPastTheCapWithoutBloating",
+  "gameHungerTorchTickSuppressesRingRegenOnceThePlayerIsWeak",
+  "gameUseItemEatingFoodRestoresSatiationAndLogsTheMeal",
+  "gameUseItemEatingFoodWhileAlreadyFullAppliesSlowAndLogsBloat",
+  "reanimationRaiseCreatesAThrallAdjacentToThePlayerAndSpendsTheCorpseAndSanity",
+  "reanimationRaiseRefusesARottenCorpseWithoutSpendingAnything",
+  "reanimationRaiseRefusesWithoutEnoughSanityAndLeavesTheCorpseAlone",
+  "reanimationRaiseScalesThrallStatsDownFromTheOriginSpecies",
+  "reanimationRaiseFallsBackToAPlainSkeletonForAnUnrecognisedSpecies",
+  "reanimationRaiseRetiresAnEarlierThrallWhenRaisingAnother",
+  "reanimationActAttacksAnAdjacentHostileMonsterAndCanKillIt",
+  "reanimationActAdvancesOnAVisibleMonsterItCannotYetReach",
+  "reanimationActIgnoresAMonsterBeyondItsSightRadius",
+  "reanimationActBlindedThrallOnlyDetectsAnAdjacentHostileNotOneWithinItsSightRadius",
+  "reanimationActAttackingAnAdjacentMonsterEmitsNoiseThatCanStirADormantBystander",
+  "reanimationActFollowsThePlayerWhenNoMonsterIsVisible",
+  "reanimationActConfusedThrallSometimesStumblesInsteadOfFightingAnAdjacentHostile",
+  "reanimationActCollapsesOnceItsBorrowedAnimationRunsOut",
+  "takeMonsterTurnRoutesAThrallThroughReanimationAct",
+  "gameRaiseCorpseSucceedsAndLogsTheCallAnswered",
+  "gameRaiseCorpseFailsWithoutACorpseUnderfoot",
+  "scavengingHerbForMapsEachWildFactionToItsOwnFixedHerb",
+  "scavengingHerbForReturnsNilForACorpseWithNoBestiaryEntry",
+  "gameScavengeCorpseCarvesTheMatchingHerbAndClearsTheCorpse",
+  "gameScavengeCorpseFailsWithoutACorpseUnderfoot",
+  "gameScavengeCorpseFailsOnARottenCorpse",
 }
 
 for _, name in ipairs(order) do
