@@ -1,7 +1,3 @@
--- Binary space partitioning: recursively split the grid into a tree of regions,
--- carve one room per leaf, then connect each internal node's two children by a
--- corridor between the centres of a room drawn from each subtree.
-
 local Map = require("map")
 local Carve = require("gen.carve")
 

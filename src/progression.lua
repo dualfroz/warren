@@ -1,13 +1,5 @@
--- Player experience and leveling. Killing a monster grants xp scaled by the
--- species catalog; once xp clears the threshold for the current level the
--- player levels up, gaining permanent hp/attack/defense and a full heal-up on
--- the hp gained. A single large xp grant can trigger several level-ups in a
--- row, so the gain loops rather than checking once.
-
 local Progression = {}
 
--- Threshold to advance from `level` to `level + 1`. Linear on purpose: pure
--- and easy to reason about in tests, unlike an exponential curve.
 function Progression.xpToNext(level)
   return 20 + (level - 1) * 15
 end
@@ -33,8 +25,6 @@ local function levelUp(player)
   return string.format("you reach level %d", player.level)
 end
 
--- Applies an xp gain to the player, running as many level-ups as the gain
--- covers. Returns the log lines produced, in order.
 function Progression.grantXp(player, amount)
   if amount <= 0 then return {} end
   player.xp = player.xp + amount

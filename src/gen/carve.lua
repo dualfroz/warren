@@ -1,7 +1,3 @@
--- Shared carving primitives used by the room, bsp and prefab generators.
--- Operate on any object exposing set(x, y, glyph); no dependency on Map itself
--- so the generators can require this without a cycle.
-
 local Tiles = require("tiles")
 
 local Carve = {}

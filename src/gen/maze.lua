@@ -1,21 +1,3 @@
--- Recursive-backtracker maze: a perfect spanning tree of one-wide corridors
--- over a grid of cells spaced two tiles apart, carved by an iterative
--- depth-first walk (an explicit stack, never Lua's own call stack, so
--- nothing here bounds how large a maze can grow). The result is a topology
--- none of the other generators produce - dense and twisty, with exactly one
--- path between any two cells - unlike the open rooms of gen.rooms/gen.bsp
--- or the organic blobs of gen.cellular/gen.drunkard. A braiding pass
--- afterward knocks down a fixed fraction of the walls still separating two
--- already-carved cells, so a fraction of what would otherwise be dead ends
--- gain a second way out instead. Selectable like any other entry in
--- gen.init's registry, but deliberately left out of Gen.order: nothing
--- downstream (builder.lua's rng-ordering discipline, every seed-pinned
--- depth test) currently expects the auto-cycle to ever hand it a floor, and
--- inserting a fifth entry there would reshuffle which of the existing four
--- generators every depth from five onward gets, and with it every rng draw
--- a builder places afterward. A maze floor is instead reached deliberately,
--- via options.generator = "maze".
-
 local Map = require("map")
 local Tiles = require("tiles")
 
@@ -68,10 +50,6 @@ function Maze.generate(width, height, rng, options)
     if not advanced then stack[#stack] = nil end
   end
 
-  -- Braiding: a wall cell with floor on exactly one opposing pair of sides
-  -- (east-west or north-south) sits between two cells the backtracker above
-  -- already connected some longer way around; knocking a fixed fraction of
-  -- these down trims some, but never all, of the maze's dead ends.
   for y = 3, height - 2 do
     for x = 3, width - 2 do
       if map:get(x, y) == Tiles.WALL then

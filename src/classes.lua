@@ -1,9 +1,3 @@
--- Player classes. A class is chosen once at character creation (Game.new
--- options.class) and never changes; it grants a one-time stat or kit delta
--- and, through skills.lua, gates which skills the player is allowed to spend
--- points on. Classless play (no options.class given) is unaffected - every
--- class delta is opt-in so existing unclassed games keep their exact stats.
-
 local Items = require("items")
 
 local Classes = {}
@@ -50,9 +44,6 @@ function Classes.isValid(key)
   return Classes.defs[key] ~= nil
 end
 
--- Applies the one-time delta for `key` to a freshly created player. Must run
--- after the player's base stats, mana pool and starting inventory are all in
--- place, since every delta is additive on top of whatever is already there.
 function Classes.apply(player, key)
   local def = Classes.defs[key]
   if not def then return false end

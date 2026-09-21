@@ -1,8 +1,3 @@
--- Level grid: walls, floors, stairs, doors, traps and other terrain. Tile
--- semantics (walkable, blocks sight, is a door) live in the Tiles registry;
--- the default generator places random non-overlapping rooms and links their
--- centres with L-shaped corridors.
-
 local Tiles = require("tiles")
 
 local Map = {}
@@ -63,8 +58,6 @@ function Map:blocksSight(x, y)
   return Tiles.blocksSight(self:get(x, y))
 end
 
--- Passability for pathing: closed doors count as passable so routes lead through
--- them; a locked door is only passable when the traveller holds a key.
 function Map:isPassable(x, y, hasKey)
   local tile = self:get(x, y)
   if Tiles.isWalkable(tile) then return true end

@@ -1,8 +1,3 @@
--- Data-driven bestiary. Each species is a plain table describing stats, the AI
--- behaviour tag that governs its turn, how fast it acts, and the shallowest depth
--- it appears at. The factory stamps a species into an Entity, scaling hp with
--- depth so lower floors bite harder.
-
 local Entity = require("entity")
 local Factions = require("factions")
 local Disease = require("disease")
@@ -21,11 +16,6 @@ Monsters.species = {
   { key = "mage",    glyph = "m", name = "dark mage",      hp = 8,  attack = 2, defense = 0, speed = 100, ai = "ranged",  minDepth = 5, range = 6, xp = 12, faction = Factions.CULT },
   { key = "dragon",  glyph = "D", name = "young dragon",   hp = 30, attack = 8, defense = 3, speed = 90,  ai = "ranged",  minDepth = 6, range = 4, xp = 25, breath = "fire", resist = { fire = "immune", cold = "weak" }, faction = Factions.DRAKE },
 
-  -- Ability bearers: each carries an `ability` tag resolved by abilities.lua's
-  -- tryAct dispatch, which runs before the plain ai.lua behaviour listed here
-  -- and only falls through to it when the ability is on cooldown or has no
-  -- valid target. minDepth is kept at 4+ so these never appear on the shallow
-  -- floors exercised by the fixed-maxDepth win-condition tests.
   { key = "zombie",     glyph = "z", name = "shambling zombie", hp = 7,  attack = 3, defense = 1, speed = 90,  ai = "chase", minDepth = 4, xp = 5, faction = Factions.UNDEAD, disease = Disease.ROT },
   { key = "slime",      glyph = "j", name = "gelatinous slime", hp = 10, attack = 2, defense = 0, speed = 90,  ai = "chase", minDepth = 4, xp = 5, ability = "split", faction = Factions.BEAST },
   { key = "footpad",    glyph = "f", name = "footpad",          hp = 6,  attack = 2, defense = 0, speed = 120, ai = "chase", minDepth = 4, xp = 6, ability = "steal", faction = Factions.BANDIT },
@@ -35,9 +25,6 @@ Monsters.species = {
   { key = "chieftain",  glyph = "C", name = "orc chieftain",    hp = 14, attack = 5, defense = 2, speed = 100, ai = "pack",  minDepth = 6, xp = 14, ability = "rally", faction = Factions.GOBLINOID },
   { key = "banshee",    glyph = "b", name = "banshee",          hp = 7,  attack = 2, defense = 0, speed = 100, ai = "flee",  minDepth = 5, xp = 11, ability = "shriek", faction = Factions.UNDEAD },
 
-  -- Shopkeeper: a passive vendor guarding priced wares (see shop.lua). Its
-  -- "vend" behaviour idles until game.lua flags it hostile after a theft, at
-  -- which point it falls back to a plain chase like any other monster.
   { key = "shopkeeper", glyph = "h", name = "shopkeeper", hp = 8, attack = 3, defense = 1, speed = 100, ai = "vend", minDepth = 4, xp = 7, faction = Factions.MERCHANT },
 }
 
@@ -46,7 +33,6 @@ for _, spec in ipairs(Monsters.species) do
   Monsters.byKey[spec.key] = spec
 end
 
--- Species eligible at a depth, in registry order so callers pick deterministically.
 function Monsters.forDepth(depth)
   local eligible = {}
   for _, spec in ipairs(Monsters.species) do
@@ -57,18 +43,11 @@ function Monsters.forDepth(depth)
   return eligible
 end
 
--- Xp reward for felling an entity, looked up by the species key stamped onto
--- it at creation. Falls back to a flat amount for anything without one.
 function Monsters.xpFor(entity)
   local spec = Monsters.byKey[entity.species]
   return spec and spec.xp or 4
 end
 
--- A fresh copy of a species' innate resist table, never the catalog's own
--- object: elites.lua's "warded" affix mutates entity.resist in place once
--- rolled, and a shared reference there would leak that bump onto every
--- other spawn of the same species for the rest of the process, not just
--- the one entity actually promoted.
 local function copyResist(resist)
   if not resist then return nil end
   local copy = {}

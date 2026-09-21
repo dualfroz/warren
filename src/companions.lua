@@ -1,18 +1,3 @@
--- Player-aligned allies bonded from a charm found on the floor. Once summoned
--- a companion joins the turn scheduler exactly like a monster (see game.lua's
--- takeMonsterTurn), but its own turn logic below hunts nearby hostile
--- monsters instead of the player and never turns hostile itself. Only one
--- companion may be bonded at a time - summoning a second retires the first.
---
--- Static per-species numbers (sight radius, heal rate) are looked up from
--- Companions.byKey by species key rather than copied onto the entity, the
--- same convention monsters.lua uses for xp: one source of truth, and nothing
--- extra to add to entity.lua's serialization whitelist. A companion's own
--- battle-earned progress (companionXp/companionLevel/companionHealBonus
--- below) is the opposite: per-instance and mutable, so unlike the static
--- table above it does need its own prefixed trio in that whitelist, the same
--- way mercenaries.lua's wage/loyalty or reanimation.lua's decay already do.
-
 local Entity = require("entity")
 local Combat = require("combat")
 local Los = require("los")
@@ -22,13 +7,6 @@ local Noise = require("noise")
 
 local Companions = {}
 
--- `evolutions` entries are climbed in order, each permanently once
--- companionXp first reaches its `xp` (a running total, not a delta - the
--- same shape titles.lua's own ladder uses): the companion is renamed and its
--- hp/attack/defense grow by that entry's own flat amount, on top of
--- whatever an earlier stage already added rather than replacing it. A
--- hearth sprite's `heal` entries stack the same way into companionHealBonus,
--- read by tendPlayer below alongside the species' own static heal rate.
 Companions.species = {
   { key = "hound",  glyph = "d", name = "hunting hound", hp = 14, attack = 4, defense = 0, speed = 130, sight = 7,
     evolutions = {
@@ -56,9 +34,6 @@ end
 
 local ADJACENT = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 }, { 1, 1 }, { 1, -1 }, { -1, 1 }, { -1, -1 } }
 
--- Bonds a fresh companion of `key` onto a free cell next to the player,
--- retiring any earlier bond first. Returns the new companion, or nil if
--- every cell around the player is blocked.
 function Companions.summon(game, key)
   local spec = Companions.byKey[key]
   if not spec then return nil end
@@ -84,22 +59,10 @@ function Companions.summon(game, key)
   return nil
 end
 
--- Chebyshev-1 (8-directional), matching mercenaries.lua's and reanimation.lua's
--- own "adjacent" helpers exactly - both of those modules explicitly describe
--- their combat branch as "the same three-branch shape as Companions.act", so
--- this was meant to be one shared rule, not three independently-typed copies.
--- This one alone used Manhattan-1 (4-directional) until now, so a companion
--- caught diagonally next to a hostile monster fell through to
--- stepMonsterToward instead of attacking - the exact same geometry a hireling
--- or thrall standing in already engages without moving.
 local function adjacent(a, b)
   return math.max(math.abs(a.x - b.x), math.abs(a.y - b.y)) == 1
 end
 
--- Nearest living monster the companion can see within its species' sight
--- radius, ties broken by ascending id for determinism. A blinded companion
--- loses every longer-ranged sighting and falls back to melee range only,
--- the same clamp Game:canSeePlayer applies to a blinded hostile monster.
 local function nearestHostile(game, companion)
   local spec = Companions.byKey[companion.species]
   local sight = spec.sight
@@ -118,10 +81,6 @@ local function nearestHostile(game, companion)
   return best
 end
 
--- A hearth sprite mends its bonded player a little on any turn it does not
--- spend fighting - the only companion with a passive off-turn effect. An
--- evolved sprite's companionHealBonus (see Companions.gainXp) tops up its
--- species' own static rate rather than replacing it.
 local function tendPlayer(game, companion)
   local spec = Companions.byKey[companion.species]
   if spec.heal and game.player.hp < game.player.maxHp then
@@ -130,13 +89,6 @@ local function tendPlayer(game, companion)
   end
 end
 
--- Credits a companion's own kill tally with `amount` xp and, in the same
--- call, permanently applies every evolution stage (see Companions.species)
--- its running companionXp total first reaches - possibly more than one at
--- once, if a single grant vaults it clean past an intermediate threshold.
--- Entirely separate from the xp Game:awardKill still credits the player for
--- that identical kill (see Companions.act): the player's own level and this
--- companion's are two independent ladders climbed off the same battles.
 function Companions.gainXp(game, companion, amount)
   if not amount or amount <= 0 then return end
   companion.companionXp = (companion.companionXp or 0) + amount
@@ -159,9 +111,6 @@ function Companions.gainXp(game, companion, amount)
   end
 end
 
--- The companion's full turn: engage the nearest visible monster if one is in
--- reach, close the distance to one it can see but not yet reach, otherwise
--- stay within a step of the player.
 function Companions.act(game, companion)
   if game:allyActsConfused(companion) then return end
   local target = nearestHostile(game, companion)

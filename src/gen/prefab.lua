@@ -1,7 +1,3 @@
--- Hand-authored vaults stamped onto a generated level. Each vault is an ASCII
--- template; markers flag where the dungeon layer should later drop treasure or
--- guardians. Stamping is deterministic given a fixed anchor.
-
 local Tiles = require("tiles")
 
 local Prefab = {}
@@ -58,16 +54,11 @@ function Prefab.size(vault)
   return #vault.rows[1], #vault.rows
 end
 
--- Returns true when a vault fits entirely inside the map interior with a wall
--- gap to the border, false otherwise. No cell content is inspected here; the
--- caller decides overlap policy.
 function Prefab.fits(map, vault, ox, oy)
   local w, h = Prefab.size(vault)
   return ox >= 2 and oy >= 2 and ox + w - 1 <= map.width - 1 and oy + h - 1 <= map.height - 1
 end
 
--- Stamps a vault at (ox, oy) and returns lists of treasure and monster anchors
--- in map coordinates so the dungeon layer can populate them.
 function Prefab.stamp(map, vault, ox, oy)
   local treasure, monsters, loot = {}, {}, {}
   for row = 1, #vault.rows do

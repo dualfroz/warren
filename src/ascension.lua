@@ -1,19 +1,3 @@
--- Optional run-wide difficulty mutators a player opts into before a run
--- starts, in exchange for extra renown once it ends: risk taken on purpose,
--- unlike events.lua's mutators which fire and fade on their own mid-run
--- regardless of anyone's choice. A mutator unlocks once meta.lua's own
--- cross-run tallies (best depth, wins) cross its fixed requirement -
--- computed live off those tallies rather than persisted, since both only
--- ever climb, so nothing here needs its own entry in meta.lua's save shape.
---
--- Active mutators for the run in progress live on game.ascension, a plain
--- array of keys in catalog order (see Ascension.resolve), exactly the shape
--- warren.lua's --mutators flag builds. Plain data, so it serializes with no
--- special save-format handling, and every combat/essence/sight hook that
--- reads it (Game:monsterDamageMultiplier, Game:essenceMultiplier,
--- Game:effectiveRadius) stays a pure function of that array alongside
--- whatever level-scoped event Events.lua itself is contributing.
-
 local Ascension = {}
 
 Ascension.MUTATORS = {
@@ -46,9 +30,6 @@ for _, def in ipairs(Ascension.MUTATORS) do
   Ascension.order[#Ascension.order + 1] = def.key
 end
 
--- A meta-less caller (no --meta flag at all) can still activate whatever
--- costs nothing to unlock; every other mutator needs a persistent meta file
--- to have already banked the depth or win it requires.
 function Ascension.isUnlocked(meta, key)
   local def = Ascension.byKey[key]
   if not def then return false end
@@ -56,12 +37,6 @@ function Ascension.isUnlocked(meta, key)
   return meta.bestDepth >= def.requiresDepth and meta.wins >= def.requiresWins
 end
 
--- Validates a requested list of mutator keys against both the catalog and
--- `meta`'s own unlock state, returned de-duplicated in catalog order rather
--- than whatever order the caller supplied - so two runs activating the same
--- set always see it identically regardless of how --mutators listed them.
--- An unknown or still-locked key is silently dropped rather than failing
--- the whole run over one bad flag.
 function Ascension.resolve(meta, requested)
   if not requested or #requested == 0 then return {} end
   local wanted = {}
@@ -109,10 +84,6 @@ function Ascension.sightPenalty(active)
   return penalty
 end
 
--- Renown bonus percentage this active set adds on top of Meta.renownFor's
--- own base score, summed rather than compounded - three 15% mutators add
--- 45%, not a runaway 1.15^3 - so stacking more of them is always a
--- straightforward trade of more risk for more reward.
 function Ascension.renownBonusPercent(active)
   local percent = 0
   for _, key in ipairs(active or {}) do
@@ -122,10 +93,6 @@ function Ascension.renownBonusPercent(active)
   return percent
 end
 
--- Applies every active mutator's one-time player-stat delta, in catalog
--- order. Meant to run once in Game.new, after Meta.applyAll's perks and any
--- class delta, since a mutator is the final, voluntary layer of difficulty
--- stacked on top of whatever build the player already chose.
 function Ascension.applyToPlayer(active, player)
   for _, key in ipairs(active or {}) do
     local def = Ascension.byKey[key]

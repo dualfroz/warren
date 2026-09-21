@@ -1,7 +1,3 @@
--- Player and monster actors. attack/defense are the effective values already
--- including equipment; baseAttack/baseDefense keep the unequipped totals. Energy
--- and speed drive the turn scheduler; statuses layer temporary modifiers on top.
-
 local Status = require("status")
 local Encumbrance = require("encumbrance")
 local Momentum = require("momentum")

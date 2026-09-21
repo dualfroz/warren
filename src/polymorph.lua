@@ -1,22 +1,7 @@
--- Rewrites an entity's very body into a different bestiary species mid-run.
--- Unlike affixes.lua or runewords.lua, which layer bonuses on top of a fixed
--- body, a polymorph replaces the body outright: name, glyph, ai behaviour,
--- attack, defense, speed, resistances, faction and any ability tag all come
--- from the new species wholesale, the same fields Monsters.create stamps
--- onto a fresh spawn. Only the current hp fraction survives the swap, so a
--- polymorph is never a cheap full heal and never an outright kill either.
--- Mutation happens in place on the entity table already held everywhere
--- else (the turn scheduler, level.entities, a live nemesis reference), so
--- nothing needs to re-look-up or re-insert anything after a transform.
-
 local Monsters = require("monsters")
 
 local Polymorph = {}
 
--- Species a polymorph may land on at `depth`, in Monsters.species order so a
--- given rng draw is deterministic. Excludes the shopkeeper outright: its
--- "vend" behaviour idles forever once out of the shop context a polymorphed
--- body would never occupy, leaving it neither hostile nor useful to anyone.
 function Polymorph.pool(depth)
   local eligible = {}
   for _, spec in ipairs(Monsters.species) do
@@ -27,10 +12,6 @@ function Polymorph.pool(depth)
   return eligible
 end
 
--- Transforms `entity` in place into a random species drawn from `pool`,
--- excluding whatever species it already is so a polymorph always changes
--- something. Returns the species table it became, or nil (entity untouched)
--- if `pool` has nothing left to offer once the current species is excluded.
 function Polymorph.transform(entity, rng, pool)
   local choices = {}
   for _, spec in ipairs(pool) do

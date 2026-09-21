@@ -1,9 +1,3 @@
--- Energy-based turn scheduler. Every actor accrues its effective speed each
--- round; an actor may act once its energy reaches the cost threshold, and acting
--- spends that much. Faster actors therefore act more often. Ordering among ready
--- actors is fully deterministic: highest energy first, ties broken by ascending
--- id, so the same seed always yields the same interleaving.
-
 local Scheduler = {}
 
 Scheduler.COST = 100
@@ -20,8 +14,6 @@ local function ready(actor)
   return actor:isAlive() and actor.energy >= Scheduler.COST
 end
 
--- Picks the next actor eligible to act, granting energy in id order whenever no
--- one is ready yet. Returns nil only if there are no living actors at all.
 function Scheduler.next(game)
   for _ = 1, 10000 do
     local actors = actorList(game)

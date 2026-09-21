@@ -1,22 +1,3 @@
--- A reusable versioned, checksummed save container laid on top of
--- serialize.lua's plain Lua-expression encoding. serialize.lua only knows how
--- to turn a value into text and back; it has no notion of "this text might be
--- truncated, hand-edited, or written by a codebase three versions ago". This
--- module adds that layer: an envelope carrying a schema version and an
--- FNV-1a32 checksum of its payload, plus a migration chain that walks old
--- data forward one version at a time.
---
--- A file written before this module existed - a bare Serialize.saveFile dump
--- with no envelope at all - is treated as implicit version 1, so an existing
--- save on disk keeps loading instead of being rejected outright.
---
--- SaveGame.new(migrations) builds one codec for one call site. `migrations`
--- is a 1-indexed array where migrations[v] transforms data from version v to
--- v+1; the codec's CURRENT_VERSION is #migrations + 1. Two call sites with
--- differently shaped data (a run's game state, a player's meta progression)
--- each get their own codec with their own migration chain - this module
--- knows nothing about either shape.
-
 local Serialize = require("serialize")
 
 local SaveGame = {}
@@ -24,8 +5,6 @@ local SaveGame = {}
 local MAGIC = "WARRENSAVE"
 local MASK32 = 0xFFFFFFFF
 
--- FNV-1a, 32-bit. Verified below against the algorithm's published test
--- vectors (fnv1a32("") and fnv1a32("a")), not just self-consistency.
 function SaveGame.fnv1a32(str)
   local hash = 2166136261
   for i = 1, #str do
@@ -42,9 +21,6 @@ local function migrateForward(data, fromVersion, migrations, currentVersion)
   return data
 end
 
--- Builds a codec bound to one migration chain. `migrations` may be empty
--- (CURRENT_VERSION == 1); a version-1-only codec still gets checksumming and
--- corruption detection for free.
 function SaveGame.new(migrations)
   migrations = migrations or {}
   local currentVersion = #migrations + 1
@@ -61,17 +37,12 @@ function SaveGame.new(migrations)
     return Serialize.encode(envelope)
   end
 
-  -- Returns (data) on success, or (nil, reason) on any failure. `reason` is
-  -- always one of: "missing" (only from .load, never from .decode), a string
-  -- starting with "corrupt:", or a string starting with "future version:".
   function codec.decode(text)
     local ok, value = pcall(Serialize.decode, text)
     if not ok or type(value) ~= "table" then
       return nil, "corrupt: cannot parse save data"
     end
     if value.magic ~= MAGIC then
-      -- No envelope at all: a save from before this codec existed. The
-      -- decoded value IS the raw data, at implicit version 1.
       return migrateForward(value, 1, migrations, currentVersion)
     end
     if type(value.version) ~= "number" or type(value.payload) ~= "string"

@@ -1,7 +1,3 @@
--- Cellular-automata caves. Seed the interior with random walls, then relax with
--- the classic 4-5 rule so blobs of open space and rock emerge. Connectivity is
--- enforced afterwards by the dungeon layer.
-
 local Map = require("map")
 local Tiles = require("tiles")
 

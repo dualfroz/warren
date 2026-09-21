@@ -1,7 +1,3 @@
--- Non-overlapping rectangular rooms joined by L-shaped corridors. Returns a
--- carved Map with map.rooms populated; stair, door and trap placement is the
--- dungeon layer's job, not the generator's.
-
 local Map = require("map")
 local Carve = require("gen.carve")
 

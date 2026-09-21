@@ -1,21 +1,10 @@
--- Aggregate, read-only statistics over meta.lua's own cross-run history:
--- how often a body of runs actually won, which class shows up most among
--- them, and where a fresh score would land against that history - three
--- questions renown and achievements never answer on their own, since both
--- only ever look at the one run in front of them, never the shape of every
--- run that came before it.
-
 local Analytics = {}
 
--- Fraction of recorded runs that ended in victory. 0 for a state that has
--- not recorded any runs yet rather than dividing by zero.
 function Analytics.winRate(meta)
   if meta.totalRuns == 0 then return 0 end
   return meta.wins / meta.totalRuns
 end
 
--- Mean score across every leaderboard entry (see leaderboard.lua), 0 for an
--- empty board.
 function Analytics.averageScore(board)
   if #board == 0 then return 0 end
   local total = 0
@@ -23,10 +12,6 @@ function Analytics.averageScore(board)
   return total / #board
 end
 
--- The className appearing most often on `board`, ties broken toward
--- whichever class was seen first on the board - so the answer only ever
--- depends on the board's own entry order, never on however pairs() happens
--- to walk a count table. nil for an empty board.
 function Analytics.favoriteClass(board)
   local counts, order = {}, {}
   for _, entry in ipairs(board) do
@@ -42,10 +27,6 @@ function Analytics.favoriteClass(board)
   return best
 end
 
--- How many of `board`'s entries `score` would actually outrank, as a
--- fraction from 0 (worse than or tied with everything) to 1 (better than
--- everything). An empty board always answers 1 - there is nothing left to
--- beat, so nothing holds the score back.
 function Analytics.percentile(board, score)
   if #board == 0 then return 1 end
   local beaten = 0

@@ -1,16 +1,3 @@
--- Unique named gear. Unlike a rolled affix (affixes.lua), which stacks a
--- small power bump onto an ordinary base item, an artifact is a fixed,
--- always-on mechanic attached to a fixed item - lifesteal, thorns, a passive
--- regen aura, an armour-ignoring shot. Artifacts are never masked by
--- identification: identify.isConcealable only conceals potions and scrolls,
--- so a found artifact shows its real name and effect immediately.
---
--- Builder places at most one per floor from depth 5 on, its rarity roll
--- appended after every other placement (see builder.lua) so it can never
--- perturb an earlier system's rng sequence. Per-floor rng is independent
--- (dungeon.lua reseeds fresh per depth), so this is a per-floor rarity, not a
--- tracked one-per-run guarantee the way the amulet is.
-
 local Items = require("items")
 
 local Artifacts = {}
@@ -46,10 +33,6 @@ Artifacts.catalog = {
     resist = { cold = "resist" },
   },
 
-  -- Boss-exclusive drops (bosses.lua): stronger versions of an existing
-  -- unique mechanic, flagged bossOnly so the loop below keeps them out of
-  -- Artifacts.order and therefore out of builder.lua's ordinary per-floor
-  -- roll. The only way to obtain one is felling the boss that guarantees it.
   {
     key = "warlords_cleaver", slot = "weapon", name = "the Warlord's Cleaver", power = 6,
     unique = Artifacts.LIFESTEAL, value = 0.75, bossOnly = true,
@@ -73,9 +56,6 @@ for _, spec in ipairs(Artifacts.catalog) do
   end
 end
 
--- Builds the dropped item for `key` in the same shape items.lua's own
--- constructors return for that slot, tagged with the fields the equip
--- callers below key their special-case behaviour off (`unique` and `value`).
 function Artifacts.create(key)
   local spec = Artifacts.byKey[key]
   if not spec then return nil end
@@ -96,7 +76,6 @@ function Artifacts.create(key)
   return item
 end
 
--- Hp returned to `attacker` from a lifesteal weapon's hit, or 0 without one.
 function Artifacts.lifestealAmount(attacker, damage)
   local weapon = attacker.weapon
   if weapon and weapon.unique == Artifacts.LIFESTEAL then
@@ -105,8 +84,6 @@ function Artifacts.lifestealAmount(attacker, damage)
   return 0
 end
 
--- Damage reflected back at whoever just landed a melee hit on `defender`, or
--- 0 without thorned armour worn.
 function Artifacts.thornsAmount(defender, damage)
   local armor = defender.armor
   if armor and armor.unique == Artifacts.THORNS then
@@ -115,15 +92,12 @@ function Artifacts.thornsAmount(defender, damage)
   return 0
 end
 
--- Hp `entity` regenerates this turn from a worn ring, or 0 without one.
 function Artifacts.ringRegen(entity)
   local ring = entity.ring
   if ring and ring.unique == Artifacts.REGEN then return ring.value end
   return 0
 end
 
--- Flat defense `entity`'s readied bow ignores on its next shot, or 0 without
--- a piercing bow.
 function Artifacts.bowPierce(entity)
   local bow = entity.bow
   if bow and bow.unique == Artifacts.PIERCING then return bow.value end

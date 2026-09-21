@@ -1,14 +1,3 @@
--- Item sets: matching gear that all share a `set` tag and grants an
--- escalating stat bonus once enough pieces are worn together at once - a
--- fixed weapon/armor/ring/bow catalog of named pieces (see Sets.create),
--- unlike affixes.lua's random roll bolted onto an ordinary base item. The
--- bonus is read live off however many pieces of a given set the wearer
--- currently has equipped (Sets.attackBonus/defenseBonus, wired into
--- combat.lua exactly the way runewords.lua's own live bonus is), so
--- swapping a single piece out mid-run instantly drops back to a lower
--- threshold - or none at all - rather than needing an explicit uninstall
--- step the way a socketed gem or an enchant would.
-
 local Items = require("items")
 
 local Sets = {}
@@ -23,8 +12,6 @@ Sets.catalog = {
       armor  = { name = "Ironclad Plate", power = 3 },
       ring   = { name = "Ironclad Signet", attack = 0, defense = 1 },
     },
-    -- Independent totals, not a stacking ladder: reaching the 3-piece
-    -- threshold replaces the 2-piece bonus rather than adding to it.
     bonuses = {
       [2] = { attack = 1, defense = 1 },
       [3] = { attack = 2, defense = 3, regen = 1 },
@@ -49,10 +36,6 @@ for _, spec in ipairs(Sets.catalog) do
   Sets.byKey[spec.key] = spec
 end
 
--- Every (set, slot) pairing flattened in a fixed order, mirroring
--- artifacts.lua's own Artifacts.order: the list a builder placement rolls
--- a single uniform index into so every piece of every set is equally
--- likely to turn up on a given floor.
 Sets.order = {}
 for _, spec in ipairs(Sets.catalog) do
   for _, slot in ipairs(SLOT_ORDER) do
@@ -62,9 +45,6 @@ for _, spec in ipairs(Sets.catalog) do
   end
 end
 
--- Builds the dropped item for `setKey`'s `slot` piece in the same shape
--- items.lua's own constructors return for that slot, tagged with the
--- `set` field every function below keys its live bonus off.
 function Sets.create(setKey, slot)
   local spec = Sets.byKey[setKey]
   local piece = spec and spec.pieces[slot]
@@ -79,10 +59,6 @@ function Sets.create(setKey, slot)
   return item
 end
 
--- How many of `entity`'s four equip slots currently carry a piece of each
--- set it has at least one piece of, keyed by set key. Walks a fixed slot
--- order rather than pairs() over the entity itself, so the result never
--- depends on Lua's unspecified table iteration order.
 function Sets.equippedCounts(entity)
   local counts = {}
   for _, slot in ipairs(SLOT_ORDER) do
@@ -94,8 +70,6 @@ function Sets.equippedCounts(entity)
   return counts
 end
 
--- The richest bonus tier `count` pieces of `setKey` qualify for, and the
--- threshold it came from, or nil below its lowest threshold.
 function Sets.bonusFor(setKey, count)
   local spec = Sets.byKey[setKey]
   if not spec or not count or count <= 0 then return nil end
@@ -128,8 +102,6 @@ function Sets.defenseBonus(entity)
   return total
 end
 
--- Hp `entity` regenerates this turn from any active set bonus that grants
--- one, summed the same way attack/defense are above.
 function Sets.regenAmount(entity)
   local total = 0
   local counts = Sets.equippedCounts(entity)
@@ -140,9 +112,6 @@ function Sets.regenAmount(entity)
   return total
 end
 
--- A human-readable "Name Npc" tag for every set currently meeting its
--- lowest threshold, in catalog order - read by render.lua's status panel
--- and by nothing that affects game logic.
 function Sets.activeDescriptions(entity)
   local counts = Sets.equippedCounts(entity)
   local parts = {}

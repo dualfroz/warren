@@ -1,6 +1,3 @@
--- Rolling message log. Keeps a bounded tail of lines so the panel and the save
--- file stay small while still reflecting recent events in order.
-
 local MessageLog = {}
 MessageLog.__index = MessageLog
 

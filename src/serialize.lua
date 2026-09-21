@@ -1,7 +1,3 @@
--- Serializes plain data (no functions, no cycles) to a Lua expression that
--- rebuilds it. Keys are emitted in sorted order so the text is deterministic,
--- which makes save/load round trips byte-for-byte comparable.
-
 local Serialize = {}
 
 local encodeValue

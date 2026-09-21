@@ -1,8 +1,3 @@
--- One dungeon floor: its map plus the mutable contents that live on it -
--- monsters, dropped items, traps, light emitters and what the player has
--- explored. Levels are cached by the dungeon so revisiting one restores its
--- exact state, dead monsters and all.
-
 local Map = require("map")
 local Entity = require("entity")
 

@@ -1,10 +1,3 @@
--- Timed area hazards that live on the map itself rather than on an entity:
--- fire and caustic gas. Both linger on their cell, hurt and afflict whoever
--- ends a turn standing there, and can spread into open neighbouring floor
--- before burning or blowing themselves out. Fire is doused outright by water.
--- Hazards are plain data on level.hazards so they serialize like floor items
--- and traps do, with no special save-format handling.
-
 local Tiles = require("tiles")
 local Status = require("status")
 local Resistances = require("resistances")
@@ -17,8 +10,6 @@ Hazards.GAS = "gas"
 
 local DIRS = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }
 
--- First hazard occupying (x, y), optionally filtered to a specific kind so
--- fire and gas can coexist on the same cell without merging into each other.
 function Hazards.at(level, x, y, kind)
   for _, hz in ipairs(level.hazards) do
     if hz.x == x and hz.y == y and (not kind or hz.kind == kind) then return hz end
@@ -26,9 +17,6 @@ function Hazards.at(level, x, y, kind)
   return nil
 end
 
--- Drops a hazard on (x, y), or refreshes one already there of the same kind
--- to whichever of the two durations and potencies is stronger. Walls never
--- catch fire or hold gas.
 function Hazards.spawn(level, x, y, kind, duration, potency)
   if not level.map:inBounds(x, y) then return nil end
   if level.map:get(x, y) == Tiles.WALL then return nil end
@@ -51,10 +39,6 @@ function Hazards.spawnGas(level, x, y, duration, potency)
   return Hazards.spawn(level, x, y, Hazards.GAS, duration or 4, potency or 2)
 end
 
--- Applies whichever hazard occupies entity's current cell, mirroring how
--- Status.tick afflicts the same actor once per turn. Fire and gas both deal
--- their potency in direct damage and lay down a fading status effect on top,
--- so stepping out of the hazard still leaves a lingering burn or sickness.
 function Hazards.afflict(level, entity)
   local hz = Hazards.at(level, entity.x, entity.y)
   if not hz then return nil end
@@ -79,12 +63,6 @@ local function canSpreadInto(level, x, y)
   return Tiles.isWalkable(tile) and tile ~= Tiles.WATER
 end
 
--- Advances every hazard one environmental step: each has an even chance to
--- bloom into an open neighbouring cell that isn't already burning or gassed
--- the same way, water douses fire outright, and every hazard's clock counts
--- down until it burns or blows itself out. Called once per world round (not
--- per actor) so a seeded run always spreads identically regardless of how
--- many actors acted that round.
 function Hazards.step(level, rng)
   local spawns = {}
   for _, hz in ipairs(level.hazards) do

@@ -1,9 +1,3 @@
--- Player ranged combat via an equipped bow and a stack of arrows carried in
--- the inventory. Unlike throwing, firing never costs the launcher itself -
--- only ammunition - so a bow stays equipped shot after shot as long as the
--- quiver holds out. A loosed arrow lands where the target stood either way,
--- recoverable exactly like a thrown weapon.
-
 local Los = require("los")
 local Items = require("items")
 local Skills = require("skills")
@@ -14,9 +8,6 @@ local Durability = require("durability")
 
 local Ranged = {}
 
--- Inventory index of the first non-empty arrow stack, or nil if the quiver
--- is dry. Ammo of the same name merges into one stack on pickup, so in
--- practice there is at most one.
 function Ranged.ammoIndex(entity)
   for i, item in ipairs(entity.inventory) do
     if item.kind == Items.AMMO and item.count > 0 then return i end
@@ -29,15 +20,6 @@ function Ranged.canReach(game, x1, y1, x2, y2, range)
   return dist <= range and Los.clear(game.level.map, x1, y1, x2, y2)
 end
 
--- Looses one arrow from `shooter`'s equipped bow at `target`. Returns (true,
--- lines) if a shot went out - whatever it did on arrival - or (false, lines)
--- if it never left the string: no bow readied, no arrows, or no clear shot.
--- Damage comes from baseAttack rather than effectiveAttack so a melee
--- weapon's power does not also inflate every arrow; the bow's own power and
--- the target's armour are what separate a longbow from a sling. Mastery of
--- that specific bow (see proficiency.lua) still applies on top, since it is
--- read and recorded explicitly by the bow's own name rather than riding
--- effectiveAttack's blended total.
 function Ranged.fire(game, shooter, target)
   local bow = shooter.bow
   if not bow then return false, { "you have no bow readied" } end

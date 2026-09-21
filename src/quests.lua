@@ -1,13 +1,3 @@
--- Bounty boards scattered through the dungeon from depth two on. Each board
--- is built with exactly one bounty already written on it (a cull, a hoard or
--- a depth pact), fixed at generation time from the floor's own rng so a given
--- (worldSeed, depth) always offers the identical bounty. Standing on an
--- unclaimed board binds the player to its pact for free (no turn spent, same
--- as learning a skill); a board only ever grants one bounty in its lifetime,
--- so re-rolling by revisiting an already-claimed board is not possible. A
--- bound pact resolves itself the instant its condition is met - no trip back
--- to the board required - paying out gold, xp and essence in one stroke.
-
 local Monsters = require("monsters")
 
 local Quests = {}
@@ -16,11 +6,8 @@ Quests.CULL = "cull"
 Quests.HOARD = "hoard"
 Quests.DEPTH = "depth"
 
--- Fixed order so a given rng draw always names the same kind.
 Quests.order = { Quests.CULL, Quests.HOARD, Quests.DEPTH }
 
--- Builds the one bounty a freshly placed board offers on `depth`, clamping any
--- depth target to `maxDepth` so a pact can never demand the unreachable.
 function Quests.generate(rng, depth, maxDepth)
   local kind = Quests.order[rng:range(1, #Quests.order)]
   local bounty = {
@@ -52,9 +39,6 @@ function Quests.describe(bounty)
   return string.format("reach depth %d", bounty.need)
 end
 
--- Binds `player` to `board`'s bounty, provided the player is not already
--- bound to one and the board has not already been claimed. Returns (true,
--- line) on success or (false, line) explaining why not.
 function Quests.accept(player, board)
   if player.quest then
     return false, "you already hold a bounty"
@@ -67,8 +51,6 @@ function Quests.accept(player, board)
   return true, "you bind yourself to a bounty: " .. Quests.describe(board.quest)
 end
 
--- Registers a kill toward the player's active cull bounty if the species
--- matches. A no-op for any other kind, an unrelated species, or no bounty.
 function Quests.registerKill(player, species)
   local bounty = player.quest
   if bounty and bounty.kind == Quests.CULL and species == bounty.species and bounty.have < bounty.need then
@@ -76,9 +58,6 @@ function Quests.registerKill(player, species)
   end
 end
 
--- True once `player`'s active bounty (if any) is fulfilled by the current
--- state: a cull once its tally is met, a hoard once live gold clears its
--- absolute target, a depth pact once the player has reached it.
 function Quests.resolved(player, depth)
   local bounty = player.quest
   if not bounty then return false end

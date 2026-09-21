@@ -1,22 +1,3 @@
--- Text command parser and dispatcher for a human player, layered entirely on
--- top of the granular Game:<action> methods choosePlayerAction (ai.lua's own
--- autopilot) already drives - nothing here duplicates combat, targeting or
--- turn bookkeeping, it only translates a typed word into the same call the
--- autopilot would have made. Every other player-facing system in this engine
--- is a mechanic; this is the one module whose whole job is the interface
--- between a line of text and those mechanics, which is why it takes `game`
--- as a plain argument rather than requiring game.lua itself (that require
--- runs the other way, from game.lua's Game:manualStep).
---
--- Commands.apply(game, text) always returns (consumesTurn, message): a
--- movement/action word that actually did something returns true and leaves
--- Game:manualStep to spend the turn, exactly like choosePlayerAction would
--- have; an unrecognized word, a bad argument, or an action with nothing to
--- act on returns false and spends nothing, so a typo never costs a turn the
--- way a wasted keystroke would in any other roguelike. Purely informational
--- commands (inventory, look, status, help) always return false for the same
--- reason - reading your own inventory is free.
-
 local Spells = require("spells")
 local Identify = require("identify")
 local Factions = require("factions")
@@ -36,10 +17,6 @@ local DIRS = {
   southwest = { -1, 1 }, sw = { -1, 1 },
 }
 
--- Splits `text` on whitespace into a lowercase verb plus its remaining
--- tokens as args. Returns nil for anything with no verb at all (an empty or
--- all-whitespace line), which Commands.apply treats the same as an unknown
--- command - no turn spent either way.
 function Commands.parse(text)
   if type(text) ~= "string" then return nil end
   local tokens = {}
@@ -52,19 +29,11 @@ function Commands.parse(text)
   return { verb = tokens[1], args = args }
 end
 
--- A monster the player can actually see right now: alive, kind "monster"
--- (excludes the player's own companions/hirelings/thralls, which never
--- carry that kind - see game.lua's isPlayerAlly), and standing on a tile
--- game.visible already marks lit for the player this turn.
 local function isVisibleHostile(game, entity)
   return entity.kind == "monster" and entity:isAlive()
     and game.visible[game.level.map:index(entity.x, entity.y)] == true
 end
 
--- Up to `count` nearest visible hostiles, Chebyshev distance, ties broken by
--- ascending id - the same tie rule Game:nearestAlly and companions.lua's own
--- nearestHostile already use, so auto-targeting a ranged command picks
--- exactly the monster the autopilot would have picked in the same spot.
 local function nearestHostiles(game, count)
   local player = game.player
   local results, excluded = {}, {}
@@ -89,10 +58,6 @@ local function nearestHostile(game)
   return nearestHostiles(game, 1)[1]
 end
 
--- Every visible hostile in game.level.entities's own order, unlike
--- nearestHostiles above which sorts by distance - this is the order
--- Handlers.look numbers its list in, so "examine monster <n>" always means
--- the same monster the player just saw look print at that number.
 local function visibleHostilesInOrder(game)
   local list = {}
   for _, entity in ipairs(game.level.entities) do
@@ -101,33 +66,12 @@ local function visibleHostilesInOrder(game)
   return list
 end
 
--- Resolves an optional trailing target number - the exact 1-based index
--- Handlers.look/examine already print next to each visible hostile - to an
--- entity, falling back to the nearest visible hostile (the old, only
--- behaviour) when the caller omitted it. Every targeted handler below stays
--- correct for a player who never bothers naming a target, while letting a
--- player who cares (a dangerous archer standing behind an expendable rat)
--- reach past the default without any change to game.lua's own range/line-of-
--- sight checks, which still reject an out-of-reach explicit target exactly
--- like they already reject a too-far auto-picked one.
--- Returns (target, explicit): explicit is true only when the caller actually
--- passed a token for the slot, so callers can tell "you named a target that
--- is not there" apart from "there is no target in sight at all" and keep
--- their own existing wording for the latter.
 local function resolveTarget(game, indexText)
   if indexText == nil then return nearestHostile(game), false end
   local index = tonumber(indexText)
   return index and visibleHostilesInOrder(game)[index], true
 end
 
--- Commands.parse lowercases every token before a handler ever sees it, which
--- is harmless for directions/spells/factions/slots (already all-lowercase
--- keys) but not for Skills.active/Skills.passive, whose keys are camelCase
--- (secondWind, poisonBlade, manaShield) - a player typing the skill's own
--- name would otherwise never match it. Maps a lowercased word back to its
--- real key by case-insensitive scan; returns the word unchanged when nothing
--- matches, so an actually unknown skill still reaches Skills.use/Skills.learn
--- and gets their own "no such skill" wording instead of being swallowed here.
 local function resolveSkillKey(word)
   if not word then return word end
   for key in pairs(Skills.active) do
@@ -169,36 +113,20 @@ Handlers.pickup = function(game)
 end
 Handlers.g = Handlers.pickup
 
--- Game:autoExplore already returns the exact (consumesTurn, message) shape
--- every handler here does - it just may have spent several turns getting
--- there instead of one, stopping itself the moment a hostile comes into
--- sight or the player takes damage rather than walking on regardless.
 Handlers.explore = function(game)
   return game:autoExplore()
 end
 
--- Game:restUntilHealed shares the same shape and the same "may spend several
--- turns before returning" behaviour as Game:autoExplore just above.
 Handlers.rest = function(game)
   return game:restUntilHealed()
 end
 
--- Game:travelTo shares that same "may spend several turns" shape too. "down"/
--- "up" are the level's own stairs (self.level.downX/Y, upX/Y) - always a
--- valid, already-walkable destination regardless of what the player has
--- explored yet, exactly like choosePlayerAction's own goal-seeking already
--- assumes; a raw x/y command is deliberately not offered since nothing in
--- this interface ever shows the player a raw coordinate to aim one at.
 Handlers.travel = function(game, args)
   if args[1] == "down" then return game:travelTo(game.level.downX, game.level.downY) end
   if args[1] == "up" then return game:travelTo(game.level.upX, game.level.upY) end
   return false, "travel where? down or up"
 end
 
--- Every handler below that takes an inventory index shares the same shape:
--- a missing or non-numeric first arg fails without spending a turn, exactly
--- like an unknown verb, rather than crashing into the underlying Game
--- method with a nil index.
 local function indexArg(args)
   return tonumber(args[1])
 end
@@ -225,9 +153,6 @@ Handlers.sell = function(game, args)
   return false, "that cannot be sold here"
 end
 
--- Trailing target number is always the argument slot right after whatever
--- an individual handler needed for itself (an inventory index, a spell/skill
--- key) - see resolveTarget above for exactly what "explicit" changes.
 Handlers.throw = function(game, args)
   local index = indexArg(args)
   if not index then return false, "throw what? give an inventory number" end
@@ -280,10 +205,6 @@ Handlers.cast = function(game, args)
   return false, "the spell fails"
 end
 
--- multishot's two targets are named together or not at all: giving only one
--- explicit number is ambiguous about which of the (up to) two shots it picks
--- out, so that case falls back to the same auto-pick-both-nearest behaviour
--- as giving none, rather than guessing which slot the player meant.
 Handlers.useskill = function(game, args)
   local key = resolveSkillKey(args[1])
   if not key then return false, "use which skill?" end
@@ -309,12 +230,6 @@ Handlers.useskill = function(game, args)
   return false, "that skill fails"
 end
 
--- Zero-argument actions that always resolve against whatever stands on the
--- player's own tile (a chest, a corpse, a captive, a node, a stairwell...),
--- the same way every one of these Game methods already looks itself up by
--- self.player.x/y rather than taking a target. `nothingMessage` only ever
--- surfaces when the underlying method itself failed silently (no log line
--- of its own) - most branches already explain themselves through game.log.
 local function hereHandler(methodName, nothingMessage)
   return function(game)
     if game[methodName](game) then return true, nil end
@@ -337,13 +252,6 @@ Handlers["<"] = Handlers.ascend
 Handlers.enterrift = hereHandler("enterRift", "there is no rift here to cross")
 Handlers.exitrift = hereHandler("exitRift", "you are not standing across a rift")
 
--- Game:startHorde is a deliberate, one-way trial (see its own header: the
--- dungeon floor left behind is simply abandoned, there is no exit back) that
--- always succeeds and, unlike every hereHandler above, carries no location
--- requirement of its own - so this guards against the one real footgun a
--- typed command adds that the method itself does not: retyping "horde"
--- mid-run would otherwise silently discard the current wave and its
--- progress by building a brand new arena on top of it.
 Handlers.horde = function(game)
   if game.horde then return false, "you are already fighting in the arena" end
   game:startHorde()
@@ -364,11 +272,6 @@ Handlers.quest = function(game)
   return false, "you cannot take up that bounty"
 end
 
--- Every faction key factions.lua defines, spelled out here (rather than
--- discovered from the module at runtime) purely so a bad argument's error
--- message can list them by name; the set itself is built from the same
--- constants Game:appeaseFaction already trusts, so a typo can never buy
--- standing with a faction that does not exist.
 local FACTION_NAMES = {
   Factions.MERCHANT, Factions.GOBLINOID, Factions.VERMIN, Factions.ORCISH,
   Factions.UNDEAD, Factions.BEAST, Factions.CULT, Factions.DRAKE, Factions.BANDIT,
@@ -392,15 +295,6 @@ Handlers.dig = function(game, args)
   return false, "you cannot dig there"
 end
 
--- Disarms a detected-but-unsprung trap one step away in `dir` - the same
--- Chebyshev-1 reach Disarm.sweep already uses to notice it in the first
--- place (see Game:endPlayerTurn's "you notice a hidden trap nearby"). The
--- validity check below duplicates Game:disarmTrap's own guard on purpose:
--- unlike every other handler here, a disarm attempt against a real trap
--- must still spend the turn even when Disarm.attempt fails and springs it,
--- but Game:disarmTrap's own boolean return conflates that spring with "no
--- trap here" into the same false - so this handler tells the two apart
--- itself instead of trusting the method's return value for turn cost.
 Handlers.disarm = function(game, args)
   local dir = DIRS[args[1]]
   if not dir then return false, "disarm which direction?" end
@@ -412,18 +306,6 @@ Handlers.disarm = function(game, args)
   return true, nil
 end
 
--- Crafting/economy verbs (game.lua's forgeGem/mergeGemsAt/socketItem/
--- socketRune/temperItem/enchantItem/disenchantItem/repairEquipped/
--- stealFromShop/dismissHireling/learnSkill/brewAt), the other half of the
--- API choosePlayerAction can already reach that a typed session could not
--- until now. Every one of these Game methods already logs its own success
--- or failure reason, so a handler only needs its own message for an
--- argument so malformed the underlying method can never even be called.
-
--- Shared by socket/socketrune/temper/enchant/disenchant: their `target`
--- resolves through Game:resolveGear exactly like this, either the literal
--- word for currently equipped gear or an inventory slot number for
--- anything else (a spare ring, an unequipped bow).
 local function targetArg(token)
   if token == "weapon" or token == "armor" then return token end
   return tonumber(token)
@@ -493,9 +375,6 @@ Handlers.repair = function(game, args)
   return false, nil
 end
 
--- Steals whichever warded ware sits underfoot, the same tile Game:pickupHere
--- already resolves against - unlike Game:stealFromShop's own raw floorItems
--- index, a typed command can only ever mean "the ware I am standing on".
 local function groundIndexHere(game)
   for i, ground in ipairs(game.level.floorItems) do
     if ground.x == game.player.x and ground.y == game.player.y then return i, ground end
@@ -521,12 +400,6 @@ Handlers.learn = function(game, args)
   return false, nil
 end
 
--- Duplicates Game:brewAt's own precondition checks (cauldron underfoot, two
--- distinct herb items) before ever calling it, the same shape as disarm
--- above and for the same reason: past those preconditions, brewing always
--- spends both herbs, whether the pairing brews a potion or curdles into gas
--- (see Alchemy.brew), so this handler must not read a curdle's own `false`
--- as "nothing happened" and hand the player a free turn back.
 Handlers.brew = function(game, args)
   local a, b = tonumber(args[1]), tonumber(args[2])
   if not a or not b then return false, "brew which two herbs? give two inventory numbers" end
@@ -542,9 +415,6 @@ Handlers.brew = function(game, args)
   return true, nil
 end
 
--- Purely informational commands. Every one of these returns false (spends no
--- turn) and carries its whole answer in the message, which is the one place
--- a caller should print something the game log itself would never contain.
 Handlers.inventory = function(game)
   if #game.player.inventory == 0 then return false, "you are carrying nothing" end
   local lines = {}
@@ -574,10 +444,6 @@ Handlers.look = function(game)
 end
 Handlers.l = Handlers.look
 
--- Detail views (examine.lua): `examine <n>` inspects inventory item n, the
--- same index use/drop/sell already key off; `examine monster <n>` inspects
--- the nth entry of the very list Handlers.look just numbered. Both branches
--- are free, like every other informational command here.
 Handlers.examine = function(game, args)
   if args[1] == "monster" then
     local index = tonumber(args[2])
@@ -608,12 +474,6 @@ Handlers.help = function()
     "([target] is the number look/examine gives a monster; omit it to auto-target the nearest one)"
 end
 
--- Parses `text` and dispatches it against `game`. Returns (consumesTurn,
--- message): Game:manualStep spends the player's turn iff the first value is
--- true, and either surfaces `message` itself (a failure reason, or an
--- informational answer) or leaves the game log to speak for a successful
--- action, exactly the way every Game:<action> method already logs its own
--- outcome.
 function Commands.apply(game, text)
   local parsed = Commands.parse(text)
   if not parsed then return false, "say something" end

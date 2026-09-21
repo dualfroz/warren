@@ -1,6 +1,3 @@
--- A* on the 4-connected grid with a binary min-heap open set and Manhattan
--- heuristic. Returns the path start..goal, or nil when unreachable.
-
 local Astar = {}
 
 local function heapPush(heap, node, priority)

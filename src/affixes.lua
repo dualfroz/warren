@@ -1,11 +1,3 @@
--- Gear affixes. A weapon or armour piece may roll a prefix that bumps its power
--- and, for some weapons, attaches an on-hit rider (e.g. flaming sets the target
--- alight). Rolls draw from the shared rng so drops stay deterministic per seed.
--- An elemental rider also retags the weapon's own base swing (damageType,
--- read by combat.lua) to match - a flaming sword fights with fire, not steel,
--- so it hits harder against a cold-weak target and can do nothing at all
--- against something fire-immune.
-
 local Affixes = {}
 
 Affixes.weapon = {

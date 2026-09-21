@@ -1,8 +1,3 @@
--- End-of-run obituary. Turns a finished game's own stats, gear and message
--- log into a NetHack-style morgue report plus a single comparable score,
--- reusing exactly the field names Game:metaStats/graveEntry already expose
--- so a future stat only has to land there to show up here too.
-
 local Curses = require("curses")
 local Compendium = require("compendium")
 local Titles = require("titles")
@@ -14,9 +9,6 @@ Morgue.SCORE_WEIGHTS = {
   vault = 120, setPiece = 180, chest = 15, playerLevel = 50, win = 1000,
 }
 
--- A single deterministic number from a Morgue.build report, so two runs
--- (or a run against its own best-so-far) can be ranked without re-reading
--- every field by hand.
 function Morgue.score(report)
   local w = Morgue.SCORE_WEIGHTS
   local total = report.deepestDepth * w.depth + report.kills * w.kill
@@ -30,9 +22,6 @@ end
 
 Morgue.EQUIP_SLOTS = { "weapon", "armor", "ring", "bow" }
 
--- One line per worn slot, empty-handed slots omitted outright rather than
--- padded with "(nothing)" - an obituary should read like a eulogy, not a
--- character sheet.
 function Morgue.equipment(player)
   local lines = {}
   for _, slot in ipairs(Morgue.EQUIP_SLOTS) do
@@ -44,10 +33,6 @@ function Morgue.equipment(player)
   return lines
 end
 
--- Every species this compendium has ever seen the player slay, heaviest
--- kill count first, ties broken by catalog order (Compendium.entries' own
--- fixed order) rather than name so the listing never depends on whatever
--- order table.sort happens to leave equal keys in.
 function Morgue.killTally(compendium)
   local rows = {}
   for i, entry in ipairs(Compendium.entries(compendium)) do
@@ -62,10 +47,6 @@ function Morgue.killTally(compendium)
   return rows
 end
 
--- Gathers everything Morgue.format needs straight off a live or just-ended
--- game, mirroring Game:metaStats' own field names so the two never drift.
--- `meta` is optional (see warren.lua's --meta flag) - a meta-free run's
--- report simply carries no title, exactly like it banks no renown.
 function Morgue.build(game, meta)
   return {
     won = game.won,
@@ -96,9 +77,6 @@ local function outcomeLine(report)
   return "died in the dark"
 end
 
--- Renders `report` (see Morgue.build) as a fixed-shape text obituary:
--- outcome, vitals, gear, kills, final words, score - always in that order
--- so two runs diff cleanly against each other.
 function Morgue.format(report)
   local lines = {}
   local heading = report.alive and (report.won and "Victorious" or "Wandering") or "Late"

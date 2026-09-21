@@ -1,20 +1,3 @@
--- Headless entry point. Examples:
---   lua warren.lua --seed 42 --auto 50
---   lua warren.lua --seed 7 --auto 30 --save run.sav
---   lua warren.lua --seed 3 --class ranger --auto 50
---   lua warren.lua --load run.sav
---   lua warren.lua --meta legacy.sav --seed 3 --auto 200
---   lua warren.lua --meta legacy.sav --buy vigor
---   lua warren.lua --meta legacy.sav --report
---   lua warren.lua --meta legacy.sav --seed 3 --auto 200 --mutators famine,nightblind
---   lua warren.lua --seed 3 --auto 200 --morgue run.morgue
---   lua warren.lua --seed 3 --auto 200 --verify
---   lua warren.lua --challenge 42 --auto 200
---   lua warren.lua --meta legacy.sav --export-csv runs.csv
---   lua warren.lua --meta legacy.sav --export-compendium bestiary.csv
---   lua warren.lua --seed 3 --class fighter --play
---   lua warren.lua --load run.sav --play
-
 local scriptDir = arg[0]:match("^(.*)[/\\]") or "."
 package.path = scriptDir .. "/src/?.lua;" .. scriptDir .. "/../src/?.lua;" .. package.path
 
@@ -65,15 +48,6 @@ local function parseArgs(argv)
   return opts
 end
 
--- Interactive terminal loop: renders the current frame, reads one line of
--- input, and hands it straight to Game:manualStep - the same command
--- interpreter (see commands.lua) a scripted test drives without a real
--- terminal attached. "quit"/"exit"/"q" leave the run exactly where it
--- stands rather than ending it, so a save taken right after --play still
--- captures whatever the last accepted command left behind. Runs until the
--- player dies, wins, quits, or stdin closes (a redirected script of
--- commands hitting EOF ends the loop the same way an interactive quit
--- would).
 local function playLoop(game)
   io.write(game:render(), "\n")
   while game.player:isAlive() and not game.won do

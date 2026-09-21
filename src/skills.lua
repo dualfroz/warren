@@ -1,11 +1,3 @@
--- Class skill trees. Each class (classes.lua) unlocks three skills, one
--- learned per skill point (granted on level-up, see progression.lua): an
--- active that spends the player's turn like a spell, and passives that fold
--- straight into combat/spells/ranged. Passive checks all guard on
--- `entity.skills` being present, so calling any of these on a monster (which
--- never has the field) is always a safe no-op - the same shape status.lua
--- uses for its own modifiers.
-
 local Los = require("los")
 local Items = require("items")
 local Resistances = require("resistances")
@@ -34,9 +26,6 @@ local function defOf(key)
   return Skills.active[key] or Skills.passive[key]
 end
 
--- Every skill key belonging to `classKey`, active and passive alike, in a
--- fixed alphabetical order so autopilot and tests see a stable pick sequence
--- regardless of Lua's unordered `pairs` iteration over the catalogs above.
 function Skills.forClass(classKey)
   local list = {}
   for key, def in pairs(Skills.active) do
@@ -53,9 +42,6 @@ function Skills.has(entity, key)
   return entity.skills ~= nil and entity.skills[key] == true
 end
 
--- Spends one of the player's skill points to permanently learn `key`.
--- Returns (true, message) on success or (false, message) with no state
--- changed - no point spent - on failure.
 function Skills.learn(player, key)
   local def = defOf(key)
   if not def then return false, "there is no such skill" end
@@ -74,12 +60,6 @@ function Skills.tickCooldowns(player)
   end
 end
 
--- Passive hooks. Each is a small, pure function of entity/game state so
--- combat.lua, spells.lua, ranged.lua and game.lua can call straight into it
--- without either side needing to know about the other's active-skill logic.
-
--- Rogue: a target still at full hp has not yet reacted to the fight, so the
--- first strike lands twice as hard.
 function Skills.meleeDamageMultiplier(attacker, defender)
   if Skills.has(attacker, "backstab") and defender.hp == defender.maxHp then
     return 2
@@ -87,15 +67,11 @@ function Skills.meleeDamageMultiplier(attacker, defender)
   return 1
 end
 
--- Rogue: a trained dodge fully negates an incoming melee hit one time in
--- four. Checks `has` before touching the rng so an unlearned/unlearnable
--- defender never perturbs the rng stream.
 function Skills.evades(game, defender)
   if not Skills.has(defender, "evasion") then return false end
   return game.rng:chance(1, 4)
 end
 
--- Fighter: a flat attack surge once hp drops to a third or less of max.
 function Skills.attackBonus(entity)
   if entity.skills and entity.skills.berserk and entity.hp <= entity.maxHp * 0.34 then
     return 4
@@ -103,8 +79,6 @@ function Skills.attackBonus(entity)
   return 0
 end
 
--- Mage: an actively maintained ward that lapses once the pool it draws on
--- runs low.
 function Skills.defenseBonus(entity)
   if entity.skills and entity.skills.manaShield and (entity.mana or 0) >= 5 then
     return 3
@@ -112,29 +86,20 @@ function Skills.defenseBonus(entity)
   return 0
 end
 
--- Mage: damaging spells hit a quarter harder.
 function Skills.spellDamageMultiplier(caster)
   if Skills.has(caster, "overload") then return 1.25 end
   return 1
 end
 
--- Ranger: a steadier draw adds flat damage to every loosed arrow.
 function Skills.rangedDamageBonus(entity)
   if Skills.has(entity, "trueshot") then return 3 end
   return 0
 end
 
--- Ranger: blends into the dark. Only ever shrinks a monster's detection
--- range on a lightless floor - camouflage on a lit one would just be standing
--- in the open.
 function Skills.detectionPenalty(player, dark)
   if dark and Skills.has(player, "camouflage") then return 3 end
   return 0
 end
-
--- Active skills. Each takes the live `game` object (duck-typed, mirroring
--- spells.lua's Spells.cast) so it can log, award kills and touch level state
--- without skills.lua ever requiring the game module back.
 
 local EIGHT_DIRS = {
   { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 },
@@ -149,9 +114,6 @@ local function statDefense(entity)
   return entity.effectiveDefense and entity:effectiveDefense() or entity.defense
 end
 
--- Fighter: strikes the primary target in full through the normal attack path
--- (so backstab/riders/kill-xp all still apply) and every other monster
--- standing next to the player for half that raw swing.
 function Skills.useCleave(game, target)
   if not target or not target:isAlive() then return false, { "there is nothing there to cleave" } end
   local player = game.player
@@ -175,7 +137,6 @@ function Skills.useCleave(game, target)
   return true, lines
 end
 
--- Fighter: an instant breather, restoring three tenths of max hp.
 function Skills.useSecondWind(game)
   local player = game.player
   player.skillCooldowns.secondWind = Skills.active.secondWind.cooldown
@@ -185,9 +146,6 @@ function Skills.useSecondWind(game)
   return true, { string.format("you catch your breath and recover %d", player.hp - before) }
 end
 
--- Rogue: readies venom on the next melee swing rather than dealing damage
--- itself. Cooldown starts immediately so it cannot be re-readied before the
--- swing that consumes it even lands.
 function Skills.usePoisonBlade(game)
   local player = game.player
   player.skillCooldowns.poisonBlade = Skills.active.poisonBlade.cooldown
@@ -195,9 +153,6 @@ function Skills.usePoisonBlade(game)
   return true, { "your blade drips with venom" }
 end
 
--- Consumes a readied poison blade, if any. Called from Game:playerAttack
--- after every melee hit so the very next swing - and only that one - carries
--- the venom.
 function Skills.consumePoisonBlade(player)
   if player.pendingPoisonBlade then
     player.pendingPoisonBlade = nil
@@ -206,8 +161,6 @@ function Skills.consumePoisonBlade(player)
   return false
 end
 
--- Mage: trades the turn for a flat mana refill, cheaper than waiting out the
--- passive one-per-turn regen from hungerTorchTick.
 function Skills.useMeditate(game)
   local player = game.player
   local before = player.mana
@@ -227,8 +180,6 @@ local function canReach(game, x1, y1, x2, y2, range)
   return dist <= range and Los.clear(game.level.map, x1, y1, x2, y2)
 end
 
--- Ranger: a single arrow splits to strike up to two targets - the first for
--- a full shot, the second for half - and only ever costs one arrow.
 function Skills.useMultishot(game, t1, t2)
   local shooter = game.player
   local bow = shooter.bow
@@ -259,10 +210,6 @@ function Skills.useMultishot(game, t1, t2)
   return true, lines
 end
 
--- Attempts to use the active skill `key` on behalf of the player. Returns
--- (true, lines) on success or (false, lines) with an explanatory line and no
--- state changed on failure - unknown skill, still on cooldown, or the
--- specific skill's own preconditions.
 function Skills.use(game, key, ...)
   local def = Skills.active[key]
   if not def then return false, { "you have no such skill to use" } end

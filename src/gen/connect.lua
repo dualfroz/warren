@@ -1,8 +1,3 @@
--- Guarantees every walkable cell is reachable. Labels connected components with
--- a deterministic flood fill, then tunnels each secondary component into the
--- largest one along the shortest Manhattan link. Returns the cells of the final
--- reachable region in index order.
-
 local Carve = require("gen.carve")
 
 local Connect = {}

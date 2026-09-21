@@ -1,6 +1,3 @@
--- Recursive shadowcasting over eight octants. Returns a set of visible map
--- indices for a given origin and radius.
-
 local Fov = {}
 
 local mult = {
@@ -24,7 +21,6 @@ local function castLight(map, cx, cy, row, start, finish, radius, xx, xy, yx, yy
       local leftSlope = (dx - 0.5) / (dy + 0.5)
       local rightSlope = (dx + 0.5) / (dy - 0.5)
       if start < rightSlope then
-        -- cell not yet inside the current view; keep scanning
       elseif finish > leftSlope then
         break
       else

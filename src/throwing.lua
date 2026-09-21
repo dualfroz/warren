@@ -1,10 +1,3 @@
--- Player ranged option that costs no mana: any spare weapon or potion sitting
--- in the inventory (not the one currently wielded) can be hurled at a monster
--- in range and line of sight. A thrown weapon hits harder than a melee swing
--- and lands where it struck, ready to be picked back up; a thrown potion
--- shatters and visits its effect on the target instead of the thrower, which
--- only makes sense for potions with a hostile reading.
-
 local Los = require("los")
 local Status = require("status")
 local Items = require("items")
@@ -16,9 +9,6 @@ local Throwing = {}
 Throwing.RANGE = 6
 local POWER_MULT = 2
 
--- Hostile reading of each potion effect. Potions with no meaningful effect on
--- an enemy (healing, strength) just shatter harmlessly rather than helping
--- whoever they were thrown at.
 local hostileEffects = {
   poison = function(game, target)
     Status.apply(target, Status.POISON, 6, 3)
@@ -37,10 +27,6 @@ local hostileEffects = {
     Status.apply(target, Status.BLIND, 6, 1)
     return string.format("the potion shatters in a blinding flash, and %s is struck blind", target.name)
   end,
-  -- Same hostile reading as haste above: lifting a dangerous target off the
-  -- ground lets it drift clear of whatever lava, chasm, or trap the thrower
-  -- was counting on to block or punish it (see status.lua's Status.LEVITATE),
-  -- so handing it to an enemy is a liability, not a gift.
   levitate = function(_, target)
     Status.apply(target, Status.LEVITATE, 10, 1)
     return string.format("the potion shatters, and %s rises off the ground", target.name)
@@ -56,9 +42,6 @@ function Throwing.canReach(game, x1, y1, x2, y2)
   return dist <= Throwing.RANGE and Los.clear(game.level.map, x1, y1, x2, y2)
 end
 
--- Resolves a thrown item against a target. Returns (true, lines) if the item
--- left the thrower's hand - whether or not it did anything useful on arrival
--- - or (false, lines) if the throw never happened at all.
 function Throwing.resolve(game, thrower, item, target)
   if not Throwing.canThrow(item) then
     return false, { "that can't be thrown" }

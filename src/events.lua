@@ -1,19 +1,9 @@
--- Timed dungeon-wide events. Unlike atmosphere.lua's single weather reading
--- drawn once at generation and fixed for a floor's entire lifetime, an
--- event can start and end mid-visit: from depth two on, any turn with none
--- already running has a small chance of rolling one fresh, and a running
--- one always expires back to nothing after a fixed duration rather than
--- lingering for the rest of the floor. Only one runs at a time.
--- level.event is nil or { key, turnsLeft }, plain data like level.weather,
--- so it serializes with no special save-format handling.
-
 local Events = {}
 
 Events.BLOODMOON = "bloodmoon"
 Events.RICHVEINS = "richveins"
 Events.HUSH = "hush"
 
--- Fixed order so a given rng draw always names the same event.
 Events.order = { Events.BLOODMOON, Events.RICHVEINS, Events.HUSH }
 
 Events.DURATION = 15
@@ -39,35 +29,21 @@ function Events.endDescribe(key)
   return nil
 end
 
--- A monster's raw attack-minus-defense swing at the player is scaled by
--- this multiplier, read live wherever a monster lands a hit
--- (Game:monsterMelee, Game:monsterShoot, Game:triggerMimic's ambush) -
--- never baked permanently into a monster's own stats the way
--- atmosphere.lua's INFESTED reading is, since it must lift again the
--- instant the event ends.
 function Events.monsterDamageMultiplier(event)
   if event and event.key == Events.BLOODMOON then return Events.BLOODMOON_MULTIPLIER end
   return 1
 end
 
--- Essence earned from a kill (Game:awardKill) or an ore vein
--- (Nodes.harvest) is scaled by this multiplier, read live at the point
--- essence is actually credited.
 function Events.essenceMultiplier(event)
   if event and event.key == Events.RICHVEINS then return Events.RICHVEINS_MULTIPLIER end
   return 1
 end
 
--- Read alongside atmosphere.lua's own sightPenalty in Game:effectiveRadius.
 function Events.sightPenalty(event)
   if event and event.key == Events.HUSH then return Events.HUSH_SIGHT_PENALTY end
   return 0
 end
 
--- Advances a running event's clock by one turn, or rolls a fresh one onto
--- `level` when none is running. Returns a log line on start or expiry, nil
--- on an ordinary quiet turn - exactly like sanity.lua's Sanity.tick, which
--- reports only on a tier crossing rather than every single call.
 function Events.step(level, rng)
   if level.event then
     level.event.turnsLeft = level.event.turnsLeft - 1

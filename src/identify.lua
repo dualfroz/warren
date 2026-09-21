@@ -1,8 +1,3 @@
--- Item identification. At world creation each potion and scroll type is dealt a
--- random appearance (a colour or a nonsense label) by shuffling fixed pools with
--- the world rng. Until a type is known the player only sees its appearance; using
--- an item, or reading a scroll of identify, reveals the type for good.
-
 local Items = require("items")
 
 local Identify = {}
@@ -57,8 +52,6 @@ function Identify.label(state, item)
   return state.appearance[id] or item.name
 end
 
--- Reveals the first still-unknown concealable item in an inventory. Returns the
--- item whose type became known, or nil when everything is already identified.
 function Identify.revealFirstUnknown(state, inventory)
   for _, item in ipairs(inventory) do
     if Identify.isConcealable(item) and not Identify.isKnown(state, item) then

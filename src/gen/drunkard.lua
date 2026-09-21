@@ -1,7 +1,3 @@
--- Drunkard's walk: a set of random walkers stumble through the rock carving
--- floor as they go, until a target fraction of the interior is open. Produces
--- sinuous, organic corridors distinct from the blobby caves of the CA generator.
-
 local Map = require("map")
 local Tiles = require("tiles")
 

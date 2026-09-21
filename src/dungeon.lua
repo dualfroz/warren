@@ -1,8 +1,3 @@
--- Owns every floor. Each level's layout is derived from the world seed and its
--- depth alone, through a private rng that never touches the world rng stream, so
--- a floor generates identically no matter when it is first entered. Generated
--- floors are cached, which is what makes revisiting one restore its exact state.
-
 local Rng = require("rng")
 local Builder = require("builder")
 local Level = require("level")

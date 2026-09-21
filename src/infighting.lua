@@ -1,23 +1,3 @@
--- Monsters that share no faction bond will occasionally fight each other
--- outright instead of always beelining for the player. Two rival factions
--- (see Factions.RIVALRIES) throw down on sight, and any monster carrying
--- Status.DISCORD - landed by the discord spell, see spells.lua - is
--- compelled to strike whatever creature stands nearest it, friend or foe,
--- for the effect's duration. Either way the fight runs through combat.lua
--- exactly like a player's own attack - same damage formula, same
--- resistances, same Game:applyEliteOnHit hooks (an elite attacker's
--- lifesteal or on-hit status rider fires here too, not just against the
--- player) and the same disease.lua bite chance (a plague-carrier's bite can
--- infect a rival monster or the player's own companion/hireling/thrall,
--- not just the player Game:monsterMelee already covers) - so a discorded
--- troll among goblins is a real threat to both sides, not a scripted
--- distraction. A plain monster felled this way
--- still leaves a corpse (scavenging/reanimation can use it) but pays out no
--- xp, essence, faction standing, or compendium credit - the player didn't
--- land the blow. A companion, hireling, or thrall killed this way (only
--- reachable through discord, since none of them carry a faction) dies
--- exactly as it would to any other monster.
-
 local Combat = require("combat")
 local Status = require("status")
 local Factions = require("factions")
@@ -40,13 +20,6 @@ local function isAlly(actor)
   return actor.kind == "companion" or actor.kind == "hireling" or actor.kind == "thrall"
 end
 
--- The other living, non-player creature `monster` should be fighting this
--- turn instead of following its usual Ai.act behaviour, or nil if none
--- qualifies. A rival-faction monster always qualifies once seen; under
--- Status.DISCORD, the nearest visible creature of any kind - including the
--- player's own companion, hireling, or thrall - qualifies too, since
--- discord scrambles a mind's sense of friend and foe entirely. Ties break
--- toward the lower entity id, matching Game:nearestAlly's own tie rule.
 function Infighting.target(game, monster)
   local discorded = Status.has(monster, Status.DISCORD)
   local best, bestDist = nil, math.huge
@@ -64,12 +37,6 @@ function Infighting.target(game, monster)
   return best
 end
 
--- Resolves one monster-vs-monster hit through the same damage formula any
--- other attack uses. A defender that falls is swept immediately: a
--- companion/hireling/thrall dies exactly as game.lua already reports that,
--- while a plain hostile monster just drops - Corpses.spawn still leaves
--- remains behind, but no awardKill means no xp/essence/faction/compendium
--- credit for a kill the player never made.
 function Infighting.strike(game, attacker, defender)
   local outcome = Combat.attack(attacker, defender)
   game.log:add(string.format("%s hits %s for %d", attacker.name, defender.name, outcome.damage))
@@ -91,10 +58,6 @@ function Infighting.strike(game, attacker, defender)
   return outcome
 end
 
--- Entry point mirroring Abilities.tryAct's contract: returns true when
--- infighting consumed the monster's turn (attacked an adjacent target or
--- stepped toward a farther one), false to let the caller fall through to
--- Ai.act.
 function Infighting.tryAct(game, monster)
   local target = Infighting.target(game, monster)
   if not target then return false end

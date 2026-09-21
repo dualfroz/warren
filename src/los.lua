@@ -1,7 +1,3 @@
--- Bresenham line of sight. A shot is clear when no cell strictly between the two
--- endpoints blocks sight; the endpoints themselves are never treated as blockers
--- so an actor can fire at something standing in a doorway.
-
 local Los = {}
 
 function Los.line(x0, y0, x1, y1)

@@ -1,13 +1,3 @@
--- Faction standing. Every hostile species in the bestiary carries a `faction`
--- tag; the player carries a `reputation` table scoring how each faction feels
--- about them, starting neutral (an absent entry reads as 0). Killing a
--- faction's members sours that score; paying tribute or turning in a bounty
--- sweetens it. Reputation then feeds back into the world two ways: a
--- tribal faction tagged "neutral" (see neutralFactions) leaves its members
--- passively unprovoked until the player either strikes first or has enraged
--- the whole tribe by other means, and the merchant guild's prices rise or
--- fall with how the player stands with it.
-
 local Factions = {}
 
 Factions.MERCHANT = "merchant"
@@ -20,16 +10,8 @@ Factions.CULT = "cult"
 Factions.DRAKE = "drake"
 Factions.BANDIT = "bandit"
 
--- Factions whose rank-and-file stay passive - see Factions.isWary - unless
--- provoked in melee/at range or already hated into open hostility.
 Factions.neutralFactions = { [Factions.GOBLINOID] = true }
 
--- Faction pairs that loathe each other regardless of the player: two
--- monsters from an unrelated pair here fight on sight if they ever share a
--- floor (see infighting.lua), no discord spell required. Listed once per
--- pair; Factions.areRivals checks both directions. Deliberately excludes any
--- faction pairing with a summon relationship (CULT raises UNDEAD minions)
--- so a caster is never made to loathe its own summoned brood.
 Factions.RIVALRIES = {
   { Factions.GOBLINOID, Factions.ORCISH },
   { Factions.BANDIT, Factions.MERCHANT },
@@ -64,9 +46,6 @@ function Factions.reputationFor(player, faction)
   return (player.reputation and player.reputation[faction]) or 0
 end
 
--- The named tier a raw reputation score falls into, from most soured to most
--- warm. Ties resolve toward the harsher tier so a score sitting exactly on a
--- boundary reads as the tier it just reached rather than the one it left.
 function Factions.tier(rep)
   if rep <= HOSTILE_MAX then return "hostile" end
   if rep <= UNFRIENDLY_MAX then return "unfriendly" end
@@ -75,8 +54,6 @@ function Factions.tier(rep)
   return "neutral"
 end
 
--- Nudges `faction`'s standing by `delta`, clamped to +-100, creating the
--- player's reputation table on first use.
 function Factions.adjust(player, faction, delta)
   player.reputation = player.reputation or {}
   local updated = Factions.reputationFor(player, faction) + delta
@@ -86,16 +63,11 @@ function Factions.adjust(player, faction, delta)
   return updated
 end
 
--- Called once per monster a player action fells: unfactioned kills (traps,
--- hazards with no owning species) are simply ignored.
 function Factions.registerKill(player, target)
   if not target.faction then return end
   Factions.adjust(player, target.faction, target.isBoss and -BOSS_KILL_PENALTY or -KILL_PENALTY)
 end
 
--- Whether `faction`'s members currently hold back from attacking on sight.
--- Non-tribal factions are never wary; a tribal one stops being wary the
--- instant the whole faction's standing curdles into open hostility.
 function Factions.isWary(player, monster)
   local faction = monster.faction
   if not (faction and Factions.neutralFactions[faction]) then return false end
@@ -107,17 +79,10 @@ function Factions.priceMultiplier(player, faction)
   return PRICE_MULTIPLIER[Factions.tier(Factions.reputationFor(player, faction))]
 end
 
--- Gold cost of the next tribute to `faction`: a flat base that climbs the
--- deeper the grudge already runs, so digging out of "hostile" costs more
--- than smoothing over a merely "unfriendly" one.
 function Factions.appeaseCost(player, faction)
   return BASE_APPEASE_COST + math.max(0, -Factions.reputationFor(player, faction)) * 2
 end
 
--- Spends gold to buy `faction`'s standing up by a fixed amount. Returns
--- (true, costPaid) on success; (false, cost) when the player cannot afford
--- it; (false, 0) when the faction is already maxed out and has nothing left
--- to sell.
 function Factions.appease(player, faction)
   if Factions.reputationFor(player, faction) >= 100 then return false, 0 end
   local cost = Factions.appeaseCost(player, faction)

@@ -1,6 +1,3 @@
--- Deterministic 64-bit PRNG (splitmix64). Same seed always yields the same
--- stream, independent of platform and of the global math.random state.
-
 local Rng = {}
 Rng.__index = Rng
 
@@ -21,8 +18,6 @@ function Rng:nextUint()
   return z
 end
 
--- Inclusive integer in [lo, hi]. Modulo of a signed value by a positive span
--- lands in [0, span) under Lua's floor-division remainder.
 function Rng:range(lo, hi)
   local span = hi - lo + 1
   return lo + self:nextUint() % span

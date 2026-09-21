@@ -1,8 +1,3 @@
--- Visibility with light. The player sees out to their carried light radius via
--- shadowcasting; on top of that, any static emitter the player can already see
--- casts its own pool of light, so a lit room reveals itself the moment the
--- player glimpses its brazier. Darkness is simply a smaller player radius.
-
 local Fov = require("fov")
 
 local Light = {}

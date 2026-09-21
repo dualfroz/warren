@@ -1,20 +1,8 @@
--- Cross-run bestiary: which species the player has ever laid eyes on, and how
--- many of each they have slain. A compendium lives inside meta.lua's
--- persistent save (see game.lua's Game.new, which reuses options.meta's own
--- table by reference so every sighting and kill recorded mid-run is already
--- sitting in the very table warren.lua writes back out with Meta.save) so it
--- survives death exactly like renown and perks; a run started without
--- --meta still gets a fresh, un-persisted one so every code path exercises
--- the same bookkeeping either way.
-
 local Monsters = require("monsters")
 local Bosses = require("bosses")
 
 local Compendium = {}
 
--- One evocative line per species, keyed the same as monsters.lua's species
--- key or, for a boss, its bosses.lua catalog key (without the "boss_"
--- prefix game.lua stamps onto the actual entity's `species` field).
 Compendium.FLAVOR = {
   rat = "Bold enough to bite an ankle, never bold enough to fight fair.",
   bat = "Flits erratically through the dark on a course only it can hear.",
@@ -43,9 +31,6 @@ function Compendium.new()
   return { seen = {}, kills = {} }
 end
 
--- Marks `speciesKey` as sighted. Returns true only the first time it is ever
--- seen, so a caller can choose whether to make anything of that moment; a
--- repeat sighting is silently a no-op.
 function Compendium.noteSighting(compendium, speciesKey)
   if not speciesKey or compendium.seen[speciesKey] then return false end
   compendium.seen[speciesKey] = true
@@ -65,11 +50,6 @@ function Compendium.hasSeen(compendium, speciesKey)
   return compendium.seen[speciesKey] == true
 end
 
--- Every species named in the wild bestiary or the boss catalog, in a fixed
--- order (wild species first, then bosses), each row carrying its catalogued
--- name, flavor line and this compendium's own seen/kill tally. `key` here
--- matches exactly what an actual entity's `species` field would hold, so a
--- caller can cross-reference the two without re-deriving the "boss_" prefix.
 function Compendium.entries(compendium)
   local rows = {}
   for _, spec in ipairs(Monsters.species) do
