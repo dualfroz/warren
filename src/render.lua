@@ -1,7 +1,3 @@
--- ASCII presentation of the current level and a status panel. Reads game state
--- only; never mutates. Unexplored cells stay blank, explored-but-unseen cells
--- show terrain, and only cells currently lit reveal actors and loot.
-
 local Status = require("status")
 local Identify = require("identify")
 local Hazards = require("hazards")
@@ -21,7 +17,25 @@ local Disease = require("disease")
 
 local Render = {}
 
-local hazardGlyphs = { [Hazards.FIRE] = "`", [Hazards.GAS] = "," }
+Render.glyphs = {
+  player = "@",
+  fire = "`",
+  gas = ",",
+  shrine = "_",
+  block = "0",
+  plate = ";",
+  cauldron = "U",
+  board = "N",
+  claimedBoard = "E",
+  corpse = "X",
+  chest = "B",
+  emptiedChest = "u",
+  rift = "A",
+}
+
+local glyphs = Render.glyphs
+
+local hazardGlyphs = { [Hazards.FIRE] = glyphs.fire, [Hazards.GAS] = glyphs.gas }
 
 local function cell(game, x, y)
   local level = game.level
@@ -29,40 +43,33 @@ local function cell(game, x, y)
   local idx = map:index(x, y)
   if not level.explored[idx] then return " " end
   if game.visible[idx] then
-    if game.player.x == x and game.player.y == y then return "@" end
+    if game.player.x == x and game.player.y == y then return glyphs.player end
     local monster = level:entityAt(x, y)
     if monster then return monster.glyph end
     local hazard = Hazards.at(level, x, y)
     if hazard then return hazardGlyphs[hazard.kind] end
-    if level:shrineAt(x, y) then return "_" end
-    if level:blockAt(x, y) then return "0" end
-    if level:plateAt(x, y) then return ";" end
-    if level:cauldronAt(x, y) then return "U" end
+    if level:shrineAt(x, y) then return glyphs.shrine end
+    if level:blockAt(x, y) then return glyphs.block end
+    if level:plateAt(x, y) then return glyphs.plate end
+    if level:cauldronAt(x, y) then return glyphs.cauldron end
     local node = level:nodeAt(x, y)
     if node then return Nodes.glyph(node) end
     local board = level:questBoardAt(x, y)
-    if board then return board.claimed and "=" or "&" end
-    if level:corpseAt(x, y) then return "%" end
+    if board then return board.claimed and glyphs.claimedBoard or glyphs.board end
+    if level:corpseAt(x, y) then return glyphs.corpse end
     local chest = level:chestAt(x, y)
-    if chest then return chest.opened and "b" or "B" end
-    if level:riftAt(x, y) then return "Q" end
+    if chest then return chest.opened and glyphs.emptiedChest or glyphs.chest end
+    if level:riftAt(x, y) then return glyphs.rift end
     local here = level:itemsAt(x, y)
     if #here > 0 then return here[1].item.glyph end
   end
   return map:get(x, y)
 end
 
--- Disease was previously invisible outside the transient log lines
--- Disease.tick emits (the eruption, a damage tick, an escalation) - once
--- one of those scrolled off, a player mid-incubation or mid-plague had no
--- persistent way to check their own affliction at all. Folded into the same
--- comma-joined tag line as the timed statuses above, since both are
--- "what's currently afflicting this entity" facts the HUD already exists to
--- surface.
 local function statusTags(entity)
   local tags = {}
   for _, active in ipairs(entity.statuses) do
-    tags[#tags + 1] = active.kind
+    tags[#tags + 1] = Status.noun(active.kind)
   end
   if Disease.isInfected(entity) then
     local infection = entity.disease
@@ -71,12 +78,40 @@ local function statusTags(entity)
       and string.format("%s(stage %d)", name, infection.stage)
       or string.format("%s(incubating)", name)
   end
-  if #tags == 0 then return "none" end
-  return table.concat(tags, ",")
+  if #tags == 0 then return { "none" } end
+  return tags
 end
 
--- How many of the level's living monsters are still asleep, out of the total
--- - purely informational, so autopilot and other callers never read it.
+local panelWidth = 80
+
+local function wrapList(label, parts, separator)
+  local indent = string.rep(" ", #label)
+  local trail = separator:match("^(.-)%s*$")
+  local lines, line = {}, label .. (parts[1] or "")
+  for i = 2, #parts do
+    local joined = line .. separator .. parts[i]
+    local reserve = i < #parts and #trail or 0
+    if #joined + reserve <= panelWidth then
+      line = joined
+    else
+      lines[#lines + 1] = line .. trail
+      line = indent .. parts[i]
+    end
+  end
+  lines[#lines + 1] = line
+  return lines
+end
+
+local function appendAll(lines, extra)
+  for _, line in ipairs(extra) do lines[#lines + 1] = line end
+end
+
+local function words(text)
+  local found = {}
+  for word in text:gmatch("%S+") do found[#found + 1] = word end
+  return found
+end
+
 local function dormantCount(level)
   local count = 0
   for _, entity in ipairs(level.entities) do
@@ -87,9 +122,6 @@ local function dormantCount(level)
   return count
 end
 
--- Appends a wear indicator to `label` only once `item` has actually taken
--- damage - broken outright, or merely dinged - leaving a pristine piece's
--- label exactly as clean as before this module existed.
 local function gearLabel(item, label)
   if Durability.missing(item) == 0 then return label end
   if Durability.isBroken(item) then return label .. " (broken)" end
@@ -109,18 +141,31 @@ function Render.panel(game)
   local asleep = dormantCount(level)
   local foes = asleep > 0 and string.format("%d (%d asleep)", #level.entities, asleep)
     or tostring(#level.entities)
-  local lines = {
-    string.format("HP %d/%d  ATK %d  DEF %d  lvl %d  depth %d  turn %d  %s%s%s%s",
-      player.hp, player.maxHp, player:effectiveAttack(), player:effectiveDefense(),
-      player.level, game.depth, game.turn, level.generator, level.dark and "  dark" or "",
-      level.weather and ("  " .. level.weather) or "", game.won and "  WON" or ""),
-    string.format("xp %d/%d  mana %d/%d  food %d  torch %s  gold %d  status %s",
-      player.xp, player.xpNext, player.mana, player.maxMana, player.satiation, torch, player.gold, statusTags(player)),
+  local floorFields = { "depth " .. game.depth, "turn " .. game.turn, "foes " .. foes, level.generator }
+  if level.dark then floorFields[#floorFields + 1] = "dark" end
+  if level.weather then floorFields[#floorFields + 1] = level.weather end
+  if game.won then floorFields[#floorFields + 1] = "WON" end
+  local lines = {}
+  appendAll(lines, wrapList("", {
+    string.format("HP %d/%d", player.hp, player.maxHp),
+    "ATK " .. player:effectiveAttack(),
+    "DEF " .. player:effectiveDefense(),
+    "lvl " .. player.level,
+    string.format("xp %d/%d", player.xp, player.xpNext),
+    string.format("mana %d/%d", player.mana, player.maxMana),
+  }, "  "))
+  appendAll(lines, wrapList("", floorFields, "  "))
+  appendAll(lines, wrapList("", {
+    "food " .. player.satiation,
+    "torch " .. torch,
+    "gold " .. player.gold,
     string.format("load %s (%d/%d)",
       player:encumbranceTier(), Encumbrance.carriedWeight(player), Encumbrance.capacityFor(player)),
-    string.format("weapon %s  armor %s  ring %s  bow %s  items %d  foes %s",
-      weapon, armor, ring, bow, #player.inventory, foes),
-  }
+    "items " .. #player.inventory,
+  }, "  "))
+  appendAll(lines, wrapList("status: ", statusTags(player), ", "))
+  appendAll(lines, wrapList("weapon ", words(weapon), " "))
+  appendAll(lines, wrapList("", { "armor " .. armor, "ring " .. ring, "bow " .. bow }, "  "))
   local activeSets = Sets.activeDescriptions(player)
   if activeSets then lines[#lines + 1] = "set " .. activeSets end
   local combo = Momentum.stacks(player)
@@ -128,7 +173,7 @@ function Render.panel(game)
   if Conductivity.isWet(player) then lines[#lines + 1] = string.format("wet (%d)", player.wet) end
   local masteryBonus = Proficiency.attackBonus(player)
   if masteryBonus > 0 then
-    lines[#lines + 1] = string.format("mastery +%d with %s", masteryBonus, Proficiency.keyFor(player))
+    appendAll(lines, wrapList(string.format("mastery +%d with ", masteryBonus), words(Proficiency.keyFor(player)), " "))
   end
   local sanityTier = Sanity.tierOf(player)
   if sanityTier ~= Sanity.COMPOSED then
@@ -142,10 +187,10 @@ function Render.panel(game)
     lines[#lines + 1] = string.format("event %s (%d turns left)", level.event.key, level.event.turnsLeft)
   end
   if game.ascension and #game.ascension > 0 then
-    lines[#lines + 1] = "ascension " .. table.concat(game.ascension, ",")
+    appendAll(lines, wrapList("ascension ", game.ascension, ","))
   end
   local last = game.log:last()
-  if last then lines[#lines + 1] = "- " .. last end
+  if last then appendAll(lines, wrapList("- ", words(last), " ")) end
   return table.concat(lines, "\n")
 end
 

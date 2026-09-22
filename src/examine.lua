@@ -1,13 +1,3 @@
--- Detailed, read-only inspection of a single inventory item or a visible
--- monster. Aggregates facts that several other modules already track (an
--- affix's on-hit rider, a socketed gem's element, a runeword's live bonus,
--- an elite's affix names, a monster's resistances/awareness/status effects)
--- into one readable report - none of which any existing HUD line
--- (render.lua's status panel, commands.lua's own inventory/look) surfaces
--- beyond a bare name. Every function here is read-only: it never mutates
--- the item or monster it describes, and never spends a turn (see
--- commands.lua's own examine handler).
-
 local Items = require("items")
 local Identify = require("identify")
 local Curses = require("curses")
@@ -19,6 +9,7 @@ local Resistances = require("resistances")
 local Factions = require("factions")
 local Stealth = require("stealth")
 local Disease = require("disease")
+local Status = require("status")
 
 local Examine = {}
 
@@ -28,8 +19,6 @@ local AWARENESS_LABEL = {
   [Stealth.HUNTING] = "hunting you",
 }
 
--- Joins whichever of attack/defense/regen a runeword or set threshold bonus
--- carries, in a fixed order, so the same helper reads either shape.
 local function bonusText(bonus)
   local parts = {}
   if bonus.attack and bonus.attack ~= 0 then parts[#parts + 1] = string.format("attack +%d", bonus.attack) end
@@ -40,9 +29,6 @@ end
 
 local NO_PRICE = { [Items.GOLD] = true, [Items.KEY] = true }
 
--- Extra facts specific to one gear/consumable kind, appended after the
--- shared label; nil for kinds with nothing beyond their name worth calling
--- out (a plain key, a riftstone shard...).
 local function kindDetail(item)
   if item.kind == Items.WEAPON or item.kind == Items.ARMOR or item.kind == Items.BOW then
     local parts = { string.format("power %d", item.power) }
@@ -71,15 +57,13 @@ local function kindDetail(item)
   elseif item.kind == Items.CONTRACT then
     return "hires: " .. item.hireling
   elseif item.kind == Items.PICK then
-    return string.format("%d uses left", item.uses)
+    return string.format("%d %s left", item.uses, item.uses == 1 and "use" or "uses")
   elseif item.kind == Items.GEM then
     return string.format("tier %d, power %d", item.tier, item.power)
   end
   return nil
 end
 
--- Every non-kind-specific trait a piece of gear may carry, appended in a
--- fixed order regardless of which of them are actually present.
 local function gearTraits(item, lines)
   if item.affix then
     local desc = item.affix.name
@@ -126,11 +110,6 @@ local function gearTraits(item, lines)
   end
 end
 
--- A multi-line, semicolon-joined report on a single inventory item: its
--- (possibly still-disguised, see identify.lua) label, then whatever the
--- fields above actually populate. Unidentified potions/scrolls only ever
--- reach the label + value lines, since kindDetail and gearTraits both key
--- off fields those kinds never carry.
 function Examine.item(identifyState, item)
   local lines = { Curses.label(item, Identify.label(identifyState, item)) }
   local detail = kindDetail(item)
@@ -142,12 +121,6 @@ function Examine.item(identifyState, item)
   return table.concat(lines, "; ")
 end
 
--- A multi-line, semicolon-joined report on a monster the player can
--- currently see: its combat numbers (already folded through
--- Entity:effectiveAttack/effectiveDefense, so momentum/hunger/sanity
--- modifiers show up exactly as they would land the next swing), its
--- alertness, standing faction and reputation tier, elite/boss tags, any
--- non-normal resistance, and whatever status effects currently afflict it.
 function Examine.monster(player, monster)
   local lines = { monster.name }
   lines[#lines + 1] = string.format("hp %d/%d, attack %d, defense %d",
@@ -183,16 +156,11 @@ function Examine.monster(player, monster)
   if monster.statuses and #monster.statuses > 0 then
     local parts = {}
     for _, active in ipairs(monster.statuses) do
-      parts[#parts + 1] = string.format("%s (%d)", active.kind, active.duration)
+      parts[#parts + 1] = string.format("%s (%d)", Status.noun(active.kind), active.duration)
     end
-    lines[#lines + 1] = "afflicted: " .. table.concat(parts, ", ")
+    lines[#lines + 1] = "afflicted: " .. Status.joinNaturally(parts)
   end
 
-  -- Only reachable via infighting.lua's own bite chance (a rival monster or
-  -- the player's own companion/hireling/thrall can now catch a disease from
-  -- a carrier's bite, not just the player) - shown the same way a
-  -- durability-damaged item's examine line reports a fact only visible
-  -- through inspection, not the bare glyph on the map.
   if Disease.isInfected(monster) then
     local def = Disease.defs[monster.disease.key]
     lines[#lines + 1] = Disease.hasErupted(monster)

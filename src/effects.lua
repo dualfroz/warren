@@ -1,7 +1,3 @@
--- Resolves potion and scroll effect keys against the world. Self-contained buffs
--- act on the drinker; teleport, mapping, identify and fireball reach into the
--- game and its current level. Every effect returns log lines in emission order.
-
 local Status = require("status")
 local Identify = require("identify")
 local Hazards = require("hazards")
@@ -14,17 +10,6 @@ local Effects = {}
 
 local handlers = {}
 
--- Every handler below phrases its own log line by hand rather than always
--- templating a bare "%s <third-person-singular-verb>" onto target.name,
--- because Effects.apply's only call site (Game:useItem) always hands it the
--- player, whose name is the pronoun "you" - a subject that takes the plain
--- ("you heal", "you are poisoned") verb form English gives second person,
--- not the third-person-singular form ("heals", "is") a named monster like
--- "orc" would take. Kept branching on target.kind rather than hardcoding
--- "you" outright so a future non-player caller (a companion drinking its
--- own potion, say) still reads correctly without touching this file - the
--- same isPlayer-branch convention Game:springTrap and Game:checkTerrainFor
--- already use for the identical pronoun problem.
 local function isPlayer(target)
   return target.kind == "player"
 end
@@ -57,10 +42,6 @@ handlers.fortify = function(game, target, _)
   return { isPlayer(target) and "you feel fortified" or string.format("%s feels fortified", target.name) }
 end
 
--- Same shape as haste/fortify - a timed self-buff, not a hostile effect -
--- but see status.lua's Status.LEVITATE for what it actually unlocks: a
--- levitating target ignores lava, chasms, ice, and ground-pressure traps
--- entirely until it wears off (Game:checkTerrainFor/checkTrapFor).
 handlers.levitate = function(game, target, _)
   Status.apply(target, Status.LEVITATE, 20, 1)
   return { isPlayer(target) and "you rise off the ground" or string.format("%s rises off the ground", target.name) }
@@ -72,42 +53,32 @@ handlers.clarity = function(game, target, item)
     or string.format("%s's mind steadies (sanity %d/%d)", target.name, Sanity.current(target), Sanity.MAX) }
 end
 
--- "Cleansing" always meant purging disease; it never touched the status
--- effects (poison, burning, stun, slow, weaken, discord, confuse, blind)
--- that every other cure-shaped word in the game implies, leaving those
--- curable only by waiting out their duration. Now strips both.
 handlers.cure = function(game, target, _)
   local diseaseCured = Disease.cure(target)
   local liftedStatuses = Status.cureHostile(target)
-  local statusList = table.concat(liftedStatuses, ", ")
-  if diseaseCured and #liftedStatuses > 0 then
+  local statusList = #liftedStatuses > 0 and Status.describe(liftedStatuses)
+  local fades = #liftedStatuses == 1 and "fades" or "fade"
+  if diseaseCured and statusList then
     return { isPlayer(target)
-      and string.format("your affliction is cleansed away, and the %s fades", statusList)
-      or string.format("%s's affliction is cleansed away, and the %s fades", target.name, statusList) }
+      and string.format("your affliction is cleansed away, and the %s %s", statusList, fades)
+      or string.format("%s's affliction is cleansed away, and the %s %s", target.name, statusList, fades) }
   elseif diseaseCured then
     return { isPlayer(target) and "your affliction is cleansed away"
       or string.format("%s's affliction is cleansed away", target.name) }
-  elseif #liftedStatuses > 0 then
-    return { isPlayer(target) and string.format("your %s fades", statusList)
-      or string.format("%s's %s fades", target.name, statusList) }
+  elseif statusList then
+    return { isPlayer(target) and string.format("your %s %s", statusList, fades)
+      or string.format("%s's %s %s", target.name, statusList, fades) }
   end
   return { isPlayer(target) and "you feel a faint tingle, but had nothing to cleanse"
     or string.format("%s feels a faint tingle, but had nothing to cleanse", target.name) }
 end
 
--- Same duration/potency as the confuse spell and trap (see status.lua's
--- Status.CONFUSE and its mirrors in Game:movePlayer/Ai.act) so drinking an
--- unidentified potion of confusion is exactly as bad as walking into a
--- confuse trap, not a weaker or stronger flavor of the same status.
 handlers.confuse = function(game, target, _)
   Status.apply(target, Status.CONFUSE, 6, 1)
   return { isPlayer(target) and "your mind reels with confusion"
     or string.format("%s's mind reels with confusion", target.name) }
 end
 
--- Same duration/potency as the blind trap (see Game:springTrap) so drinking
--- an unidentified potion of blindness is exactly as bad as walking into a
--- flash trap, not a weaker or stronger flavor of the same status.
 handlers.blind = function(game, target, _)
   Status.apply(target, Status.BLIND, 6, 1)
   return { isPlayer(target) and "you are struck blind" or string.format("%s is struck blind", target.name) }
@@ -168,7 +139,7 @@ handlers.fireball = function(game, target, _)
   end
   Hazards.ignite(game.level, target.x, target.y, 3, 2)
   game:cleanupDead()
-  return { string.format("fire engulfs %d foes", burned) }
+  return { string.format("fire engulfs %d %s", burned, burned == 1 and "foe" or "foes") }
 end
 
 function Effects.apply(effectKey, game, target, item)

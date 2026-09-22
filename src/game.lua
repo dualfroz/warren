@@ -1,8 +1,3 @@
--- Turn orchestration built on an energy scheduler: the world advances actor by
--- actor until the player is due, the player acts, and the cycle repeats. Owns
--- the dungeon, the player, identification and the message log, and drives the
--- headless autopilot that descends the dungeon deterministically.
-
 local Rng = require("rng")
 local Tiles = require("tiles")
 local Astar = require("astar")
@@ -82,11 +77,41 @@ local Horde = require("horde")
 local Branches = require("branches")
 local Commands = require("commands")
 
--- Real feature history, oldest first, matching the fields Game.fromData
--- below has always had to guard with "or" because they arrived after the
--- original snapshot shape: essence and the vault/set-piece tallies, then the
--- skill tree and reputation, then sanity. A run save from before any of
--- those landed is missing exactly the fields each step below fills in.
+local mimicGlyphByName = {}
+for _, disguise in ipairs(Mimics.DISGUISES) do
+  mimicGlyphByName[disguise.name] = disguise.glyph
+end
+
+local function restyleGlyphs(node)
+  if type(node.tiles) == "string" then
+    node.tiles = node.tiles:gsub("%%", Tiles.LAVA)
+  end
+  if node.glyph ~= nil then
+    if Items.glyphs[node.kind] then
+      node.glyph = Items.glyphs[node.kind]
+    elseif node.kind == "grave" then
+      node.glyph = Graves.markerGlyph
+    elseif node.kind == "mimic" then
+      node.glyph = mimicGlyphByName[node.name]
+    end
+  end
+  for _, child in pairs(node) do
+    if type(child) == "table" then restyleGlyphs(child) end
+  end
+end
+
+local function restyleCreatureGlyphs(node)
+  local hireling = node.kind == "hireling" and Mercenaries.byKey[node.species]
+  if hireling then
+    node.glyph = hireling.glyph
+  elseif node.kind == "monster" and node.species == "shade" then
+    node.glyph = Graves.shadeGlyph
+  end
+  for _, child in pairs(node) do
+    if type(child) == "table" then restyleCreatureGlyphs(child) end
+  end
+end
+
 local GameSave = SaveGame.new({
   [1] = function(data)
     data.playerExtra.essence = data.playerExtra.essence or 0
@@ -106,6 +131,14 @@ local GameSave = SaveGame.new({
     data.playerExtra.sanity = data.playerExtra.sanity or Sanity.MAX
     return data
   end,
+  [4] = function(data)
+    restyleGlyphs(data)
+    return data
+  end,
+  [5] = function(data)
+    restyleCreatureGlyphs(data)
+    return data
+  end,
 })
 
 local Game = {}
@@ -113,8 +146,6 @@ Game.__index = Game
 
 local FOV_RADIUS = 8
 
--- Which equip slot each wearable item kind occupies, used to check a slot
--- for a bound curse before letting a new piece take its place.
 local slotByItemKind = {
   [Items.WEAPON] = "weapon", [Items.ARMOR] = "armor",
   [Items.RING] = "ring", [Items.BOW] = "bow",
@@ -166,9 +197,6 @@ function Game.new(seed, options)
   }
   if options and options.meta then
     Meta.applyAll(options.meta, game.player)
-    -- Reuses options.meta's own table (rather than copying it) so every
-    -- sighting/kill recorded mid-run is already sitting in the table
-    -- warren.lua writes back out with Meta.save at the end of the run.
     options.meta.compendium = options.meta.compendium or Compendium.new()
     game.compendium = options.meta.compendium
   else
@@ -186,9 +214,6 @@ function Game.new(seed, options)
   return game
 end
 
--- Snapshot fed to meta.lua at the end of a run (see warren.lua's --meta
--- flag): everything Meta.renownFor and every achievement condition read,
--- gathered in one place so neither has to know Game's own field names.
 function Game:metaStats()
   return {
     deepestDepth = self.deepestDepth,
@@ -204,11 +229,6 @@ function Game:metaStats()
   }
 end
 
--- The grave this run leaves behind for a future one to stumble across (see
--- graves.lua and Builder's options.graves): only warren.lua's --meta path
--- ever calls this, and only once a run has actually ended in death -
--- winning walks out with the Amulet, not a grave. className falls back to
--- "wanderer" for a run that never picked a class at all.
 function Game:graveEntry()
   return {
     className = self.player.class or "wanderer",
@@ -219,8 +239,6 @@ function Game:graveEntry()
   }
 end
 
--- Fresh id for a monster spawned mid-game (summon, split), disjoint from the
--- small sequential ids the builder hands out at level generation.
 function Game:nextMonsterId()
   self.monsterSeq = self.monsterSeq + 1
   return 100000 + self.monsterSeq
@@ -229,8 +247,6 @@ end
 function Game:spawnMinion(speciesKey, x, y)
   local spec = Monsters.byKey[speciesKey]
   local minion = Monsters.create(spec, self:nextMonsterId(), x, y, self.depth)
-  -- Summoned or split mid-fight, so it is already aware rather than asleep -
-  -- see stealth.lua's header for why builder-placed wild monsters differ.
   minion.awareness = Stealth.HUNTING
   self.level.entities[#self.level.entities + 1] = minion
   return minion
@@ -248,25 +264,14 @@ function Game:effectiveRadius()
   radius = radius - Atmosphere.sightPenalty(self.level.weather) - Events.sightPenalty(self.level.event)
     - Ascension.sightPenalty(self.ascension)
   if radius < 1 then radius = 1 end
-  -- Blindness overrides every other light/weather/mutator term rather than
-  -- stacking with them: a blinded player run through with a full lantern in
-  -- clear weather still can't see past their own hand.
   if Status.has(self.player, Status.BLIND) then radius = 1 end
   return radius
 end
 
--- Folds events.lua's level-scoped monster damage swing together with
--- whatever ascension.lua mutators the player opted into for this run, read
--- live at the point a monster actually lands a hit (Game:monsterMelee,
--- Game:monsterShoot, Game:triggerMimic and Game:triggerGrave's ambush
--- swings) rather than baked into any monster's own stats.
 function Game:monsterDamageMultiplier()
   return Events.monsterDamageMultiplier(self.level.event) * Ascension.damageMultiplier(self.ascension)
 end
 
--- Folds events.lua's rich-veins swing together with ascension.lua's own
--- essence mutators, read live wherever essence is actually credited
--- (Game:awardKill, Nodes.harvest).
 function Game:essenceMultiplier()
   return Events.essenceMultiplier(self.level.event) * Ascension.essenceMultiplier(self.ascension)
 end
@@ -280,9 +285,6 @@ function Game:computeVisible()
   self:noteSightings()
 end
 
--- Records every currently-visible living monster's species into the
--- compendium (see compendium.lua) - silent bookkeeping, never touches the
--- message log, so it cannot perturb anything that reads recent log lines.
 function Game:noteSightings()
   local map = self.level.map
   for _, entity in ipairs(self.level.entities) do
@@ -333,23 +335,10 @@ function Game:revealWholeLevel()
   end
 end
 
--- Monster-turn helpers used by the ai module.
-
 function Game:playerAdjacent(monster)
   return math.abs(monster.x - self.player.x) + math.abs(monster.y - self.player.y) == 1
 end
 
--- The player-aligned companion, hireling, or thrall standing right next to
--- `monster` (Manhattan-1, the same cardinal-only adjacency Game:playerAdjacent
--- itself uses), or nil if none is that close. A hostile monster whose only
--- route toward the player runs through a one-wide corridor an ally is
--- standing in cannot path around it (Game:stepMonsterToward's own
--- blockedForMonster treats any occupied non-goal cell as a wall), so without
--- this check every ai.lua pursuit behaviour just holds position forever once
--- it reaches that ally's doorstep - the ally becomes an unkillable, un-
--- fightable roadblock rather than the combatant Game:onActorDeath and the
--- companion/mercenary/thrall noise-emission work already treat it as. Ties
--- break toward the lower entity id, matching Game:nearestAlly's own rule.
 function Game:adjacentAlly(monster)
   local best
   for _, other in ipairs(self.level.entities) do
@@ -366,9 +355,6 @@ end
 function Game:canSeePlayer(monster, range)
   local penalty = Skills.detectionPenalty(self.player, self.level.dark)
   local effectiveRange = math.max(range - penalty, 0)
-  -- A blinded monster can still feel the player out at melee range but loses
-  -- every longer-ranged aggro/pack/flee/ranged check in ai.lua - the same
-  -- clamp Game:effectiveRadius applies to a blinded player's own sight.
   if Status.has(monster, Status.BLIND) then effectiveRange = math.min(effectiveRange, 1) end
   local cheb = math.max(math.abs(monster.x - self.player.x), math.abs(monster.y - self.player.y))
   if cheb > effectiveRange then return false end
@@ -392,10 +378,6 @@ function Game:monsterMelee(monster)
   self:applyEliteOnHit(monster, outcome.damage, self.player)
   local thorns = Artifacts.thornsAmount(self.player, outcome.damage)
   if thorns > 0 then
-    -- Aegis of Embers "sears" its attacker by name and by log line, so this
-    -- reflect is fire damage, not a bare stat subtraction - a fire-immune
-    -- dragon (bestiary-real, reachable from depth 6) shrugs it off entirely,
-    -- exactly like every other fire source in the engine already does.
     local dealt = Resistances.apply(monster, thorns, Resistances.FIRE)
     if dealt > 0 then
       monster.hp = monster.hp - dealt
@@ -413,12 +395,6 @@ function Game:monsterMelee(monster)
   self:emitNoise(monster.x, monster.y, Noise.MELEE)
 end
 
--- A vampiric elite heals a portion of the damage it just dealt; a chilling
--- one leaves its status rider on the victim. Shared by melee and a ranged
--- shot so either delivery route triggers the same elite hooks - and, since
--- Infighting.strike resolves an elite fighting a rival monster or the
--- player's own companion/hireling/thrall through this same method, the log
--- line names the actual victim instead of always assuming it is the player.
 function Game:applyEliteOnHit(attacker, dealt, victim)
   local lifesteal = Elites.lifestealFraction(attacker)
   if lifesteal > 0 then
@@ -467,15 +443,6 @@ local function blockedForMonster(game, self, goalX, goalY)
   end
 end
 
--- Springs whatever untouched trap sits under `entity` after it has just
--- moved there - a player-planted trap kit harms a monster or companion
--- exactly as a builder-placed one harms the player, since both live in the
--- same level.traps list and share springTrap's resolution. A levitating
--- entity (Status.LEVITATE) drifts clear of the pressure plate entirely -
--- deliberately silent and without marking the trap revealed, unlike the
--- lava/chasm skip in checkTerrainFor: a hidden trap is information the
--- player never earned just by floating over it, so levitation buys safety
--- without also buying detection.
 function Game:checkTrapFor(entity)
   if Status.has(entity, Status.LEVITATE) then return end
   local trap = self.level:trapAt(entity.x, entity.y)
@@ -485,10 +452,6 @@ function Game:checkTrapFor(entity)
   end
 end
 
--- A pit with no floor below it: the player falls to the next depth and
--- takes fall damage, a monster that blunders in is simply gone. Builder
--- never seeds a chasm on the final floor, so there is always a level below
--- to land on.
 function Game:fallIntoChasm(entity)
   if entity == self.player then
     local dealt = 6 + self.rng:range(0, 6)
@@ -509,14 +472,6 @@ function Game:fallIntoChasm(entity)
   end
 end
 
--- Runs after entity has just come to rest on (dx, dy) from its previous
--- cell: ice keeps sliding it onward, lava burns it in place, and a chasm
--- ends the move altogether. Order matters - a slide can carry a traveller
--- straight off the ice and into whatever waits beyond it. A levitating
--- entity (Status.LEVITATE) never touches the ground at all, so it short
--- circuits every branch below - no slide, no burn, no fall - though it
--- still gets a log line when that skip actually mattered (standing over
--- lava or a chasm), since both are visible on the map and worth calling out.
 function Game:checkTerrainFor(entity, dx, dy)
   if not entity:isAlive() then return end
   if Status.has(entity, Status.LEVITATE) then
@@ -580,11 +535,6 @@ function Game:stepMonsterAway(monster, tx, ty)
   end
 end
 
--- An erratic wanderer's random step or a confused chaser's overridden one
--- (Ai.act, both routed here) can land on an ally's cell exactly as easily as
--- the player's - Infighting.strike resolves that the same generic way
--- Game:adjacentAlly's own callers do, rather than the bump silently doing
--- nothing the way it would against an impassable wall.
 function Game:moveMonster(monster, dx, dy)
   local nx, ny = monster.x + dx, monster.y + dy
   if nx == self.player.x and ny == self.player.y then
@@ -603,19 +553,6 @@ function Game:moveMonster(monster, dx, dy)
   end
 end
 
--- Mirrors ai.lua's own Ai.act confusion stumble for the three player-aligned
--- actor kinds (companion/hireling/thrall). None of those ever dispatch
--- through Ai.act, so without this they would leave Status.CONFUSE completely
--- inert on them despite Game:springTrap and friends already applying it to
--- "any victim" regardless of kind. Returns true whenever the roll actually
--- fires (whether or not the stumble itself finds anywhere to go), so each
--- caller can `if game:allyActsConfused(ally) then return end` first thing,
--- exactly the precedence Ai.act gives the same roll over chase/pack/etc.
--- Unlike a confused monster's stumble (moveMonster above, which treats a
--- step onto the player's cell as an attack), a confused ally's stumble onto
--- its own master's cell is harmless - an ally never attacks the player it is
--- bonded or hired to protect, so that one direction is simply blocked like a
--- wall rather than routed into any melee helper.
 function Game:allyActsConfused(ally)
   if not Status.has(ally, Status.CONFUSE) then return false end
   if not self.rng:chance(Status.CONFUSE_NUMERATOR, Status.CONFUSE_DENOMINATOR) then return false end
@@ -630,15 +567,6 @@ function Game:allyActsConfused(ally)
   return true
 end
 
--- A burrower's turn when it can neither reach nor see the player through
--- open floor: senses the player's general direction through solid rock out
--- to Digging.SENSE_RANGE away and, of the two candidate cells toward them
--- (longer axis first - see Digging.directionsToward), either claws one
--- swing into the first one that is still diggable, exactly like Game:dig
--- but toolless and self-directed, or - if open floor already leads that
--- way - simply steps there so it closes the distance before it ever needs
--- to swing at all. Idles once out of range or once neither candidate cell
--- is diggable nor walkable, the same way "flee" idles once it loses sight.
 function Game:monsterDig(monster, tx, ty)
   local cheb = math.max(math.abs(monster.x - tx), math.abs(monster.y - ty))
   if cheb == 0 or cheb > Digging.SENSE_RANGE then return end
@@ -671,9 +599,6 @@ function Game:nearestAlly(monster)
   return ally
 end
 
--- A monster's death sweeps xp and essence to the player; a companion fights
--- for the player rather than yielding a reward for dying, so its death is
--- only logged and swept.
 function Game:onActorDeath(actor)
   if actor.kind == "companion" then
     self.log:add("your " .. actor.name .. " falls")
@@ -702,13 +627,6 @@ function Game:takeMonsterTurn(monster)
     self:onActorDeath(monster)
     return
   end
-  -- Mirrors Game:hungerTorchTick's own Disease.tick(self.player) call - a
-  -- disease is plain generic entity state (see disease.lua), and since
-  -- Infighting.strike can now infect a rival monster or the player's own
-  -- companion/hireling/thrall (not just the player), every non-player actor
-  -- needs its own infection to actually progress on its turn too, or an
-  -- infected ally would sit permanently incubating with no way to ever
-  -- erupt, escalate, or be noticed.
   local diseaseLine = Disease.tick(monster)
   if diseaseLine then self.log:add(diseaseLine) end
   if not monster:isAlive() then
@@ -729,13 +647,7 @@ function Game:takeMonsterTurn(monster)
     elseif monster.kind == "thrall" then
       Reanimation.act(self, monster)
     elseif Infighting.tryAct(self, monster) then
-      -- A rivalry or a discorded mind has nothing to do with how this
-      -- monster currently feels about the player: it fights regardless of
-      -- wariness or - unlike Stealth.tick's own gating - whether it has
-      -- otherwise noticed the player at all this turn.
     elseif Factions.isWary(self.player, monster) then
-      -- A wary tribe member holds its ground: neither provoked nor hated
-      -- into open hostility yet, it leaves the player be this turn.
     elseif Stealth.tick(self, monster) then
       Abilities.tickCooldown(monster)
       if not Abilities.tryAct(self, monster) then
@@ -756,11 +668,6 @@ function Game:runToPlayer()
   end
 end
 
--- Player actions.
-
--- Common tail of any player-caused kill: log it, grant the xp it was worth,
--- and sweep it off the level. Shared by melee and offensive spells so xp
--- always tracks a felled monster regardless of what felled it.
 function Game:awardKill(target)
   self.log:add(target.name .. " dies")
   local burst = Abilities.onDeath(self, target)
@@ -806,8 +713,6 @@ function Game:awardKill(target)
   self:cleanupDead()
 end
 
--- Applies a weapon's on-hit rider - rolled affix or socketed gem, or both -
--- to a still-living target, logging each status it lands.
 function Game:applyWeaponRiders(weapon, target)
   if not (weapon and target:isAlive()) then return end
   local riders = {}
@@ -819,11 +724,6 @@ function Game:applyWeaponRiders(weapon, target)
   end
 end
 
--- Marks a monster as no longer wary (see factions.lua): once the player has
--- aimed any offensive action at it, a tribal target that used to hold back
--- fights (or flees) like any other monster from then on, hit or miss. Any
--- offensive action also wakes a dormant target outright (see stealth.lua) -
--- an arrow or a spell that misses still gives away exactly where you are.
 function Game:provoke(target)
   if target and target.kind == "monster" then
     target.provoked = true
@@ -831,13 +731,6 @@ function Game:provoke(target)
   end
 end
 
--- Floods a burst of noise.lua sound out from (x, y) and gives every other
--- still-dormant monster the flood actually reaches a chance to stir - a
--- clash of steel three rooms over does not single out whichever target
--- Game:provoke already woke outright, it startles whatever else is close
--- enough to hear it too. A monster startled this way only ever starts
--- searching the noise's origin (see Stealth.hear), never snaps straight to
--- hunting the way a direct hit does.
 function Game:emitNoise(x, y, loudness)
   local field = Noise.propagate(self.level.map, x, y, loudness)
   for _, entity in ipairs(self.level.entities) do
@@ -852,8 +745,6 @@ function Game:emitNoise(x, y, loudness)
 end
 
 function Game:playerAttack(target)
-  -- Read before provoke() wakes the target below, so the bonus reflects
-  -- whatever it actually was the instant the blow landed.
   local sneak = Stealth.sneakMultiplier(target)
   self:provoke(target)
   self:emitNoise(self.player.x, self.player.y, Noise.MELEE)
@@ -888,9 +779,6 @@ function Game:playerAttack(target)
   end
 end
 
--- Attempts to cast a known spell, optionally at a target monster. Returns
--- true and logs its effect on success; on failure logs why and leaves all
--- state - mana included - untouched.
 function Game:castSpell(key, target)
   self:provoke(target)
   local success, lines = Spells.cast(self, self.player, key, target)
@@ -899,8 +787,6 @@ function Game:castSpell(key, target)
   return success
 end
 
--- Hurls the inventory item at `index` at a monster. The item always leaves
--- the inventory on a successful throw, whatever it did on arrival.
 function Game:throwAt(index, target)
   local item = self.player.inventory[index]
   if not item then return false end
@@ -914,12 +800,6 @@ function Game:throwAt(index, target)
   return success
 end
 
--- Throws a net from the inventory at `index` at a battered monster instead
--- of finishing it off in melee (see captives.lua). The net always leaves
--- the inventory once thrown, whether it actually holds the target or not;
--- a genuine catch removes the target from level.entities without ever
--- routing through Game:awardKill, so it earns no xp, essence, quest credit
--- or faction kill penalty - only a captive left standing on the floor.
 function Game:captureAt(index, target)
   local item = self.player.inventory[index]
   if not item then return false end
@@ -934,8 +814,6 @@ function Game:captureAt(index, target)
   return success
 end
 
--- Looses an arrow from the player's equipped bow at a monster. The arrow
--- always leaves the quiver on a successful shot, whatever it did on arrival.
 function Game:fireAt(target)
   self:provoke(target)
   local success, lines = Ranged.fire(self, self.player, target)
@@ -944,9 +822,6 @@ function Game:fireAt(target)
   return success
 end
 
--- Spends gold to smooth over the player's standing with `faction` (see
--- factions.lua): cools a grudge, or pads an existing friendship, by a fixed
--- amount. The asking price climbs the deeper the relationship has soured.
 function Game:appeaseFaction(faction)
   local success, cost = Factions.appease(self.player, faction)
   if success then
@@ -959,22 +834,12 @@ function Game:appeaseFaction(faction)
   return success
 end
 
--- Prays at the shrine standing under the player, spending its gold price for
--- a shot at a permanent blessing (or, with rising odds the more this altar
--- has already been used, a curse instead). Returns false without any state
--- change when there is no shrine here or its price cannot be met.
 function Game:prayAt(shrine)
   local success, lines = Shrines.pray(self, shrine)
   self.log:addAll(lines)
   return success
 end
 
--- Swings the player's equipped pick at whatever lies one step away in
--- (dx, dy): a plain wall or the rubble left by an earlier swing. Returns
--- false without spending the swing when there is no pick readied or the
--- target cell has nothing left to dig (open floor, a vault door, out of
--- bounds); otherwise always spends one use of the pick's durability, even on
--- an unlucky cave-in that costs hp instead of progress (see digging.lua).
 function Game:dig(dx, dy)
   if not self.player.pick then
     self.log:add("you have nothing to dig with")
@@ -992,11 +857,6 @@ function Game:dig(dx, dy)
   return true
 end
 
--- Harvests whatever resource node stands under the player: an ore vein pays
--- out essence, a gem seam yields a raw gem, both free of any gold cost -
--- unlike a shrine's prayer, the only thing rationing this is the node's own
--- charges (see nodes.lua). Returns false without state change when there is
--- no node here or it has already been picked dry this trip.
 function Game:harvestNode()
   local node = self.level:nodeAt(self.player.x, self.player.y)
   if not node then
@@ -1008,11 +868,6 @@ function Game:harvestNode()
   return success
 end
 
--- Butchers whatever corpse lies under the player into raw meat (Items.FOOD),
--- eaten later exactly like a found ration - unless the corpse has already
--- gone past its rot threshold (corpses.lua), in which case it poisons the
--- player instead. Either way the corpse itself is spent in one stroke.
--- Returns false without state change when there is nothing here to carve.
 function Game:butcherCorpse()
   local corpse = self.level:corpseAt(self.player.x, self.player.y)
   if not corpse then
@@ -1023,12 +878,6 @@ function Game:butcherCorpse()
   return true
 end
 
--- Raises whatever fresh corpse lies under the player into a temporary
--- skeletal thrall (see reanimation.lua), spending both the corpse and a
--- bite of sanity in one stroke - a deliberate trade the autopilot never
--- makes on its own, unlike Game:butcherCorpse's free meal, so this is only
--- ever called directly. Returns false without state change when there is
--- no corpse here or Reanimation.raise itself refuses the attempt.
 function Game:raiseCorpse()
   local corpse = self.level:corpseAt(self.player.x, self.player.y)
   if not corpse then
@@ -1044,11 +893,6 @@ function Game:raiseCorpse()
   return true
 end
 
--- Carves whatever fresh corpse lies under the player for the herb its own
--- kind carries (see scavenging.lua) instead of a meal or a thrall - a third
--- deliberate trade for the same tile, only ever called directly like
--- Game:raiseCorpse, never by the autopilot. Returns false without state
--- change when there is no corpse here or Scavenging.harvest itself refuses.
 function Game:scavengeCorpse()
   local corpse = self.level:corpseAt(self.player.x, self.player.y)
   if not corpse then
@@ -1060,13 +904,6 @@ function Game:scavengeCorpse()
   return harvested
 end
 
--- Opens whatever chest stands under the player. An unlocked one (or one
--- already forced open) yields its hoard outright; a locked one first tries
--- a carried key, exactly like Game:openDoor's own certain trade, and only
--- falls back to a lockpick gamble (Chests.pick, which risks springing a
--- trapped lock) once no key can be found. Returns false without state
--- change when there is nothing here to open, it is already empty, or it is
--- locked with neither a key nor a lockpick on hand.
 function Game:openChest()
   local chest = self.level:chestAt(self.player.x, self.player.y)
   if not chest then
@@ -1089,11 +926,6 @@ function Game:openChest()
   return success
 end
 
--- Frees whatever captive stands under the player back to its own kind for
--- nothing but goodwill (see Captives.ransom) - the one resolution that can
--- pull a wary tribal faction (factions.lua's neutralFactions) back out of
--- open hostility rather than deepening it further. Returns false without
--- state change when there is no captive here.
 function Game:ransomCaptive()
   local captive = self.level:captiveAt(self.player.x, self.player.y)
   if not captive then
@@ -1105,9 +937,6 @@ function Game:ransomCaptive()
   return true
 end
 
--- Sells whatever captive stands under the player for gold at its own
--- faction's expense (see Captives.sell). Returns false without state change
--- when there is no captive here.
 function Game:sellCaptive()
   local captive = self.level:captiveAt(self.player.x, self.player.y)
   if not captive then
@@ -1119,11 +948,6 @@ function Game:sellCaptive()
   return true
 end
 
--- Interrogates whatever captive stands under the player instead of ransoming
--- or selling it (see Captives.interrogate): no gold, no reputation swing,
--- just every currently-hidden secret door on this floor found outright plus
--- a trickle of essence. Returns false without state change when there is no
--- captive here.
 function Game:interrogateCaptive()
   local captive = self.level:captiveAt(self.player.x, self.player.y)
   if not captive then
@@ -1131,22 +955,18 @@ function Game:interrogateCaptive()
     return false
   end
   local revealed = Captives.interrogate(self.level, self.player, captive)
-  self.log:add(string.format("%s breaks - %d hidden door%s in this floor give themselves away",
-    captive.name, #revealed, #revealed == 1 and "" or "s"))
+  self.log:add(string.format("%s breaks - %d hidden %s in this floor %s away",
+    captive.name, #revealed, #revealed == 1 and "door" or "doors",
+    #revealed == 1 and "gives itself" or "give themselves"))
   return true
 end
 
--- Binds the player to `board`'s bounty for free, logging the pact struck or
--- the reason it could not be. See Quests.accept for the acceptance rules.
 function Game:tryAcceptQuest(board)
   local success, line = Quests.accept(self.player, board)
   self.log:add(line)
   return success
 end
 
--- Pays out the player's active bounty the moment it is fulfilled, granting
--- gold, xp and essence in one stroke and freeing the player to bind another.
--- A no-op with no active bounty or one still unmet.
 function Game:resolveQuest()
   local bounty = self.player.quest
   if not bounty or not Quests.resolved(self.player, self.depth) then return false end
@@ -1179,10 +999,6 @@ function Game:openDoor(x, y)
   return true
 end
 
--- Springs `trap` on `victim`, whoever that is: reveals it on the map and
--- resolves its effect against that entity's own stats and position. Kept
--- generic so a player-planted trap kit (Game:useItem's Items.KIT branch)
--- harms a monster exactly as a builder-placed one harms the player.
 function Game:springTrap(trap, victim)
   trap.revealed = true
   self.level.map:set(trap.x, trap.y, Tiles.TRAP)
@@ -1223,10 +1039,6 @@ function Game:triggerTrap(trap)
   self:springTrap(trap, self.player)
 end
 
--- Attempts to disarm `trap`, already noticed (see disarm.lua's Disarm.sweep,
--- rolled once per turn in Game:endPlayerTurn) but not yet sprung. Refuses
--- outright, without even risking a spring, against a trap never detected or
--- one already triggered - there is nothing left here to disarm.
 function Game:disarmTrap(trap)
   if not trap or not trap.detected or trap.revealed then
     self.log:add("there is nothing here you have noticed to disarm")
@@ -1237,11 +1049,6 @@ function Game:disarmTrap(trap)
   return success
 end
 
--- Throws `lever`, a no-op once it has already been thrown. The instant this
--- pull completes every lever sharing its vault id, the shared door swings
--- open (its tile flips to a plain open door - see Vaults.pull) and the run's
--- vault tally advances for meta scoring; otherwise the lever just clunks
--- into its pulled state.
 function Game:pullLever(lever)
   local pulled, door = Vaults.pull(self.level, lever)
   if not pulled then return false end
@@ -1257,17 +1064,12 @@ function Game:pullLever(lever)
   return true
 end
 
--- A priced ware is only free for the taking once its shopkeeper is dead;
--- otherwise it charges the stamped price and is left on the ground when the
--- player cannot afford it yet (they simply walk past it).
 function Game:wardedByLiveKeeper(ground)
   if not ground.price then return false end
   local keeper = self.level:entityById(ground.shopId)
   return keeper ~= nil and keeper:isAlive()
 end
 
--- Player-facing wrapper so callers never need to know encumbrance.lua works
--- entirely off entity.inventory/entity.level rather than any saved field.
 function Game:encumbranceTier()
   return Encumbrance.tierFor(self.player)
 end
@@ -1325,12 +1127,6 @@ function Game:pickupHere()
   end
 end
 
--- Unmasks a disguised floorItem the moment the player reaches for it:
--- drops the real hostile monster in its place (already hunting, never
--- dormant - see stealth.lua's header for why a builder-placed wild
--- monster differs) and lands one free ambush swing through combat.lua,
--- so the surprise still respects the player's defense and resistances
--- instead of being a flat, unavoidable trap tick.
 function Game:triggerMimic(ground)
   local mimic = Mimics.reveal(self:nextMonsterId(), ground.x, ground.y, self.depth)
   mimic.awareness = Stealth.HUNTING
@@ -1343,11 +1139,6 @@ function Game:triggerMimic(ground)
   if broke then self.log:add(broke) end
 end
 
--- Wakes the vengeful shade sleeping under a disturbed grave marker (see
--- graves.lua): unlike a mimic's disguise, the marker never hid what it
--- was, but stepping onto it is still a mistake the same instant Game:
--- pickupHere makes it - one free ambush swing through combat.lua before
--- the shade settles into an ordinary chase on its own turns from then on.
 function Game:triggerGrave(ground)
   local shade = Graves.reveal(self:nextMonsterId(), ground.x, ground.y, ground)
   shade.awareness = Stealth.HUNTING
@@ -1360,11 +1151,6 @@ function Game:triggerGrave(ground)
   if broke then self.log:add(broke) end
 end
 
--- Discards an inventory item onto the floor at the player's feet: the
--- opposite of pickupHere, needed once a hoard grows heavier than is
--- comfortable to carry (see encumbrance.lua). Equipped gear never reaches
--- this path - it always trades in place through items.equipWeapon and
--- friends - so this only ever touches the loose inventory array.
 function Game:dropItem(index)
   local item = self.player.inventory[index]
   if not item then return nil end
@@ -1374,10 +1160,6 @@ function Game:dropItem(index)
   return item
 end
 
--- The cheapest inventory item that is safe to shed first when overloaded:
--- never the amulet (the entire point of a run) or a key (worthless to a
--- shop and needed right where it was found). Returns nil if nothing but
--- those two remains.
 function Game:cheapestDroppableItem()
   local bestIndex, bestPrice
   for i, item in ipairs(self.player.inventory) do
@@ -1391,7 +1173,6 @@ function Game:cheapestDroppableItem()
   return bestIndex
 end
 
--- Sells an inventory item back to the economy at half its catalog price.
 function Game:sellItem(index)
   local item = self.player.inventory[index]
   local value = Shop.sell(self, index)
@@ -1401,9 +1182,6 @@ function Game:sellItem(index)
   return value
 end
 
--- Spends gold to restore whichever of the player's weapon, armor or bow sits
--- in `slotName` back to full durability (see durability.lua), folding its
--- power back into attack/defense if wear had already broken it.
 function Game:repairEquipped(slotName)
   local item = self.player[slotName]
   local success, result = Durability.repair(self.player, slotName)
@@ -1415,10 +1193,6 @@ function Game:repairEquipped(slotName)
   return success
 end
 
--- The first of weapon/armor/bow, in that priority order, that has been worn
--- clean through to uselessness - never a merely dinged one still pulling its
--- weight, so the autopilot only ever reaches for its purse over gear that
--- has actually stopped working.
 function Game:brokenEquippedSlot()
   for _, slot in ipairs({ "weapon", "armor", "bow" }) do
     local item = self.player[slot]
@@ -1427,8 +1201,6 @@ function Game:brokenEquippedSlot()
   return nil
 end
 
--- Taking a warded item without paying: the item is stolen outright and its
--- shopkeeper turns permanently hostile, chasing the player like any monster.
 function Game:stealFromShop(index)
   local ground = self.level.floorItems[index]
   if not ground or not self:wardedByLiveKeeper(ground) then return false end
@@ -1442,9 +1214,6 @@ function Game:stealFromShop(index)
   return true
 end
 
--- Resolves a crafting target: "weapon"/"armor" reach the currently equipped
--- piece (which has left the inventory array entirely - see items.equipWeapon/
--- equipArmor), anything else is an inventory index.
 function Game:resolveGear(target)
   if target == "weapon" then return self.player.weapon end
   if target == "armor" then return self.player.armor end
@@ -1494,11 +1263,6 @@ function Game:socketItem(target, gemIndex)
   return true
 end
 
--- Socketing a rune never removes it from the game the way a failed gem
--- socket attempt would leave the gem untouched in inventory - the rune is
--- always spent once it joins the chain, whether or not that completes a
--- runeword, since there is no "wrong" rune to protect the player from (see
--- Runewords.socket).
 function Game:socketRune(target, runeIndex)
   local item = self:resolveGear(target)
   local rune = self.player.inventory[runeIndex]
@@ -1554,10 +1318,6 @@ function Game:disenchantItem(target)
   return true
 end
 
--- Combines the two carried herbs at indexA and indexB into whichever potion
--- Alchemy.brew resolves the pair to. Both herbs are spent regardless of the
--- outcome - a botched brew that curdles is not a free retry, and vents its
--- fumes as a gas hazard right underfoot instead of handing back a potion.
 function Game:brewAt(indexA, indexB)
   if not self.level:cauldronAt(self.player.x, self.player.y) then
     self.log:add("there is no cauldron here")
@@ -1584,11 +1344,6 @@ function Game:brewAt(indexA, indexB)
   return true
 end
 
--- Companions, hirelings and thralls are all player-owned allies (see
--- Game:onActorDeath), never a valid melee target for the player's own bump-
--- attack or autopilot targeting - both Game:movePlayer and Game:adjacentMonster
--- below share this one check so neither can turn "walk into your own hound"
--- into an accidental kill.
 local function isPlayerAlly(entity)
   return entity.kind == "companion" or entity.kind == "hireling" or entity.kind == "thrall"
 end
@@ -1597,13 +1352,6 @@ local CONFUSE_DIRS = {
   { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 }, { 1, 1 }, { 1, -1 }, { -1, 1 }, { -1, -1 },
 }
 
--- Whether `dx, dy` (the direction the player actually typed, or the one
--- autopilot's own targeting picked) gets overridden by a random one of the
--- 8 compass directions this call - the confusion-lands roll only ever fires
--- once per Game:movePlayer, never re-rolled mid-call. Confusion strikes
--- before Game:movePlayer even looks at what's in the chosen direction, so a
--- stumble can just as easily open a door, bump a rival into a fight, shove a
--- block, or walk the player straight onto a trap as a deliberate move would.
 local function confusionRedirect(self, dx, dy)
   if not Status.has(self.player, Status.CONFUSE) then return dx, dy, false end
   if not self.rng:chance(Status.CONFUSE_NUMERATOR, Status.CONFUSE_DENOMINATOR) then
@@ -1613,12 +1361,6 @@ local function confusionRedirect(self, dx, dy)
   return dir[1], dir[2], true
 end
 
--- `stumbled` (below) is what makes a confused player's failed lurch still
--- cost a turn: an ordinary bump into a wall or an unpushable block returns
--- false and Game:manualStep spends nothing, exactly as a rejected typed
--- command should, but a confused player who meant to go one way and staggered
--- into a wall instead still acted - the turn is spent on the stumble itself,
--- not on whatever (if anything) it accomplished.
 function Game:movePlayer(dx, dy)
   local stumbled
   dx, dy, stumbled = confusionRedirect(self, dx, dy)
@@ -1729,11 +1471,6 @@ function Game:useItem(index)
   return true
 end
 
--- Removes the currently-live nemesis (nemesis.lua) from the floor about to
--- be left and escalates its grudge, so Game:nemesisArrive rebuilds it
--- stronger on the other side of the stairwell. Unlike every other hostile
--- (level.lua's own header: a revisited floor keeps its exact state, dead
--- monsters and all), a nemesis is never left behind - it always follows.
 function Game:nemesisFollow()
   for i, entity in ipairs(self.level.entities) do
     if entity.nemesis then
@@ -1744,10 +1481,6 @@ function Game:nemesisFollow()
   end
 end
 
--- Rolls a brand new nemesis into being from whichever hostile was already
--- hunting the player on the floor just cleared. Only tried on the way down
--- (Game:descend) and only while no nemesis is following yet - ordinary
--- backtracking upstairs never manufactures one.
 function Game:nemesisTryEmerge()
   if not self.rng:chance(Nemesis.CHANCE_NUMERATOR, Nemesis.CHANCE_DENOMINATOR) then return end
   local hunter = Nemesis.pickHunter(self.level, self.player)
@@ -1761,8 +1494,6 @@ function Game:nemesisTryEmerge()
   self.nemesis = Nemesis.beginFrom(hunter)
 end
 
--- Drops the pursuing nemesis onto whichever floor Game:descend/ascend has
--- just switched self.level/self.depth to. A no-op without one following.
 function Game:nemesisArrive()
   if not self.nemesis then return end
   local x, y = self:randomFloorCell()
@@ -1776,17 +1507,6 @@ end
 local ALLY_CARRY_KINDS = { companion = true, hireling = true, thrall = true }
 local ALLY_CARRY_DIRS = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 }, { 1, 1 }, { 1, -1 }, { -1, 1 }, { -1, -1 } }
 
--- Pulls every living player-aligned ally (companion/hireling/thrall) off
--- `fromLevel`'s own entities list, ready to be handed to
--- Game:plantCarriedAllies once self.level/self.player.x/y already point at
--- the destination. companions.lua/mercenaries.lua/reanimation.lua's own
--- module comments describe a bonded ally as persisting "across the whole
--- run" (or, for a hireling, demanding its wage "for as long as it lives") -
--- without this pair, every one of them was actually abandoned in place the
--- instant the player took a single flight of stairs or crossed a rift,
--- silently contradicting that promise. Mirrors Game:nemesisFollow's own
--- table.remove-while-scanning shape, just for up to three kinds at once
--- instead of one flagged entity.
 function Game:detachCarriedAllies(fromLevel)
   local carried = {}
   for i = #fromLevel.entities, 1, -1 do
@@ -1799,13 +1519,6 @@ function Game:detachCarriedAllies(fromLevel)
   return carried
 end
 
--- Re-plants entities Game:detachCarriedAllies pulled off the old floor onto
--- self.level, each on the first free cell around the player's new position -
--- the same 8-directional, first-free-cell convention Companions.summon/
--- Mercenaries.hire/Reanimation.raise already use to place a brand new one -
--- falling back to Game:randomFloorCell (the same primitive Game:nemesisArrive
--- uses) only if every adjacent cell is blocked, so an ally is never simply
--- lost for want of room next to the stairs.
 function Game:plantCarriedAllies(carried)
   for _, ally in ipairs(carried) do
     local placed = false
@@ -1872,16 +1585,6 @@ function Game:ascend()
   return true
 end
 
--- Crosses the rift the player is currently standing on (see branches.lua),
--- swapping the run's active level for that rift's own pocket floor. The
--- pocket floor is generated once per origin depth and cached on
--- self.riftLevels exactly like self.dungeon caches every main-track floor,
--- so leaving and coming back always finds it exactly as it was left, dead
--- monsters and all - and only the very first crossing of a given rift spends
--- the one carried shard the stabilization costs; every crossing after that,
--- in either direction, is free. Returns false without side effects when the
--- player is not standing on a rift, is already across one, or (on a first
--- crossing only) is not carrying a shard to spend.
 function Game:enterRift()
   if self.rift then return false end
   local rift = self.level:riftAt(self.player.x, self.player.y)
@@ -1906,12 +1609,6 @@ function Game:enterRift()
   return true
 end
 
--- Steps back out of a rift crossing at its own pocket floor's downX/downY
--- (Branches.build reuses an ordinary Builder.build floor's ordinary "stairs
--- down" pair as the one way back rather than inventing a second tile kind),
--- restoring the exact main-track level, depth and position Game:enterRift
--- saved before the crossing. Returns false without effect when the player is
--- not currently across a rift, or has not yet reached its own exit point.
 function Game:exitRift()
   if not self.rift then return false end
   if self.player.x ~= self.level.downX or self.player.y ~= self.level.downY then return false end
@@ -1927,19 +1624,6 @@ function Game:exitRift()
   return true
 end
 
--- Starts a Horde Arena trial for the run in progress: swaps the player's
--- current level for a fresh closed arena (see horde.lua's own header for
--- why this can bypass dungeon.lua/builder.lua entirely and still work with
--- every existing turn system unmodified) and spawns its first wave through
--- the very same Horde.tick that clears each wave after it. The dungeon
--- floor left behind is simply abandoned - descending is not something an
--- arena run does, only Game:endPlayerTurn's escalating waves. A bonded
--- companion/hireling/thrall is not abandoned along with it though: the same
--- detachCarriedAllies/plantCarriedAllies pair Game:descend/ascend/enterRift/
--- exitRift already use follows the player in here too, planted around the
--- arena's centre anchor (cx, cy) rather than left to die alone on a floor
--- the run can never return to - an ally bonded specifically to fight beside
--- the player has the most reason to stand with them in a survival trial.
 function Game:startHorde()
   local carriedAllies = self:detachCarriedAllies(self.level)
   local map, cx, cy = Horde.buildArena(self.rng, Horde.WIDTH, Horde.HEIGHT)
@@ -1951,8 +1635,6 @@ function Game:startHorde()
   if line then self.log:add(line) end
   self:computeVisible()
 end
-
--- Autopilot.
 
 function Game:findInInventory(predicate)
   for i, item in ipairs(self.player.inventory) do
@@ -1979,9 +1661,6 @@ function Game:playerPathTo(tx, ty)
   end)
 end
 
--- First step of the shortest route to the nearest monster the player can
--- actually reach, so blockers standing between the player and the stairs get
--- hunted down. Ties break on ascending monster id for determinism.
 function Game:reachableMonsterStep()
   local bestLen, bestId, step = math.huge, math.huge, nil
   for _, monster in ipairs(self.level.entities) do
@@ -1995,9 +1674,6 @@ function Game:reachableMonsterStep()
   return step
 end
 
--- First step toward the nearest not-yet-explored walkable cell via a BFS that
--- routes around monsters. Lets the autopilot discover a way onward when the
--- direct path to the stairs is temporarily blocked.
 function Game:exploreStep()
   local map = self.level.map
   local hasKey = self:hasKey()
@@ -2040,13 +1716,6 @@ function Game:anyMonsterVisible()
   return false
 end
 
--- Only true hostiles (isPlayerAlly's same companion/hireling/thrall
--- allowlist that Game:movePlayer's own bump-attack already respects) -
--- unlike Game:anyMonsterVisible above, which choosePlayerAction uses to gate
--- inventory downtime and deliberately treats ANY visible entity as "not
--- safe to fiddle right now". Game:autoExplore needs the narrower question:
--- a loyal ally standing in plain sight next to the player it always follows
--- must never interrupt an autoexplore run on its own.
 function Game:anyHostileVisible()
   for _, entity in ipairs(self.level.entities) do
     if not isPlayerAlly(entity) and self.visible[self.level.map:index(entity.x, entity.y)] then
@@ -2056,8 +1725,6 @@ function Game:anyHostileVisible()
   return false
 end
 
--- Inventory index of the single best equipment upgrade to put on this turn, or
--- nil. Weapons and armour compare on power, rings on attack plus defence.
 function Game:bestUpgrade()
   local player = self.player
   local weaponPower = player.weapon and player.weapon.power or 0
@@ -2075,9 +1742,6 @@ function Game:bestUpgrade()
   return nil
 end
 
--- The first not-yet-known skill of the player's class whose level requirement
--- is already met, or nil. Learning costs no turn, so the autopilot spends
--- any banked skill point the moment it can, in the tree's fixed order.
 function Game:nextLearnableSkill()
   local player = self.player
   if not player.class or (player.skillPoints or 0) <= 0 then return nil end
@@ -2104,9 +1768,6 @@ function Game:hasHireling()
   return false
 end
 
--- Voluntary, penalty-free release of the live hireling, if any - contrast
--- Mercenaries.payWage's desertion, which fires on its own once loyalty
--- bottoms out from missed wages rather than on the player's own say-so.
 function Game:dismissHireling()
   local name = Mercenaries.dismiss(self)
   if not name then
@@ -2136,70 +1797,40 @@ function Game:choosePlayerAction()
       local contract = self:findInInventory(function(item) return item.kind == Items.CONTRACT end)
       if contract then self:useItem(contract); return end
     end
-    -- Only ever risks a shrine's first, cheapest, least cursed-prone prayer:
-    -- the autopilot is not greedy enough to keep re-praying at rising odds.
     local shrine = self.level:shrineAt(player.x, player.y)
     if shrine and shrine.uses == 0 and player.gold >= Shrines.costFor(shrine) then
       self:prayAt(shrine)
       return
     end
-    -- Restores whatever gear has actually stopped working the moment the
-    -- purse can cover it, same "take it as soon as it's affordable" spirit
-    -- as the shrine check just above.
     local brokenSlot = self:brokenEquippedSlot()
     if brokenSlot and player.gold >= Durability.repairCost(player[brokenSlot]) then
       self:repairEquipped(brokenSlot)
       return
     end
-    -- Free income with no downside, so the autopilot takes it on sight
-    -- rather than weighing it like a shrine's costed, risky prayer.
     local node = self.level:nodeAt(player.x, player.y)
     if node and not Nodes.isFallow(node) then
       self:harvestNode()
       return
     end
-    -- Free protein with no gold cost, so the autopilot butchers a corpse on
-    -- sight same as it strip-mines a node - but only while the meat is
-    -- still good; a rotten one it leaves alone rather than poisoning itself
-    -- for nothing.
     local corpse = self.level:corpseAt(player.x, player.y)
     if corpse and not Corpses.isRotten(corpse) then
       self:butcherCorpse()
       return
     end
-    -- A chest is worth cracking on sight exactly like the node and corpse
-    -- above, but only once it can actually be: an unlocked one is free
-    -- money, and a locked one is only ever tried with a key or lockpick
-    -- already in hand (see Game:openChest). Skipping a locked chest with
-    -- neither on hand keeps the autopilot from parking on it and burning
-    -- every remaining turn on a lock it has no way to open.
     local chest = self.level:chestAt(player.x, player.y)
     if chest and not chest.opened and (not Chests.isLocked(chest) or self:hasKey()
       or self:findInInventory(function(item) return item.kind == Items.LOCKPICK end)) then
       self:openChest()
       return
     end
-    -- A held captive is worth cashing in on sight exactly like the chest
-    -- above: the autopilot always takes the plain gold of Game:sellCaptive
-    -- rather than gambling on Game:ransomCaptive's goodwill or
-    -- Game:interrogateCaptive's map intel, neither of which it is smart
-    -- enough here to weigh against the other.
     local captive = self.level:captiveAt(player.x, player.y)
     if captive then
       self:sellCaptive()
       return
     end
-    -- A rift crossing is only ever attempted at good health: its own pocket
-    -- floor is deliberately tuned harder than the main-track floor the rift
-    -- itself sits on (see branches.lua), so the autopilot never spends its
-    -- one shard gambling into a fight it is not ready for.
     if player.hp >= player.maxHp * 0.8 and self:enterRift() then
       return
     end
-    -- Sheds the cheapest thing it is hauling once genuinely overloaded, but
-    -- only in this same downtime window as the checks above - never instead
-    -- of fighting or fleeing, since a visible monster always skips this
-    -- whole block.
     if self:encumbranceTier() == Encumbrance.OVERLOADED then
       local junk = self:cheapestDroppableItem()
       if junk then self:dropItem(junk); return end
@@ -2217,12 +1848,6 @@ function Game:choosePlayerAction()
   end
   local target = self:adjacentMonster()
   if target then
-    -- A carried net beats the killing blow once the target is already
-    -- battered down to Captives.eligible's own threshold: a capture forgoes
-    -- this kill's xp and essence, but a live captive can still be cashed in
-    -- for gold moments later (see the sell-on-sight check above), so this is
-    -- a trade the autopilot is always willing to make rather than a strict
-    -- loss.
     if Captives.eligible(target) then
       local net = self:findInInventory(function(item) return item.kind == Items.NET end)
       if net then
@@ -2234,9 +1859,6 @@ function Game:choosePlayerAction()
     return
   end
 
-  -- Across a rift, the only objective is its own pocket floor's exit: never
-  -- the main track's descend/ascend goals below, which Game:descend and
-  -- Game:ascend both refuse outright for as long as self.rift holds anyway.
   if self.rift then
     if player.x == self.level.downX and player.y == self.level.downY then
       self:exitRift()
@@ -2257,8 +1879,6 @@ function Game:choosePlayerAction()
     return
   end
 
-  -- Once the amulet is in hand the objective flips: every remaining step
-  -- heads for the up stairs instead of the down stairs, floor by floor.
   local goalX, goalY = self.level.downX, self.level.downY
   if self:hasAmulet() then
     goalX, goalY = self.level.upX, self.level.upY
@@ -2346,39 +1966,18 @@ function Game:endPlayerTurn()
   end
 end
 
--- Spends a skill point to permanently learn `key`, gated by class, level and
--- point balance (see skills.lua). Free of any turn cost.
 function Game:learnSkill(key)
   local success, message = Skills.learn(self.player, key)
   if message then self.log:add(message) end
   return success
 end
 
--- Attempts to use the active skill `key`, forwarding any extra arguments
--- (a target monster, or two for multishot) straight to skills.lua.
 function Game:useSkill(key, ...)
   local success, lines = Skills.use(self, key, ...)
   self.log:addAll(lines)
   return success
 end
 
--- Shared head of any player turn, whether the autopilot or a typed command
--- is about to decide what happens next: runs every other actor up to the
--- player, ticks the status/water/hazard afflictions that land on the
--- player's own turn boundary, and rolls the stun/panic checks that can
--- consume the turn before any action is even chosen. Returns "halt" once
--- play cannot continue this call (already won, or dead at any point along
--- the way - the caller must not act or spend a turn), "skip" once the turn
--- is already spent on a stun or a panic scream, or "ready" once the caller
--- is clear to choose and perform an action of its own.
---
--- Cached on self.turnState until Game:endPlayerTurn clears it, so calling
--- this more than once before a turn is actually spent - the one new
--- situation Game:manualStep introduces, since a rejected typed command
--- spends no turn and its caller is free to just try again - never re-rolls
--- the stun/panic check or re-ticks poison, fire or hunger a second time for
--- a turn the player has not actually finished taking yet. Game:autoStep
--- never revisits an unspent turn this way, so the cache is invisible to it.
 function Game:beginTurn()
   if self.turnState then return self.turnState end
   if self.won then self.turnState = "halt"; return "halt" end
@@ -2409,14 +2008,6 @@ function Game:autoStep()
   self:endPlayerTurn()
 end
 
--- Human-driven counterpart to Game:autoStep: runs the exact same pre-turn
--- checks, then hands `text` to commands.lua instead of letting
--- choosePlayerAction decide on its own. Returns (consumesTurn, message) from
--- Commands.apply so a caller (warren.lua's --play REPL, or a test driving a
--- fixed script of commands) can tell a wasted keystroke from a turn the
--- world actually answered. A stun or panic rolled during beginTurn still
--- spends the turn and ends it exactly like autoStep, without ever looking at
--- `text` - the player was never in control of that turn to begin with.
 function Game:manualStep(text)
   local state = self:beginTurn()
   if state == "halt" then return false, "there is nothing left to do" end
@@ -2425,34 +2016,12 @@ function Game:manualStep(text)
     return true, nil
   end
   local consumesTurn, message = Commands.apply(self, text)
-  -- "explore" (Game:autoExplore, wired up in commands.lua) can advance and
-  -- close several turns entirely on its own inside this one call, unlike
-  -- every other handler here which only ever acts within the single turn
-  -- already opened above - self.turnState is already nil by the time it
-  -- returns, so this must not end an already-ended turn a second time - and
-  -- must never end one at all if the very last thing that happened was a
-  -- halt (self.turnState == "halt"), exactly like Game:autoStep and this
-  -- same function's own "halt" branch above never do either. Every other
-  -- command leaves turnState exactly as beginTurn set it above ("ready"),
-  -- so the extra check below is a no-op for them.
   if consumesTurn and self.turnState == "ready" then self:endPlayerTurn() end
   return consumesTurn, message
 end
 
 local EXPLORE_STEP_CAP = 2000
 
--- Repeats Game:exploreStep/Game:movePlayer turn after turn inside a single
--- call, the way autoexplore works in most other roguelikes, instead of
--- making the player retype "explore" once per step. Built on the exact same
--- beginTurn/endPlayerTurn pair Game:autoStep already drives, so monster AI,
--- status ticks and hazards all run normally on every turn it takes - the
--- only difference from a hand-typed run of single moves is that this stops
--- itself the instant something worth the player's attention shows up,
--- rather than walking on regardless. Returns (consumesTurn, message) in the
--- exact same shape every Commands.apply handler does: consumesTurn is true
--- iff at least one turn was actually spent, so "already interrupted before
--- moving at all" and "an ordinary rejected command" both read the same way
--- to a caller that only checks that first value.
 function Game:autoExplore()
   local steps = 0
   while steps < EXPLORE_STEP_CAP do
@@ -2470,12 +2039,6 @@ function Game:autoExplore()
       local ex, ey = self:exploreStep()
       if not ex then
         if steps == 0 then return false, "there is nothing left to explore" end
-        -- beginTurn above already ran this turn's monster moves and status
-        -- ticks for real, even though there turns out to be nothing left to
-        -- walk toward - so, unlike the steps == 0 case above (nothing at
-        -- all has happened yet, left dangling for a retry within the same
-        -- still-open turn, exactly like a rejected command), this turn must
-        -- still be closed out properly rather than abandoned half-finished.
         self:endPlayerTurn()
         return true, "you have finished exploring"
       end
@@ -2492,39 +2055,6 @@ end
 
 local REST_STEP_CAP = 500
 
--- Repeats a do-nothing turn (Handlers.wait's own move) inside a single call
--- until the player's hp is back to full, the way "rest" works in most other
--- roguelikes, instead of making the player retype "wait" once per turn.
--- Built on the same beginTurn/endPlayerTurn pair Game:autoExplore already
--- drives, so status ticks, hazards and the passive hp regen sources that
--- actually restore hp (a regen ring or artifact, Status.REGEN, favorable
--- weather - see Game:hungerTorchTick and Status.tick) all run exactly as
--- they would turn by turn. Stops itself the instant a hostile comes into
--- sight, the player's hp actually drops, or two full turns in a row pass
--- with the player's hp completely unchanged - the last case catches the
--- common situation where none of those regen sources are active at all, so
--- waiting here would otherwise never do anything but burn turns up to the
--- safety cap below. Returns (consumesTurn, message) in the exact same shape
--- every other handler in commands.lua does, exactly like Game:autoExplore.
---
--- The "no progress" check deliberately waits for a *second* completed turn
--- (steps > 1) rather than judging the very first one: Game:manualStep (the
--- only caller a real player's typed "rest" ever goes through) already calls
--- Game:beginTurn once of its own, before Commands.apply even runs, to check
--- whether the turn is allowed to start at all - so by the time this loop's
--- own first Game:beginTurn call runs, self.turnState may already be primed
--- from that earlier call, and it is a no-op cache hit rather than a fresh
--- tick (see Game:beginTurn's own comment). Any regen this call's Status.tick
--- and Game:hungerTorchTick would otherwise have produced already landed on
--- self.player.hp *before* this function's very first hpBefore snapshot was
--- even taken, so a first-iteration hp==hpBefore reading is inconclusive, not
--- proof that nothing is healing the player - judging it anyway would have
--- reported a perfectly working regen ring as "nothing here is healing you"
--- after a single real turn every time rest is typed in the actual game.
--- Every iteration from the second one on always starts with self.turnState
--- already nil (this loop's own prior Game:endPlayerTurn call clears it), so
--- its own Game:beginTurn call is always a fresh tick there - reliable either
--- way this function is entered, direct or through Game:manualStep.
 function Game:restUntilHealed()
   if self.player.hp >= self.player.maxHp then
     return false, "you are already at full health"
@@ -2558,21 +2088,6 @@ end
 
 local TRAVEL_STEP_CAP = 500
 
--- Repeats Game:playerPathTo/Game:movePlayer turn after turn toward a fixed
--- destination inside a single call, the way "travel"/autotravel works in
--- most other roguelikes (DCSS's `>`, Brogue's travel cursor) - instead of
--- making the player retype a direction once per step to walk back to a spot
--- they already know is safe (the stairs they just left behind). Built on the
--- exact same beginTurn/endPlayerTurn pair Game:autoExplore/Game:restUntilHealed
--- already drive, so monster AI, status ticks and hazards all run normally on
--- every turn it takes. Reuses Game:playerPathTo, the same pathfinder
--- choosePlayerAction already relies on to walk the autopilot toward the
--- stairs turn by turn - this only exposes that existing primitive to a typed
--- command instead of teaching a second way to path anywhere. Stops itself
--- the instant a hostile comes into sight, the player's hp actually drops, the
--- destination is reached, or the route becomes blocked (a monster or a
--- spawned block stepped onto the only way through). Returns (consumesTurn,
--- message) in the exact same shape every other Commands.apply handler does.
 function Game:travelTo(tx, ty)
   if self.player.x == tx and self.player.y == ty then
     return false, "you are already there"
@@ -2595,14 +2110,6 @@ function Game:travelTo(tx, ty)
     if state == "ready" then
       local path = self:playerPathTo(tx, ty)
       if not path or #path < 2 then
-        -- beginTurn above already ran this turn's monster moves and status
-        -- ticks for real (see Game:autoExplore's own "nothing left to
-        -- explore" branch for the identical reasoning), so unlike the
-        -- steps == 0 case below - where nothing has happened yet and the
-        -- turn is left open for a retry, exactly like a rejected command -
-        -- a route that only went dead after steps have already been taken
-        -- must close out the turn that already ran rather than abandon it
-        -- half-finished.
         if steps == 0 then return false, "you cannot find a path there" end
         self:endPlayerTurn()
         return true, "you stop traveling - the way is blocked"
@@ -2657,26 +2164,11 @@ function Game:toData()
     riftReturn = self.riftReturn and {
       depth = self.riftReturn.depth, x = self.riftReturn.x, y = self.riftReturn.y,
     } or nil,
-    -- The arena itself lives outside self.dungeon (see Game:startHorde), so
-    -- without its own snapshot here a mid-arena save would resume from
-    -- self.dungeon:get(self.depth) instead - the ordinary floor the arena
-    -- replaced, abandoned but still cached. horde.wave rides along in the
-    -- same field, since a restored arena with no wave counter would strand
-    -- the player once the surviving wave dies with nothing left to trigger
-    -- the next one.
     horde = self.horde,
     hordeLevel = self.horde and self.level:toData() or nil,
   }
 end
 
--- Expects a complete, current-shape snapshot: every field GameSave's
--- migration chain owns (essence, the skill-tree fields, reputation, sanity,
--- stats.vaultsOpened/setPiecesFound - see the migrations above) must already
--- be present. Game.load guarantees that by running GameSave.load first;
--- Game:toData()'s own output always has them too. A handful of unversioned
--- fields (won, monsterSeq, deepestDepth, the whole stats table) keep their
--- own "or" defaults here since they can be missing outright rather than just
--- missing individual leaves, which the migration chain does not model.
 function Game.fromData(snapshot)
   local game = setmetatable({}, Game)
   game.seed = snapshot.seed

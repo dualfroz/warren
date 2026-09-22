@@ -1,20 +1,13 @@
--- Species-level passive and death-triggered abilities layered on top of the
--- generic AI behaviours in ai.lua. Declared per species in Monsters.species
--- so a bestiary entry fully describes what a creature does, not just how
--- hard it hits or how it moves.
-
 local Status = require("status")
 local Items = require("items")
 local Los = require("los")
 local Combat = require("combat")
 local Durability = require("durability")
 local Momentum = require("momentum")
+local Text = require("text")
 
 local Abilities = {}
 
--- Regeneration: heals `monster.regen` hp at the start of its turn, unless it
--- is actively burning - fire cauterizes the wound faster than it closes.
--- Runs after Status.tick so a fresh burn this same turn still suppresses it.
 function Abilities.regenTick(monster)
   local amount = monster.regen
   if not amount or not monster:isAlive() then return nil end
@@ -25,11 +18,6 @@ function Abilities.regenTick(monster)
   return string.format("%s knits its wounds for %d", monster.name, monster.hp - before)
 end
 
--- On-death bursts: some species release a parting effect on whatever is
--- adjacent to their corpse - including the player - the instant they die.
--- Keyed by the `onDeath` tag on the species, run from Game:awardKill so the
--- burst fires no matter what finished the monster off (melee, spell, thrown
--- weapon, or a status effect ticking it down).
 local bursts = {
   spores = function(game, monster)
     local hit = {}
@@ -43,7 +31,7 @@ local bursts = {
       end
     end
     if #hit == 0 then return nil end
-    return string.format("a burst of spores poisons %s", table.concat(hit, ", "))
+    return string.format("a burst of spores poisons %s", Text.joinNaturally(hit))
   end,
 }
 
@@ -52,14 +40,6 @@ function Abilities.onDeath(game, monster)
   if not burst then return nil end
   return burst(game, monster)
 end
-
--- Turn-start special abilities, keyed by the `ability` tag on the species
--- (Monsters.species) and stamped onto the entity at creation. Abilities.tryAct
--- runs from Game:takeMonsterTurn BEFORE the plain ai.lua behaviour: when it
--- fires it consumes the whole turn and the caller must skip Ai.act; when it
--- returns false the monster falls through to its ordinary ai tag unchanged.
--- Range/cooldown constants live here, not on the species, mirroring how
--- `bursts` above centralises onDeath behaviour by tag rather than by species.
 
 local RANGE = { summon = 6, curse = 5, heal = 5, shriek = 5 }
 local COOLDOWN = { summon = 6, curse = 4, heal = 5, rally = 8, shriek = 6 }
@@ -70,8 +50,6 @@ local EIGHT_DIRS = {
   { 1, 1 }, { 1, -1 }, { -1, 1 }, { -1, -1 },
 }
 
--- The first free, unoccupied, walkable cell next to (x, y), scanning a fixed
--- direction order so results are deterministic for a given map state.
 local function freeAdjacent(game, x, y)
   for _, dir in ipairs(EIGHT_DIRS) do
     local nx, ny = x + dir[1], y + dir[2]
@@ -89,8 +67,6 @@ function Abilities.tickCooldown(monster)
   end
 end
 
--- Necromancer-style ability: raises a fresh minion of `summonSpecies` beside
--- itself, tagged `summonedBy` so the population cap only counts its own brood.
 local function trySummon(game, monster)
   if not game:canSeePlayer(monster, RANGE.summon) then return false end
   local count = 0
@@ -106,14 +82,6 @@ local function trySummon(game, monster)
   return true, string.format("%s calls forth a %s", monster.name, minion.name)
 end
 
--- Shaman-style ability: a ranged bolt that both hurts and weakens the player,
--- withheld at point-blank range so the caster's ai (flee) kites instead. The
--- hurt half runs through the exact same Combat.damage the melee/shoot paths
--- use - mitigated by the player's defense and resistances, breaking Momentum
--- (see momentum.lua's own "claw, breath or ambush" wording - a curse bolt is
--- none of those by name but is that in shape) and wearing armor exactly like
--- monsterShoot's breath already does - rather than a flat, unmitigated
--- subtraction none of that pipeline ever saw.
 local function tryCurse(game, monster)
   if game:playerAdjacent(monster) then return false end
   if not game:canSeePlayer(monster, RANGE.curse) or not game:hasClearShot(monster) then
@@ -129,18 +97,6 @@ local function tryCurse(game, monster)
   return true, string.format("%s curses you for %d", monster.name, dealt)
 end
 
--- Banshee-style ability: a ranged wail that blinds instead of hurting,
--- withheld point-blank exactly like tryCurse so the caster's own "flee" ai
--- keeps it at kiting distance rather than trading blows. Status.BLIND
--- (game.lua's Game:effectiveRadius) was previously only ever inflicted BY
--- the player - a thrown potion, the blind spell, or a shared trap effect -
--- never the other way around; this is the first hostile source of it, the
--- same gap tryShriek's sibling "curse" would leave for WEAKEN if a monster
--- could apply it but nothing here ever did. Duration outlasts the cooldown
--- by one turn on purpose (5 vs 6) so a banshee left free to keep casting
--- keeps you blind almost the whole encounter but not with zero window - the
--- one turn of clear sight between wails is a player's chance to reposition
--- or close the distance before the next howl lands.
 local function tryShriek(game, monster)
   if game:playerAdjacent(monster) then return false end
   if not game:canSeePlayer(monster, RANGE.shriek) or not game:hasClearShot(monster) then
@@ -151,13 +107,6 @@ local function tryShriek(game, monster)
   return true, string.format("%s's wail blinds you", monster.name)
 end
 
--- Cleric-style ability: mends the neediest hurt ally within range and line of
--- sight instead of attacking. Ties break on the lowest hp fraction. Filtered
--- to other.kind == "monster" - the same "hostile" tag every other module
--- (companions.lua/mercenaries.lua/reanimation.lua's own nearestHostile,
--- commands.lua's isVisibleHostile) already keys off of - so a dark cleric
--- mends a fellow monster, never the player's own wounded companion, hireling
--- or thrall sharing the same entities list.
 local function tryHeal(game, monster)
   local best, bestRatio = nil, 1
   for _, other in ipairs(game.level.entities) do
@@ -177,11 +126,6 @@ local function tryHeal(game, monster)
   return true, string.format("%s mends %s for %d", monster.name, best.name, best.hp - before)
 end
 
--- Chieftain-style ability: grants every adjacent, not-yet-buffed ally (and
--- itself) a temporary attack boost. No-op once the whole knot is already lit.
--- Filtered to other.kind == "monster" for the same reason tryHeal above is:
--- without it a chieftain standing next to the player's companion, hireling
--- or thrall would rally that ally of the PLAYER's instead of one of its own.
 local function tryRally(game, monster)
   local buffed = {}
   for _, other in ipairs(game.level.entities) do
@@ -194,13 +138,9 @@ local function tryRally(game, monster)
   if #buffed == 0 then return false end
   Status.apply(monster, Status.STRENGTH, 10, 2)
   monster.cooldown = COOLDOWN.rally
-  return true, string.format("%s rallies %s", monster.name, table.concat(buffed, ", "))
+  return true, string.format("%s rallies %s", monster.name, Text.joinNaturally(buffed))
 end
 
--- Footpad-style ability: not cooldown-gated. Once adjacent it lifts a single
--- non-essential item (never an equipped key or the amulet, since those never
--- sit unequipped in inventory) and flees for the rest of the encounter; a
--- fleeing footpad just keeps running rather than trying again.
 local function trySteal(game, monster)
   if monster.fleeing then
     game:stepMonsterAway(monster, game.player.x, game.player.y)
@@ -222,8 +162,6 @@ end
 
 local dispatch = { summon = trySummon, curse = tryCurse, heal = tryHeal, rally = tryRally, shriek = tryShriek }
 
--- Called once per monster turn, after status ticks and regen but before
--- ai.lua. Returns true when the ability consumed the turn.
 function Abilities.tryAct(game, monster)
   if not monster.ability then return false end
   if monster.ability == "steal" then
@@ -239,10 +177,6 @@ function Abilities.tryAct(game, monster)
   return true
 end
 
--- Slime-style reaction: fired from Game:playerAttack when a hit lands but
--- does not kill. Halves the victim's max hp and spawns a clone at the other
--- half, capped at two splits total (`splitGen`) so a slime cannot be farmed
--- into an unbounded swarm.
 function Abilities.onHit(game, target)
   if target.ability ~= "split" then return nil end
   if not target:isAlive() or target.maxHp < 4 then return nil end

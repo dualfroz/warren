@@ -1,26 +1,3 @@
--- Paid allies hired from a shop's contract rather than bonded for free like
--- companions.lua's charm or spent raising reanimation.lua's thrall. A
--- hireling costs nothing further to take on - its hireCost is already paid
--- the instant the contract itself is bought from a shopkeeper (see
--- shop.lua's CONTRACT pricing) - but it keeps demanding a wage every
--- Mercenaries.WAGE_INTERVAL turns (Game:endPlayerTurn) for as long as it
--- lives. Gold covers it, the hireling's loyalty tops back up; gold falls
--- short, loyalty takes a hit instead, and a hireling whose loyalty bottoms
--- out deserts outright. A merely sulking hireling (loyalty still positive
--- but under Mercenaries.SULKING_THRESHOLD) keeps defending itself if a fight
--- finds it, but stops chasing distant prey or shadowing the player - the
--- one place loyalty reaches into combat, and it does so entirely inside
--- Mercenaries.act rather than through combat.lua or entity.lua, so hiring
--- one never risks a require cycle with either.
--- Only one hireling walks at a time, the same one-bond-at-a-time rule
--- companions.lua keeps for its own charm - but a hireling and a companion
--- may walk together, since they are bonded through entirely separate
--- currencies (gold contract vs. found charm) and tagged with distinct kinds.
--- Hirelings are plain entities on level.entities, exactly like companions
--- and thralls, so they serialize with no special save-format handling
--- beyond the two extra fields (wage, loyalty) entity.lua's toData whitelist
--- adds.
-
 local Entity = require("entity")
 local Combat = require("combat")
 local Los = require("los")
@@ -30,11 +7,11 @@ local Noise = require("noise")
 local Mercenaries = {}
 
 Mercenaries.roster = {
-  { key = "sellsword",  glyph = "w", name = "sellsword",    hp = 24, attack = 6, defense = 2, speed = 100,
+  { key = "sellsword",  glyph = "l", name = "sellsword",    hp = 24, attack = 6, defense = 2, speed = 100,
     sight = 6, hireCost = 60, wage = 14 },
-  { key = "skirmisher", glyph = "k", name = "skirmisher",   hp = 15, attack = 5, defense = 1, speed = 115,
+  { key = "skirmisher", glyph = "y", name = "skirmisher",   hp = 15, attack = 5, defense = 1, speed = 115,
     sight = 8, hireCost = 50, wage = 11 },
-  { key = "medic",      glyph = "m", name = "field medic",  hp = 13, attack = 2, defense = 1, speed = 100,
+  { key = "medic",      glyph = "p", name = "field medic",  hp = 13, attack = 2, defense = 1, speed = 100,
     sight = 6, hireCost = 70, wage = 16, heal = 3 },
 }
 
@@ -54,9 +31,6 @@ Mercenaries.SULKING_THRESHOLD = 30
 
 local ADJACENT = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 }, { 1, 1 }, { 1, -1 }, { -1, 1 }, { -1, -1 } }
 
--- Takes `key` into service on a free cell next to the player, retiring any
--- earlier hireling first. Returns the new hireling, or nil for an unknown
--- roster key or when every cell around the player is blocked.
 function Mercenaries.hire(game, key)
   local spec = Mercenaries.byKey[key]
   if not spec then return nil end
@@ -82,9 +56,6 @@ function Mercenaries.hire(game, key)
   return nil
 end
 
--- Releases the live hireling (if any) with no penalty to either side.
--- Returns its name for the caller to log, or nil when nobody is under
--- contract.
 function Mercenaries.dismiss(game)
   for _, entity in ipairs(game.level.entities) do
     if entity.kind == "hireling" and entity:isAlive() then
@@ -97,12 +68,6 @@ function Mercenaries.dismiss(game)
   return nil
 end
 
--- Charges the live hireling's wage, or shorts it: paid tops loyalty back up
--- (capped at MAX_LOYALTY), unpaid knocks it down by LOYALTY_LOSS_UNPAID and,
--- once it bottoms out, the hireling deserts outright - removed from the
--- level exactly like a voluntary dismiss, just for the opposite reason.
--- Returns a log line, or nil when no hireling is currently in the party to
--- bill.
 function Mercenaries.payWage(game)
   local hireling
   for _, entity in ipairs(game.level.entities) do
@@ -127,10 +92,6 @@ local function adjacent(a, b)
   return math.max(math.abs(a.x - b.x), math.abs(a.y - b.y)) == 1
 end
 
--- Nearest living monster the hireling can see within its species' sight
--- radius, ties broken by ascending id for determinism - the same shape
--- companions.lua's own nearestHostile follows, including its blind clamp
--- (Game:canSeePlayer's own melee-range fallback for a blinded monster).
 local function nearestHostile(game, hireling)
   local spec = Mercenaries.byKey[hireling.species]
   local sight = spec.sight
@@ -149,9 +110,6 @@ local function nearestHostile(game, hireling)
   return best
 end
 
--- A field medic mends its employer a little on any turn it does not spend
--- fighting or sulking - the only roster entry with a passive off-turn
--- effect, the same shape companions.lua's hearth sprite follows.
 local function tendPlayer(game, hireling)
   local spec = Mercenaries.byKey[hireling.species]
   if spec.heal and game.player.hp < game.player.maxHp then
@@ -159,12 +117,6 @@ local function tendPlayer(game, hireling)
   end
 end
 
--- The hireling's full turn: engage the nearest visible monster if one is in
--- reach regardless of loyalty, but once loyalty has sunk to
--- SULKING_THRESHOLD or below, stop there - no chasing a target it can see
--- but not yet reach, no shadowing the player, no tending. A loyal hireling
--- gets the full three-branch shape companions.act and Reanimation.act both
--- follow: engage, close in, or stay within a step of the player.
 function Mercenaries.act(game, hireling)
   if game:allyActsConfused(hireling) then return end
   local target = nearestHostile(game, hireling)

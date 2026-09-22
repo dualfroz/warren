@@ -1,15 +1,5 @@
--- Elite monsters: rare, affixed variants of the ordinary bestiary. Builder
--- rolls promotion once a floor's entities are already fully placed (appended
--- dead last in Builder.build, after every other placement - artifacts, the
--- boss, the quest board - so it can never perturb an earlier system's rng
--- sequence, exactly like those do for their own rolls). An elite still rides
--- the same ai.lua/abilities.lua dispatch and scheduler as any other creature;
--- only its stats, its name, and the on-hit/on-death/lifesteal hooks Game
--- wires in separately set it apart from a plain spawn of the same species.
--- A floor deep enough for a second affix ("champion") draws it from the
--- remaining pool, so a champion never doubles up on the same one.
-
 local Resistances = require("resistances")
+local Text = require("text")
 
 local Elites = {}
 
@@ -32,8 +22,6 @@ for _, affix in ipairs(Elites.affixes) do
   Elites.byKey[affix.key] = affix
 end
 
--- Elemental types a "warded" roll can pick from - physical is excluded since
--- every hit already respects the plain attack/defense floor in combat.lua.
 local RESISTABLE = {
   Resistances.FIRE, Resistances.COLD, Resistances.POISON,
   Resistances.LIGHTNING, Resistances.ARCANE,
@@ -66,15 +54,10 @@ local function applyAffix(entity, affix, rng)
   entity.name = affix.name .. " " .. entity.name
 end
 
--- Eligible for promotion: a plain bestiary spawn, never a boss (already the
--- rarer, sturdier variant) or the passive shopkeeper.
 function Elites.eligible(entity)
   return entity.kind == "monster" and not entity.isBoss and entity.ai ~= "vend"
 end
 
--- Rolled once per eligible monster after a floor's entities are already
--- placed. Mutates `entity` in place; a no-op below Elites.MIN_DEPTH, on an
--- ineligible entity, or when the roll simply misses.
 function Elites.maybePromote(rng, entity, depth)
   if depth < Elites.MIN_DEPTH or not Elites.eligible(entity) then return end
   if not rng:chance(1, 6) then return end
@@ -93,8 +76,6 @@ function Elites.maybePromote(rng, entity, depth)
   entity.eliteTier = #entity.eliteAffixes >= 2 and "champion" or "elite"
 end
 
--- The first volatile affix on `entity`, if any - the death burst
--- Game:awardKill triggers right after Abilities.onDeath.
 function Elites.explosionFor(entity)
   if not entity.eliteAffixes then return nil end
   for _, key in ipairs(entity.eliteAffixes) do
@@ -104,9 +85,6 @@ function Elites.explosionFor(entity)
   return nil
 end
 
--- The status rider (if any) a hit landed by `entity` should apply to its
--- victim - same shape as a weapon affix's onHit (see affixes.lua), so Game
--- can hand it straight to Status.apply.
 function Elites.onHitRider(entity)
   if not entity.eliteAffixes then return nil end
   for _, key in ipairs(entity.eliteAffixes) do
@@ -116,8 +94,6 @@ function Elites.onHitRider(entity)
   return nil
 end
 
--- Fraction of dealt damage `entity` heals back on a hit it lands, summed
--- across its affixes (never more than one vampiric roll in practice).
 function Elites.lifestealFraction(entity)
   if not entity.eliteAffixes then return 0 end
   local total = 0
@@ -128,17 +104,12 @@ function Elites.lifestealFraction(entity)
   return total
 end
 
--- Bonus xp a felled elite is worth on top of its plain species reward: half
--- again for a single-affix elite, a full second helping for a champion.
 function Elites.xpBonus(entity, baseXp)
   if not entity.elite then return 0 end
   local mult = entity.eliteTier == "champion" and 1.0 or 0.5
   return math.floor(baseXp * mult)
 end
 
--- Fired from Game:awardKill right after Abilities.onDeath: a volatile
--- elite's corpse bursts, scorching the player and any companion or monster
--- adjacent to it (itself excluded) for its cataloged damage and type.
 function Elites.onDeath(game, monster)
   local affix = Elites.explosionFor(monster)
   if not affix then return nil end
@@ -156,7 +127,7 @@ function Elites.onDeath(game, monster)
     end
   end
   if #hit == 0 then return nil end
-  return string.format("%s bursts, scorching %s", monster.name, table.concat(hit, ", "))
+  return string.format("%s bursts, scorching %s", monster.name, Text.joinNaturally(hit))
 end
 
 return Elites

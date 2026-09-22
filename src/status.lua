@@ -1,13 +1,6 @@
--- Data-driven status effects. Each effect ticks once when its host takes a turn:
--- damage-over-time drains hp, regeneration restores it, stun skips the action,
--- and haste/slow/strength feed modifiers into speed and combat. Effects are
--- plain data on entity.statuses so they serialize without special handling.
--- Poison and burning route their tick damage through resistances.lua, so a
--- poison-immune undead shrugs off venom entirely and a fire-resistant hide
--- only smoulders at half the usual potency.
-
 local Resistances = require("resistances")
 local Conductivity = require("conductivity")
+local Text = require("text")
 
 local Status = {}
 
@@ -25,16 +18,9 @@ Status.CONFUSE = "confuse"
 Status.BLIND = "blind"
 Status.LEVITATE = "levitate"
 
--- Odds, rolled fresh each turn a confused actor tries to act, that its own
--- chosen direction gets overridden by a random one instead - see
--- Game:movePlayer's stumble branch and Ai.act's mirror of it for monsters.
 Status.CONFUSE_NUMERATOR = 1
 Status.CONFUSE_DENOMINATOR = 2
 
--- Debuffs a cleansing effect (see effects.lua's "cure" handler) is allowed to
--- strip early. Buffs (REGEN/HASTE/STRENGTH/SHIELD/LEVITATE) are deliberately
--- excluded - a curative should not also strip a buff the entity chose to be
--- carrying.
 Status.HOSTILE = {
   [Status.POISON] = true,
   [Status.BURNING] = true,
@@ -48,7 +34,7 @@ Status.HOSTILE = {
 
 Status.defs = {
   [Status.POISON] = {
-    glyph = "p",
+    glyph = "p", noun = "poison",
     tick = function(entity, potency)
       local dealt = Resistances.apply(entity, potency, Resistances.POISON)
       entity.hp = entity.hp - dealt
@@ -60,7 +46,7 @@ Status.defs = {
     end,
   },
   [Status.BURNING] = {
-    glyph = "b",
+    glyph = "b", noun = "burning",
     tick = function(entity, potency)
       local dealt = Conductivity.applyFire(entity, potency)
       entity.hp = entity.hp - dealt
@@ -69,7 +55,7 @@ Status.defs = {
     end,
   },
   [Status.REGEN] = {
-    glyph = "r",
+    glyph = "r", noun = "regeneration",
     tick = function(entity, potency)
       local before = entity.hp
       entity.hp = math.min(entity.maxHp, entity.hp + potency)
@@ -81,38 +67,30 @@ Status.defs = {
       return nil
     end,
   },
-  [Status.STUN] = { glyph = "s", skipsTurn = true },
-  [Status.HASTE] = { glyph = "h", speed = 60 },
-  [Status.SLOW] = { glyph = "l", speed = -50 },
-  [Status.STRENGTH] = { glyph = "S", attack = 3 },
-  [Status.SHIELD] = { glyph = "d", defense = 4 },
-  [Status.WEAKEN] = { glyph = "c", attack = -3 },
-  -- No tick or stat modifier of its own: infighting.lua reads Status.has
-  -- directly to decide whether a monster's turn goes to Ai.act at all.
-  [Status.DISCORD] = { glyph = "o" },
-  -- No tick or stat modifier of its own either: Game:movePlayer and Ai.act
-  -- both read Status.has directly, at the point they would otherwise commit
-  -- to a chosen direction, to roll whether that direction gets overridden.
-  [Status.CONFUSE] = { glyph = "f" },
-  -- No tick or stat modifier of its own: Game:effectiveRadius and
-  -- Game:canSeePlayer both read Status.has directly, clamping vision instead
-  -- of touching hp or combat stats - confuse scrambles where you go, blind
-  -- scrambles what you can tell is there in the first place.
-  [Status.BLIND] = { glyph = "!" },
-  -- No tick or stat modifier of its own: Game:checkTerrainFor and
-  -- Game:checkTrapFor (plus movePlayer's own trap check) read Status.has
-  -- directly, letting a levitating entity drift clear of lava, a chasm's
-  -- drop, an ice tile's slide, and any ground-pressure trap without ever
-  -- touching whatever would otherwise trigger them.
-  [Status.LEVITATE] = { glyph = "y" },
+  [Status.STUN] = { glyph = "s", noun = "stun", skipsTurn = true },
+  [Status.HASTE] = { glyph = "h", noun = "haste", speed = 60 },
+  [Status.SLOW] = { glyph = "l", noun = "slowness", speed = -50 },
+  [Status.STRENGTH] = { glyph = "S", noun = "strength", attack = 3 },
+  [Status.SHIELD] = { glyph = "d", noun = "shield", defense = 4 },
+  [Status.WEAKEN] = { glyph = "c", noun = "weakness", attack = -3 },
+  [Status.DISCORD] = { glyph = "o", noun = "discord" },
+  [Status.CONFUSE] = { glyph = "f", noun = "confusion" },
+  [Status.BLIND] = { glyph = "!", noun = "blindness" },
+  [Status.LEVITATE] = { glyph = "y", noun = "levitation" },
 }
 
--- Records `kind` as active on `entity` for `duration` more ticks at `potency`,
--- or refreshes an already-active instance of the same kind to whichever of
--- the two durations and potencies is stronger. A soaked entity's own
--- dampness (see conductivity.lua) refuses a BURNING application outright,
--- before anything is recorded - returns nil and leaves entity.statuses
--- untouched, exactly as if the call had never been made.
+Status.joinNaturally = Text.joinNaturally
+
+function Status.noun(kind)
+  return Status.defs[kind].noun
+end
+
+function Status.describe(kinds)
+  local nouns = {}
+  for i, kind in ipairs(kinds) do nouns[i] = Status.noun(kind) end
+  return Status.joinNaturally(nouns)
+end
+
 function Status.apply(entity, kind, duration, potency)
   if kind == Status.BURNING and Conductivity.resistsIgnition(entity) then
     return nil
@@ -137,8 +115,6 @@ function Status.has(entity, kind)
   return false
 end
 
--- Strips one named status outright, independent of its remaining duration.
--- Returns whether anything was actually removed.
 function Status.remove(entity, kind)
   for i, active in ipairs(entity.statuses) do
     if active.kind == kind then
@@ -149,10 +125,6 @@ function Status.remove(entity, kind)
   return false
 end
 
--- Strips every active status listed in Status.HOSTILE (poison, burning,
--- stun, slow, weaken, discord, confuse, blind), leaving buffs untouched.
--- Returns the kinds actually removed, in the order they were active, for
--- callers that want to report exactly what a cleansing effect lifted.
 function Status.cureHostile(entity)
   local removed = {}
   local kept = {}
@@ -167,8 +139,6 @@ function Status.cureHostile(entity)
   return removed
 end
 
--- Advances every effect one step, applying its tick and dropping expired ones.
--- Returns the log lines produced this step, in effect order.
 function Status.tick(entity)
   local lines = {}
   local kept = {}

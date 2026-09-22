@@ -1,7 +1,3 @@
--- Central registry of tile glyphs and their terrain properties. Every module
--- that needs to know whether a cell can be stood on, blocks sight, or is a door
--- consults this table instead of hardcoding glyph comparisons.
-
 local Tiles = {}
 
 Tiles.WALL = "#"
@@ -14,7 +10,7 @@ Tiles.DOOR_LOCKED = "x"
 Tiles.TRAP = "^"
 Tiles.WATER = "~"
 Tiles.RUBBLE = ":"
-Tiles.LAVA = "%"
+Tiles.LAVA = "}"
 Tiles.CHASM = "V"
 Tiles.ICE = "-"
 Tiles.LEVER = "H"

@@ -1,9 +1,3 @@
--- Mana-fuelled spellbook. Spells are learned permanently from tomes (see
--- Items.TOME) and cast by spending mana from a pool that regenerates each
--- player turn. Targeted spells additionally need line of sight and range,
--- checked here before any mana is spent so a bad cast is free. Damage and
--- teleport spells reach into the game the same way potion/scroll effects do.
-
 local Los = require("los")
 local Status = require("status")
 local Skills = require("skills")
@@ -16,9 +10,6 @@ local Spells = {}
 
 local DIRS4 = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }
 
--- Every walkable, unoccupied cell within `radius` orthogonal steps of the
--- caster, excluding the caster's own cell. Used by blink so a short-range
--- teleport only ever lands somewhere the caster could in principle walk to.
 local function reachableWithin(game, caster, radius)
   local map = game.level.map
   local start = map:index(caster.x, caster.y)
@@ -73,21 +64,19 @@ Spells.catalog = {
       return { string.format("you mend for %d", caster.hp - before) }
     end,
   },
-  -- Mirrors effects.lua's "cure" potion handler (both lift disease and every
-  -- Status.HOSTILE debuff) but reachable without needing the item on hand -
-  -- until now the only way to shed poison/burning/stun/slow/weaken/discord/
-  -- confuse/blind was to survive until they expired on their own.
   cleanse = {
     name = "cleansing ward", cost = 5, targeted = false,
     cast = function(_, caster)
       local diseaseCured = Disease.cure(caster)
       local lifted = Status.cureHostile(caster)
-      if diseaseCured and #lifted > 0 then
-        return { string.format("your affliction lifts, and the %s fades", table.concat(lifted, ", ")) }
+      local liftedList = #lifted > 0 and Status.describe(lifted)
+      local fades = #lifted == 1 and "fades" or "fade"
+      if diseaseCured and liftedList then
+        return { string.format("your affliction lifts, and the %s %s", liftedList, fades) }
       elseif diseaseCured then
         return { "your affliction lifts" }
-      elseif #lifted > 0 then
-        return { string.format("the %s fades", table.concat(lifted, ", ")) }
+      elseif liftedList then
+        return { string.format("the %s %s", liftedList, fades) }
       end
       return { "you feel a faint tingle, but had nothing to cleanse" }
     end,
@@ -116,12 +105,6 @@ Spells.catalog = {
       return {}
     end,
   },
-  -- Fractures the target's mind for a few turns: while it lasts, the
-  -- target attacks whatever creature stands nearest it - ally or foe,
-  -- including the caster's own companion/hireling/thrall if one strays
-  -- close enough - instead of chasing the caster (see infighting.lua). No
-  -- direct damage of its own; the value is entirely in redirecting a
-  -- threat, or turning a cluster of monsters against itself.
   discord = {
     name = "discord", cost = 5, targeted = true, range = 6,
     cast = function(_, _, target)
@@ -129,10 +112,6 @@ Spells.catalog = {
       return { string.format("%s's mind fractures with discord", target.name) }
     end,
   },
-  -- Scrambles the target's own sense of direction for a few turns (see
-  -- status.lua's Status.CONFUSE, and its mirror in Game:movePlayer/Ai.act) -
-  -- a lucky roll can send a dangerous chaser stumbling into a wall, a lava
-  -- pool, or one of its own allies instead of at the caster.
   confuse = {
     name = "confusing hex", cost = 4, targeted = true, range = 5,
     cast = function(_, _, target)
@@ -140,12 +119,6 @@ Spells.catalog = {
       return { string.format("%s's senses reel with confusion", target.name) }
     end,
   },
-  -- Snuffs the target's sight down to melee range for a few turns (see
-  -- status.lua's Status.BLIND, folded into Game:effectiveRadius/canSeePlayer)
-  -- - unlike confuse, which garbles the target's own movement, a blinded
-  -- monster keeps walking straight at its last known heading and simply
-  -- stops noticing anything past arm's reach, useful against archers and
-  -- casters whose whole threat depends on seeing the caster from a distance.
   blind = {
     name = "veil of shadow", cost = 4, targeted = true, range = 5,
     cast = function(_, _, target)
@@ -153,12 +126,6 @@ Spells.catalog = {
       return { string.format("a veil of shadow falls over %s's eyes", target.name) }
     end,
   },
-  -- Saps the target's fighting strength for a few turns (see status.lua's
-  -- Status.WEAKEN). Until now WEAKEN only ever flowed toward the player - a
-  -- shaman's ranged curse, a cursed shrine's backfired prayer - with no way
-  -- for the player to return the favor against a monster; this spell is
-  -- that missing direction, shaped exactly like confuse/blind above (no
-  -- direct damage, just a debuff riding on Status.apply).
   weaken = {
     name = "withering hex", cost = 4, targeted = true, range = 5,
     cast = function(_, _, target)
@@ -166,11 +133,6 @@ Spells.catalog = {
       return { string.format("%s's strength withers", target.name) }
     end,
   },
-  -- Rewrites the target's body outright rather than damaging or debuffing
-  -- it (see polymorph.lua). A pricier cast than any other targeted spell
-  -- here, since a lucky roll can turn a real threat into something the
-  -- caster can safely ignore - and an unlucky one can just as easily make
-  -- it worse, the same double-edged risk a shrine's backfired prayer carries.
   polymorph = {
     name = "polymorph", cost = 9, targeted = true, range = 5,
     cast = function(game, _, target)
@@ -183,11 +145,6 @@ Spells.catalog = {
       return { string.format("%s convulses and reforms into a %s", oldName, spec.name) }
     end,
   },
-  -- A self-buff shaped exactly like shield, but see status.lua's
-  -- Status.LEVITATE for the payoff: for as long as it lasts, the caster
-  -- drifts clear of lava, a chasm's drop, an ice tile's slide, and any
-  -- ground-pressure trap (Game:checkTerrainFor/checkTrapFor) instead of
-  -- soaking a hit.
   levitate = {
     name = "levitation", cost = 5, targeted = false,
     cast = function(_, caster)
@@ -226,9 +183,6 @@ function Spells.learn(caster, key)
   return true
 end
 
--- Attempts to cast `key` on behalf of `caster`. Returns (true, lines) on a
--- successful cast, or (false, lines) with an explanatory line and no state
--- changed - no mana spent, no cooldown, nothing - on failure.
 function Spells.cast(game, caster, key, target)
   local spell = Spells.catalog[key]
   if not spell then return false, { "you don't know that spell" } end

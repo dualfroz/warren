@@ -1,8 +1,3 @@
--- Items are plain data tables so they serialize without metatable handling.
--- Potions and scrolls carry an effect key resolved by the effects module; gear
--- modifies effective stats when equipped and may carry an affix. Potion and
--- scroll type catalogs drive the identification system.
-
 local Durability = require("durability")
 
 local Items = {}
@@ -30,13 +25,33 @@ Items.CONTRACT = "contract"
 Items.NET = "net"
 Items.RIFTSTONE = "riftstone"
 
--- Catalogs list every distinct type in a fixed order; identification assigns a
--- random appearance to each entry, so the order here must stay stable.
--- New entries append at the end: identify.lua assigns appearances by index
--- into this list, so inserting anywhere else would reshuffle which look
--- every earlier, already-loot-tested effect gets for a given seed. There are
--- exactly as many potionLooks in identify.lua as there are entries here, so
--- adding one more type here requires a matching look there too.
+Items.glyphs = {
+  [Items.POTION] = "!",
+  [Items.SCROLL] = "?",
+  [Items.WEAPON] = "/",
+  [Items.ARMOR] = "[",
+  [Items.RING] = "=",
+  [Items.FOOD] = "%",
+  [Items.KEY] = "(",
+  [Items.TOME] = "&",
+  [Items.AMULET] = "\"",
+  [Items.BOW] = ")",
+  [Items.AMMO] = "{",
+  [Items.GOLD] = "$",
+  [Items.GEM] = "*",
+  [Items.CHARM] = "]",
+  [Items.KIT] = "t",
+  [Items.HERB] = "Y",
+  [Items.RUNE] = "1",
+  [Items.PICK] = "\\",
+  [Items.LOCKPICK] = "J",
+  [Items.CONTRACT] = "P",
+  [Items.NET] = "F",
+  [Items.RIFTSTONE] = "R",
+}
+
+local glyphs = Items.glyphs
+
 Items.potionTypes = {
   { effect = "heal",     name = "potion of healing",   power = 10 },
   { effect = "poison",   name = "potion of poison",    power = 3 },
@@ -63,7 +78,7 @@ function Items.typeId(item)
 end
 
 function Items.potion(power)
-  return { kind = Items.POTION, effect = "heal", name = "potion of healing", glyph = "!", power = power }
+  return { kind = Items.POTION, effect = "heal", name = "potion of healing", glyph = glyphs[Items.POTION], power = power }
 end
 
 function Items.potionOf(effect, power)
@@ -71,7 +86,8 @@ function Items.potionOf(effect, power)
   for _, entry in ipairs(Items.potionTypes) do
     if entry.effect == effect then spec = entry end
   end
-  return { kind = Items.POTION, effect = effect, name = spec.name, glyph = "!", power = power or spec.power }
+  return { kind = Items.POTION, effect = effect, name = spec.name, glyph = glyphs[Items.POTION],
+    power = power or spec.power }
 end
 
 function Items.scroll(effect)
@@ -79,102 +95,81 @@ function Items.scroll(effect)
   for _, entry in ipairs(Items.scrollTypes) do
     if entry.effect == effect then spec = entry end
   end
-  return { kind = Items.SCROLL, effect = effect, name = spec.name, glyph = "?" }
+  return { kind = Items.SCROLL, effect = effect, name = spec.name, glyph = glyphs[Items.SCROLL] }
 end
 
 function Items.weapon(name, power)
-  return { kind = Items.WEAPON, name = name, glyph = "/", power = power,
+  return { kind = Items.WEAPON, name = name, glyph = glyphs[Items.WEAPON], power = power,
     durability = Durability.MAX, maxDurability = Durability.MAX }
 end
 
 function Items.armor(name, power)
-  return { kind = Items.ARMOR, name = name, glyph = "[", power = power,
+  return { kind = Items.ARMOR, name = name, glyph = glyphs[Items.ARMOR], power = power,
     durability = Durability.MAX, maxDurability = Durability.MAX }
 end
 
 function Items.ring(name, attack, defense)
-  return { kind = Items.RING, name = name, glyph = "=", attack = attack or 0, defense = defense or 0 }
+  return { kind = Items.RING, name = name, glyph = glyphs[Items.RING], attack = attack or 0, defense = defense or 0 }
 end
 
 function Items.food(name, nutrition)
-  return { kind = Items.FOOD, name = name, glyph = "%", nutrition = nutrition }
+  return { kind = Items.FOOD, name = name, glyph = glyphs[Items.FOOD], nutrition = nutrition }
 end
 
 function Items.key(name)
-  return { kind = Items.KEY, name = name or "iron key", glyph = "*" }
+  return { kind = Items.KEY, name = name or "iron key", glyph = glyphs[Items.KEY] }
 end
 
 function Items.tome(spellKey, name)
-  return { kind = Items.TOME, spell = spellKey, name = name or ("tome of " .. spellKey), glyph = "&" }
+  return { kind = Items.TOME, spell = spellKey, name = name or ("tome of " .. spellKey), glyph = glyphs[Items.TOME] }
 end
 
 function Items.amulet(name)
-  return { kind = Items.AMULET, name = name or "Amulet of Warren", glyph = "\"" }
+  return { kind = Items.AMULET, name = name or "Amulet of Warren", glyph = glyphs[Items.AMULET] }
 end
 
 function Items.bow(name, power, range)
-  return { kind = Items.BOW, name = name, glyph = "}", power = power, range = range,
+  return { kind = Items.BOW, name = name, glyph = glyphs[Items.BOW], power = power, range = range,
     durability = Durability.MAX, maxDurability = Durability.MAX }
 end
 
 function Items.ammo(name, count)
-  return { kind = Items.AMMO, name = name or "arrow", glyph = "^", count = count }
+  return { kind = Items.AMMO, name = name or "arrow", glyph = glyphs[Items.AMMO], count = count }
 end
 
 function Items.gold(amount)
-  return { kind = Items.GOLD, name = "gold", glyph = "$", amount = amount }
+  return { kind = Items.GOLD, name = "gold", glyph = glyphs[Items.GOLD], amount = amount }
 end
 
 function Items.charm(companionKey, name)
-  return { kind = Items.CHARM, companion = companionKey, name = name or ("charm of the " .. companionKey), glyph = "0" }
+  return { kind = Items.CHARM, companion = companionKey, name = name or ("charm of the " .. companionKey),
+    glyph = glyphs[Items.CHARM] }
 end
 
 function Items.kit(effect)
-  return { kind = Items.KIT, effect = effect, name = effect .. " trap kit", glyph = "t" }
+  return { kind = Items.KIT, effect = effect, name = effect .. " trap kit", glyph = glyphs[Items.KIT] }
 end
 
--- A shopkeeper's contract to hire mercenaries.lua's `key` roster entry: paid
--- for outright at the shop's own price (see shop.lua's CONTRACT branch), so
--- using it just takes the mercenary on rather than spending any further
--- gold - unlike a trap kit above, which is free to find but costs nothing
--- to use either.
 function Items.contract(key, name)
-  return { kind = Items.CONTRACT, hireling = key, name = name or (key .. " contract"), glyph = "P" }
+  return { kind = Items.CONTRACT, hireling = key, name = name or (key .. " contract"), glyph = glyphs[Items.CONTRACT] }
 end
 
 function Items.pick(name, uses)
-  return { kind = Items.PICK, name = name or "miner's pick", glyph = "\\", uses = uses or 20 }
+  return { kind = Items.PICK, name = name or "miner's pick", glyph = glyphs[Items.PICK], uses = uses or 20 }
 end
 
--- A single-use gamble against a locked chest's own lock (see chests.lua's
--- Chests.pick) - consumed win or lose, unlike the miner's pick above which
--- wears down over many swings instead of vanishing in one.
 function Items.lockpick(name)
-  return { kind = Items.LOCKPICK, name = name or "lockpick", glyph = ";" }
+  return { kind = Items.LOCKPICK, name = name or "lockpick", glyph = glyphs[Items.LOCKPICK] }
 end
 
--- A weighted throwing net (see captives.lua's Captives.resolve): unlike a
--- thrown weapon above, which is aimed to hurt, a net is aimed to subdue a
--- battered wild monster alive instead of finishing it off - and is spent
--- from the inventory whether or not it actually holds, exactly like a
--- lockpick's own single gamble.
 function Items.net(name)
-  return { kind = Items.NET, name = name or "net", glyph = "o" }
+  return { kind = Items.NET, name = name or "net", glyph = glyphs[Items.NET] }
 end
 
--- Fuel for a single rift crossing (see branches.lua): unlike a key, which
--- only ever opens the one lock it was cut for, a shard is spent the instant
--- Game:enterRift first stabilizes a given rift, not on every crossing after -
--- so carrying more than one only ever matters if the run finds more than one
--- rift to open.
 function Items.riftstone(name)
-  return { kind = Items.RIFTSTONE, name = name or "rift shard", glyph = "R" }
+  return { kind = Items.RIFTSTONE, name = name or "rift shard", glyph = glyphs[Items.RIFTSTONE] }
 end
 
--- Adds/removes a weapon or armor's power using its own durability-aware
--- effective power (see durability.lua) rather than its raw `power` field, so
--- unequipping and later re-equipping an already-broken piece never bakes
--- power back in for free.
 function Items.equipWeapon(item, entity)
   if entity.weapon then
     entity.attack = entity.attack - Durability.effectivePower(entity.weapon)
@@ -225,9 +220,6 @@ function Items.equipRing(item, entity)
   return item.attack + item.defense
 end
 
--- Applies a self-contained item to an entity and returns the magnitude of its
--- effect. Effects that need the wider world (teleport, mapping, fireball) are
--- routed through the effects module by the game instead.
 function Items.use(item, entity)
   if item.kind == Items.POTION and item.effect == "heal" then
     local before = entity.hp
